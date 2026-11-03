@@ -1,0 +1,132 @@
+[package]
+name = "smartnet-engine-tree"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-chain-state = { workspace = true, features = ["rayon"] }
+smartnet-chainspec = { workspace = true, optional = true }
+smartnet-consensus.workspace = true
+smartnet-db.workspace = true
+smartnet-engine-primitives = { workspace = true, features = ["std"] }
+smartnet-execution-cache.workspace = true
+smartnet-errors.workspace = true
+smartnet-file-tier.workspace = true
+smartnet-execution-types.workspace = true
+smartnet-evm = { workspace = true, features = ["metrics"] }
+smartnet-payload-builder.workspace = true
+smartnet-payload-primitives.workspace = true
+smartnet-primitives-traits = { workspace = true, features = ["rayon", "dashmap"] }
+smartnet-ethereum-primitives.workspace = true
+smartnet-provider.workspace = true
+smartnet-prune.workspace = true
+smartnet-revm = { workspace = true, features = ["optional-balance-check"] }
+smartnet-stages-api.workspace = true
+smartnet-tasks = { workspace = true, features = ["rayon"] }
+smartnet-timing.workspace = true
+smartnet-trie-parallel.workspace = true
+smartnet-trie-sparse = { workspace = true, features = ["std", "metrics"] }
+smartnet-trie.workspace = true
+smartnet-trie-common.workspace = true
+smartnet-trie-db.workspace = true
+
+# alloy
+alloy-evm.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-eip7928 = { workspace = true, features = ["rlp"] }
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-rpc-types-engine.workspace = true
+
+revm.workspace = true
+revm-primitives.workspace = true
+
+# common
+futures.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros"] }
+moka = { workspace = true, features = ["sync"] }
+
+# metrics
+metrics.workspace = true
+smartnet-metrics.workspace = true
+
+# misc
+indexmap.workspace = true
+schnellru.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+derive_more.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true
+
+# optional deps for test-utils
+smartnet-prune-types = { workspace = true, optional = true }
+smartnet-stages = { workspace = true, optional = true }
+smartnet-tracing = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+# upstream-derived
+smartnet-evm-ethereum = { workspace = true, features = ["test-utils"] }
+smartnet-chain-state = { workspace = true, features = ["test-utils"] }
+smartnet-chainspec.workspace = true
+smartnet-ethereum-consensus.workspace = true
+metrics-util = { workspace = true, features = ["debugging"] }
+smartnet-evm = { workspace = true, features = ["test-utils"] }
+smartnet-prune-types.workspace = true
+smartnet-stages = { workspace = true, features = ["test-utils"] }
+smartnet-testing-utils.workspace = true
+smartnet-tracing.workspace = true
+# revm
+revm-state.workspace = true
+
+assert_matches.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+tempfile.workspace = true
+flate2.workspace = true
+
+[features]
+test-utils = [
+    "smartnet-chain-state/test-utils",
+    "smartnet-chainspec/test-utils",
+    "smartnet-consensus/test-utils",
+    "smartnet-db/test-utils",
+    "smartnet-evm/test-utils",
+    "smartnet-payload-builder/test-utils",
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-provider/test-utils",
+    "smartnet-prune-types",
+    "smartnet-prune-types?/test-utils",
+    "smartnet-revm/test-utils",
+    "smartnet-stages-api/test-utils",
+    "smartnet-stages/test-utils",
+    "smartnet-tracing",
+    "smartnet-trie/test-utils",
+    "smartnet-trie-common/test-utils",
+    "smartnet-trie-db/test-utils",
+    "smartnet-trie-sparse/test-utils",
+    "smartnet-prune-types?/test-utils",
+    "smartnet-trie-parallel/test-utils",
+    "smartnet-ethereum-primitives/test-utils",
+    "smartnet-evm-ethereum/test-utils",
+    "smartnet-tasks/test-utils",
+    "smartnet-execution-cache/test-utils",
+]
+trie-debug = [
+    "smartnet-trie-sparse/trie-debug",
+    "smartnet-trie-parallel/trie-debug",
+    "smartnet-engine-primitives/trie-debug",
+    "dep:serde_json",
+]
+

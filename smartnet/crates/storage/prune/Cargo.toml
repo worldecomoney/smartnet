@@ -1,0 +1,52 @@
+[package]
+name = "smartnet-prune"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pruning implementation"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-codecs.workspace = true
+smartnet-chain-state.workspace = true
+smartnet-db-api.workspace = true
+smartnet-errors.workspace = true
+smartnet-provider.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-config.workspace = true
+smartnet-prune-types.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-stages-types.workspace = true
+smartnet-tasks.workspace = true
+
+# ethereum
+alloy-eips.workspace = true
+
+# metrics
+smartnet-metrics.workspace = true
+metrics.workspace = true
+alloy-primitives.workspace = true
+
+# misc
+tracing.workspace = true
+thiserror.workspace = true
+itertools.workspace = true
+rayon.workspace = true
+tokio.workspace = true
+rustc-hash.workspace = true
+
+[dev-dependencies]
+# upstream-derived
+smartnet-ethereum-primitives.workspace = true
+smartnet-stages = { workspace = true, features = ["test-utils"] }
+smartnet-primitives-traits = { workspace = true, features = ["arbitrary"] }
+smartnet-testing-utils.workspace = true
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-tracing.workspace = true
+
+assert_matches.workspace = true

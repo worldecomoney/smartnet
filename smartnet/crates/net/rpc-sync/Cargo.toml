@@ -1,0 +1,38 @@
+[package]
+name = "smartnet-net-rpc-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "RPC-based block sync with DNS-gated fixed peer list (SmartNet)"
+
+[lints]
+workspace = true
+
+[dependencies]
+# ethereum
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-provider.workspace = true
+alloy-rpc-types-eth.workspace = true
+
+# async
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+futures.workspace = true
+
+# dns gate
+hickory-resolver.workspace = true
+
+# chain-rulebook constants (single source for the SmartNet fixed fee)
+smartnet-chainspec.workspace = true
+
+# log timing formatting (fetch vs import walls)
+smartnet-timing.workspace = true
+tracing.workspace = true
+
+url.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

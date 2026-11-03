@@ -1,0 +1,28 @@
+[package]
+name = "smartnet-tools"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Rust replacements for go-tools — test tx sender + TPS benchmark (TEST keys only, see README)"
+
+[[bin]]
+name = "txsend"
+path = "src/bin/txsend.rs"
+
+[[bin]]
+name = "tbench"
+path = "src/bin/tbench.rs"
+
+[dependencies]
+alloy-consensus = { version = "2.0.5", default-features = false }
+alloy-eips = { version = "2.0.5", default-features = false }
+alloy-primitives = { version = "=1.6.0", default-features = false }
+# Pin ruint to the workspace-locked version: newer ruint pulls ark-ff versions
+# not present in the offline cargo cache (see tools/README.md build note).
+ruint = { version = "=1.18.0", default-features = false }
+alloy-signer = { version = "2.0.5", default-features = false }
+alloy-signer-local = { version = "2.0.5", default-features = false }
+serde_json = "1.0"
+
+[profile.release]
+debug = false

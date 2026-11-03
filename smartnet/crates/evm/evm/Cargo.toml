@@ -1,0 +1,65 @@
+[package]
+name = "smartnet-evm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-execution-errors.workspace = true
+smartnet-execution-types.workspace = true
+smartnet-metrics = { workspace = true, optional = true }
+smartnet-primitives-traits.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-storage-errors.workspace = true
+smartnet-trie-common.workspace = true
+
+revm.workspace = true
+
+# alloy
+alloy-primitives.workspace = true
+alloy-eips.workspace = true
+alloy-evm.workspace = true
+alloy-consensus.workspace = true
+
+tracing.workspace = true
+auto_impl.workspace = true
+derive_more.workspace = true
+futures-util.workspace = true
+metrics = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+smartnet-ethereum-primitives.workspace = true
+serde_json.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "dep:rayon",
+    "smartnet-primitives-traits/std",
+    "alloy-eips/std",
+    "alloy-primitives/std",
+    "alloy-consensus/std",
+    "revm/std",
+    "alloy-evm/std",
+    "smartnet-execution-errors/std",
+    "smartnet-execution-types/std",
+    "smartnet-storage-errors/std",
+    "futures-util/std",
+    "derive_more/std",
+    "smartnet-storage-api/std",
+    "smartnet-trie-common/std",
+    "smartnet-ethereum-primitives/std",
+]
+metrics = ["std", "dep:metrics", "dep:smartnet-metrics"]
+test-utils = [
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-trie-common/test-utils",
+    "smartnet-ethereum-primitives/test-utils",
+]

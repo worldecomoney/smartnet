@@ -1,0 +1,83 @@
+[package]
+name = "smartnet-trie-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Database integration with merkle trie implementation"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-primitives-traits = { workspace = true, features = ["std"] }
+smartnet-db-api.workspace = true
+smartnet-trie.workspace = true
+smartnet-trie-common.workspace = true
+smartnet-storage-api = { workspace = true, features = ["db-api"] }
+smartnet-storage-errors.workspace = true
+smartnet-stages-types.workspace = true
+smartnet-metrics = { workspace = true, optional = true }
+
+# alloy
+alloy-primitives.workspace = true
+
+# misc
+parking_lot.workspace = true
+
+# metrics
+metrics = { workspace = true, optional = true }
+
+# tracing
+tracing.workspace = true
+
+[dev-dependencies]
+# upstream-derived
+smartnet-chainspec.workspace = true
+smartnet-primitives-traits = { workspace = true, features = ["test-utils", "arbitrary"] }
+smartnet-db = { workspace = true, features = ["test-utils"] }
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-trie-common = { workspace = true, features = ["test-utils", "arbitrary"] }
+smartnet-trie = { workspace = true, features = ["test-utils"] }
+
+alloy-consensus.workspace = true
+alloy-rlp.workspace = true
+revm.workspace = true
+revm-database.workspace = true
+
+# trie
+triehash.workspace = true
+
+# misc
+proptest.workspace = true
+proptest-arbitrary-interop.workspace = true
+serde_json.workspace = true
+similar-asserts.workspace = true
+
+[features]
+metrics = ["smartnet-trie/metrics", "dep:smartnet-metrics", "dep:metrics"]
+serde = [
+    "similar-asserts/serde",
+    "alloy-consensus/serde",
+    "alloy-primitives/serde",
+    "parking_lot/serde",
+    "smartnet-stages-types/serde",
+    "smartnet-storage-api/serde",
+    "smartnet-trie/serde",
+    "smartnet-trie-common/serde",
+    "smartnet-primitives-traits/serde",
+    "revm-database/serde",
+    "revm/serde",
+]
+test-utils = [
+    "smartnet-trie-common/test-utils",
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-chainspec/test-utils",
+    "smartnet-db/test-utils",
+    "smartnet-db-api/test-utils",
+    "smartnet-provider/test-utils",
+    "smartnet-stages-types/test-utils",
+    "smartnet-trie/test-utils",
+]

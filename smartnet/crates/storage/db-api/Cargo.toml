@@ -1,0 +1,84 @@
+[package]
+name = "smartnet-db-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Database abstraction for SmartNet execution."
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-codecs.workspace = true
+smartnet-db-models = { workspace = true, features = ["serde", "smartnet-codec"] }
+smartnet-ethereum-primitives = { workspace = true, features = ["serde", "smartnet-codec"] }
+smartnet-primitives-traits = { workspace = true, features = ["serde", "smartnet-codec"] }
+smartnet-stages-types = { workspace = true, features = ["serde", "smartnet-codec"] }
+smartnet-prune-types = { workspace = true, features = ["serde", "smartnet-codec"] }
+smartnet-storage-errors.workspace = true
+smartnet-trie-common.workspace = true
+
+# ethereum
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-rlp.workspace = true
+
+# codecs
+modular-bitfield.workspace = true
+roaring.workspace = true
+serde = { workspace = true, default-features = false }
+
+# metrics
+metrics.workspace = true
+
+# misc
+arrayvec.workspace = true
+derive_more.workspace = true
+bytes.workspace = true
+
+# arbitrary utils
+arbitrary = { workspace = true, features = ["derive"], optional = true }
+proptest = { workspace = true, optional = true }
+
+[dev-dependencies]
+# libs with arbitrary
+smartnet-codecs = { workspace = true, features = ["test-utils"] }
+smartnet-db-models = { workspace = true, features = ["arbitrary"] }
+
+alloy-primitives = { workspace = true, features = ["rand"] }
+rand.workspace = true
+
+test-fuzz.workspace = true
+
+arbitrary = { workspace = true, features = ["derive"] }
+proptest.workspace = true
+proptest-arbitrary-interop.workspace = true
+
+[features]
+test-utils = [
+    "arbitrary",
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-codecs/test-utils",
+    "smartnet-db-models/test-utils",
+    "smartnet-trie-common/test-utils",
+    "smartnet-prune-types/test-utils",
+    "smartnet-stages-types/test-utils",
+    "smartnet-ethereum-primitives/test-utils",
+]
+arbitrary = [
+    "smartnet-db-models/arbitrary",
+    "dep:arbitrary",
+    "dep:proptest",
+    "smartnet-primitives-traits/arbitrary",
+    "smartnet-trie-common/arbitrary",
+    "alloy-primitives/arbitrary",
+    "smartnet-codecs/arbitrary",
+    "smartnet-prune-types/arbitrary",
+    "smartnet-stages-types/arbitrary",
+    "alloy-consensus/arbitrary",
+    "smartnet-ethereum-primitives/arbitrary",
+]

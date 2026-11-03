@@ -1,0 +1,28 @@
+[package]
+name = "smartnet-node-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-basic-payload-builder.workspace = true
+smartnet-db-api.workspace = true
+smartnet-consensus.workspace = true
+smartnet-evm.workspace = true
+smartnet-provider.workspace = true
+smartnet-engine-primitives.workspace = true
+smartnet-transaction-pool.workspace = true
+smartnet-payload-builder.workspace = true
+smartnet-payload-primitives.workspace = true
+smartnet-tasks.workspace = true
+smartnet-network-api.workspace = true
+smartnet-node-types.workspace = true
+smartnet-node-core.workspace = true
+
+eyre.workspace = true

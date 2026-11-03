@@ -1,0 +1,39 @@
+[package]
+name = "smartnet-network-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Network interfaces and commonly used types"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-network-types.workspace = true
+smartnet-eth-wire-types.workspace = true
+smartnet-ethereum-forks.workspace = true
+
+# ethereum
+alloy-primitives = { workspace = true, features = ["getrandom"] }
+
+# async
+futures.workspace = true
+
+# misc
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"], optional = true }
+tokio = { workspace = true, features = ["sync"] }
+auto_impl.workspace = true
+derive_more.workspace = true
+
+[features]
+serde = [
+    "dep:serde",
+    "smartnet-eth-wire-types/serde",
+    "smartnet-network-types/serde",
+    "alloy-primitives/serde",
+    "smartnet-ethereum-forks/serde",
+]

@@ -1,0 +1,98 @@
+[package]
+name = "smartnet-stages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Staged syncing primitives for SmartNet execution."
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-chainspec.workspace = true
+smartnet-codecs.workspace = true
+smartnet-config.workspace = true
+smartnet-consensus.workspace = true
+smartnet-db.workspace = true
+smartnet-chain-state.workspace = true
+smartnet-db-api.workspace = true
+smartnet-evm = { workspace = true, features = ["metrics"] }
+smartnet-primitives-traits.workspace = true
+smartnet-provider.workspace = true
+smartnet-execution-types.workspace = true
+smartnet-ethereum-primitives = { workspace = true, optional = true }
+smartnet-prune.workspace = true
+smartnet-prune-types.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-storage-errors.workspace = true
+smartnet-revm.workspace = true
+smartnet-stages-api.workspace = true
+smartnet-tasks.workspace = true
+smartnet-trie = { workspace = true, features = ["metrics"] }
+smartnet-trie-db = { workspace = true, features = ["metrics"] }
+
+smartnet-testing-utils = { workspace = true, optional = true }
+
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+
+# async
+
+# observability
+tracing.workspace = true
+
+# misc
+itertools.workspace = true
+rayon.workspace = true
+num-traits.workspace = true
+
+[dev-dependencies]
+alloy-eips.workspace = true
+# upstream-derived
+smartnet-chainspec.workspace = true
+smartnet-db = { workspace = true, features = ["test-utils"] }
+smartnet-ethereum-primitives = { workspace = true, features = ["test-utils"] }
+smartnet-ethereum-consensus.workspace = true
+smartnet-evm-ethereum.workspace = true
+smartnet-consensus = { workspace = true, features = ["test-utils"] }
+smartnet-stages-api = { workspace = true, features = ["test-utils"] }
+smartnet-storage-api.workspace = true
+smartnet-testing-utils.workspace = true
+smartnet-trie = { workspace = true, features = ["test-utils"] }
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-network-types.workspace = true
+
+alloy-genesis.workspace = true
+alloy-primitives = { workspace = true, features = ["getrandom", "rand"] }
+smartnet-tracing.workspace = true
+
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+assert_matches.workspace = true
+rand.workspace = true
+paste.workspace = true
+tempfile.workspace = true
+
+[features]
+test-utils = [
+    "smartnet-db/test-utils",
+    "smartnet-provider/test-utils",
+    "smartnet-stages-api/test-utils",
+    "dep:smartnet-testing-utils",
+    "smartnet-chainspec/test-utils",
+    "smartnet-consensus/test-utils",
+    "smartnet-evm/test-utils",
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-revm/test-utils",
+    "smartnet-codecs/test-utils",
+    "smartnet-db-api/test-utils",
+    "smartnet-trie-db/test-utils",
+    "smartnet-trie/test-utils",
+    "smartnet-prune-types/test-utils",
+    "dep:smartnet-ethereum-primitives",
+    "smartnet-ethereum-primitives?/test-utils",
+    "smartnet-evm-ethereum/test-utils",
+    "smartnet-tasks/test-utils",
+]

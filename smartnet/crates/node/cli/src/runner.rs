@@ -1,0 +1,368 @@
+//! A tokio based CLI runner.
+
+//! Entrypoint for running commands.
+
+use smartnet_tasks::{PanickedTaskError, TaskExecutor};
+use std::{future::Future, pin::pin, sync::mpsc, time::Duration};
+use tokio::task::JoinHandle;
+use tracing::{debug, error, info, warn};
+
+/// Executes CLI commands.
+///
+/// Provides utilities for running a cli command to completion.
+#[derive(Debug)]
+pub struct CliRunner {
+    config: CliRunnerConfig,
+    runtime: smartnet_tasks::Runtime,
+}
+
+impl CliRunner {
+    /// Attempts to create a new [`CliRunner`] using the default
+    /// [`Runtime`](smartnet_tasks::Runtime).
+    ///
+    /// The default runtime is multi-threaded, with both I/O and time drivers enabled.
+    pub fn try_default_runtime() -> Result<Self, smartnet_tasks::RuntimeBuildError> {
+        Self::try_with_runtime_config(smartnet_tasks::RuntimeConfig::default())
+    }
+
+    /// Creates a new [`CliRunner`] with the given [`RuntimeConfig`](smartnet_tasks::RuntimeConfig).
+    pub fn try_with_runtime_config(
+        config: smartnet_tasks::RuntimeConfig,
+    ) -> Result<Self, smartnet_tasks::RuntimeBuildError> {
+        let runtime = smartnet_tasks::RuntimeBuilder::new(config).build()?;
+        Ok(Self { config: CliRunnerConfig::default(), runtime })
+    }
+
+    /// Sets the [`CliRunnerConfig`] for this runner.
+    pub const fn with_config(mut self, config: CliRunnerConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Returns a clone of the underlying [`Runtime`](smartnet_tasks::Runtime).
+    pub fn runtime(&self) -> smartnet_tasks::Runtime {
+        self.runtime.clone()
+    }
+
+    /// Executes an async block on the runtime and blocks until completion.
+    pub fn block_on<F, T>(&self, fut: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        self.runtime.handle().block_on(fut)
+    }
+
+    /// Executes the given _async_ command on the tokio runtime until the command future resolves or
+    /// until the process receives a `SIGINT` or `SIGTERM` signal.
+    ///
+    /// Tasks spawned by the command via the [`TaskExecutor`] are shut down and an attempt is made
+    /// to drive their shutdown to completion after the command has finished.
+    pub fn run_command_until_exit<F, E>(
+        self,
+        command: impl FnOnce(CliContext) -> F,
+    ) -> Result<(), E>
+    where
+        F: Future<Output = Result<(), E>>,
+        E: Send
+            + Sync
+            + std::fmt::Display
+            + From<std::io::Error>
+            + From<smartnet_tasks::PanickedTaskError>
+            + 'static,
+    {
+        let (context, task_manager_handle) = cli_context(&self.runtime);
+
+        // Executes the command until it finished or ctrl-c was fired
+        let command_res = self.runtime.handle().block_on(run_to_completion_or_panic(
+            task_manager_handle,
+            run_until_ctrl_c(command(context)),
+        ));
+
+        if let Err(err) = &command_res {
+            error!(target: "smartnet::cli", %err, "shutting down due to error");
+        } else {
+            debug!(target: "smartnet::cli", "shutting down gracefully");
+            // after the command has finished or exit signal was received we shutdown the
+            // runtime which fires the shutdown signal to all tasks spawned via the task
+            // executor and awaiting on tasks spawned with graceful shutdown
+            self.runtime.graceful_shutdown_with_timeout(self.config.graceful_shutdown_timeout);
+        }
+
+        runtime_shutdown(self.runtime, true);
+
+        command_res
+    }
+
+    /// Executes a command in a blocking context with access to `CliContext`.
+    ///
+    /// See [`Runtime::spawn_blocking`](tokio::runtime::Runtime::spawn_blocking).
+    pub fn run_blocking_command_until_exit<F, E>(
+        self,
+        command: impl FnOnce(CliContext) -> F + Send + 'static,
+    ) -> Result<(), E>
+    where
+        F: Future<Output = Result<(), E>> + Send + 'static,
+        E: Send
+            + Sync
+            + std::fmt::Display
+            + From<std::io::Error>
+            + From<smartnet_tasks::PanickedTaskError>
+            + 'static,
+    {
+        let (context, task_manager_handle) = cli_context(&self.runtime);
+
+        // Spawn the command on the blocking thread pool
+        let handle = self.runtime.handle().clone();
+        let handle2 = handle.clone();
+        let command_handle = handle.spawn_blocking(move || handle2.block_on(command(context)));
+
+        // Wait for the command to complete or ctrl-c
+        let command_res = self.runtime.handle().block_on(run_to_completion_or_panic(
+            task_manager_handle,
+            run_until_ctrl_c(
+                async move { command_handle.await.expect("Failed to join blocking task") },
+            ),
+        ));
+
+        if let Err(err) = &command_res {
+            error!(target: "smartnet::cli", %err, "shutting down due to error");
+        } else {
+            debug!(target: "smartnet::cli", "shutting down gracefully");
+            self.runtime.graceful_shutdown_with_timeout(self.config.graceful_shutdown_timeout);
+        }
+
+        runtime_shutdown(self.runtime, true);
+
+        command_res
+    }
+
+    /// Executes a regular future until completion or until external signal received.
+    pub fn run_until_ctrl_c<F, E>(self, fut: F) -> Result<(), E>
+    where
+        F: Future<Output = Result<(), E>>,
+        E: Send + Sync + From<std::io::Error> + 'static,
+    {
+        self.runtime.handle().block_on(run_until_ctrl_c(fut))?;
+        Ok(())
+    }
+
+    /// Executes a regular future as a spawned blocking task until completion or until external
+    /// signal received.
+    ///
+    /// See [`Runtime::spawn_blocking`](tokio::runtime::Runtime::spawn_blocking).
+    pub fn run_blocking_until_ctrl_c<F, E>(self, fut: F) -> Result<(), E>
+    where
+        F: Future<Output = Result<(), E>> + Send + 'static,
+        E: Send + Sync + From<std::io::Error> + 'static,
+    {
+        let handle = self.runtime.handle().clone();
+        let handle2 = handle.clone();
+        let fut = handle.spawn_blocking(move || handle2.block_on(fut));
+        self.runtime
+            .handle()
+            .block_on(run_until_ctrl_c(async move { fut.await.expect("Failed to join task") }))?;
+
+        runtime_shutdown(self.runtime, false);
+
+        Ok(())
+    }
+}
+
+/// Extracts the task manager handle from the runtime and creates the [`CliContext`].
+fn cli_context(
+    runtime: &smartnet_tasks::Runtime,
+) -> (CliContext, JoinHandle<Result<(), PanickedTaskError>>) {
+    let handle =
+        runtime.take_task_manager_handle().expect("Runtime must contain a TaskManager handle");
+    let context = CliContext { task_executor: runtime.clone() };
+    (context, handle)
+}
+
+/// Additional context provided by the [`CliRunner`] when executing commands
+#[derive(Debug)]
+pub struct CliContext {
+    /// Used to execute/spawn tasks
+    pub task_executor: TaskExecutor,
+}
+
+/// Default timeout for graceful shutdown of tasks.
+const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Configuration for [`CliRunner`].
+#[derive(Debug, Clone)]
+pub struct CliRunnerConfig {
+    /// Timeout for graceful shutdown of tasks.
+    ///
+    /// After the command completes, this is the maximum time to wait for spawned tasks
+    /// to finish before forcefully terminating them.
+    pub graceful_shutdown_timeout: Duration,
+}
+
+impl Default for CliRunnerConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CliRunnerConfig {
+    /// Creates a new config with default values.
+    pub const fn new() -> Self {
+        Self { graceful_shutdown_timeout: DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT }
+    }
+
+    /// Sets the graceful shutdown timeout.
+    pub const fn with_graceful_shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.graceful_shutdown_timeout = timeout;
+        self
+    }
+}
+
+/// Runs the given future to completion or until a critical task panicked.
+///
+/// Returns the error if a task panicked, or the given future returned an error.
+async fn run_to_completion_or_panic<F, E>(
+    task_manager_handle: JoinHandle<Result<(), PanickedTaskError>>,
+    fut: F,
+) -> Result<(), E>
+where
+    F: Future<Output = Result<(), E>>,
+    E: Send + Sync + From<smartnet_tasks::PanickedTaskError> + 'static,
+{
+    let fut = pin!(fut);
+    tokio::select! {
+        task_manager_result = task_manager_handle => {
+            if let Ok(Err(panicked_error)) = task_manager_result {
+                return Err(panicked_error.into());
+            }
+        },
+        res = fut => res?,
+    }
+    Ok(())
+}
+
+/// Runs the future to completion or until:
+/// - `ctrl-c` is received.
+/// - `SIGTERM` is received (unix only).
+///
+/// On an exit signal a drainable command (see [`smartnet_tasks::drain`]) is asked to stop
+/// at its next safe point and given a bounded window to return, so in-flight work (an
+/// import block waiting on the engine) completes before the future is dropped and the
+/// clean-shutdown marker is written. Without a registered drainable command the future is
+/// dropped immediately, as before.
+async fn run_until_ctrl_c<F, E>(fut: F) -> Result<(), E>
+where
+    F: Future<Output = Result<(), E>>,
+    E: Send + Sync + 'static + From<std::io::Error>,
+{
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    #[cfg(unix)]
+    {
+        let mut stream = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let sigterm = stream.recv();
+        let sigterm = pin!(sigterm);
+        let ctrl_c = pin!(ctrl_c);
+        // The future stays pinned and owned here: on an exit signal it is handed to
+        // `drain_on_exit` below instead of being dropped by the select.
+        let mut fut = pin!(fut);
+        let mut completed = None;
+        let mut signalled = false;
+
+        tokio::select! {
+            _ = ctrl_c => {
+                info!(target: "smartnet::cli", "Received ctrl-c");
+                signalled = true;
+            },
+            _ = sigterm => {
+                info!(target: "smartnet::cli", "Received SIGTERM");
+                signalled = true;
+            },
+            res = &mut fut => completed = Some(res),
+        }
+        if let Some(res) = completed {
+            return res;
+        }
+        if signalled {
+            drain_on_exit(fut).await?;
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let ctrl_c = pin!(ctrl_c);
+        let mut fut = pin!(fut);
+        let mut completed = None;
+        let mut signalled = false;
+
+        tokio::select! {
+            _ = ctrl_c => {
+                info!(target: "smartnet::cli", "Received ctrl-c");
+                signalled = true;
+            },
+            res = &mut fut => completed = Some(res),
+        }
+        if let Some(res) = completed {
+            return res;
+        }
+        if signalled {
+            drain_on_exit(fut).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Handles an exit signal for a command future: records the exit request and, while a
+/// drainable command is registered, waits (bounded by [`DRAIN_TIMEOUT`]) for the future
+/// to finish its in-flight work and return.
+async fn drain_on_exit<F, E>(fut: F) -> Result<(), E>
+where
+    F: Future<Output = Result<(), E>>,
+    E: Send + Sync + 'static,
+{
+    smartnet_tasks::drain::request_exit();
+    if !smartnet_tasks::drain::is_drainable() {
+        // Nothing is draining: the caller's select drops the future, as before.
+        return Ok(());
+    }
+    info!(target: "smartnet::cli", "exit signal: draining in-flight work before shutdown");
+    tokio::select! {
+        res = fut => res,
+        _ = tokio::time::sleep(DRAIN_TIMEOUT) => {
+            warn!(
+                target: "smartnet::cli",
+                timeout_secs = DRAIN_TIMEOUT.as_secs(),
+                "drain timed out — proceeding with shutdown"
+            );
+            Ok(())
+        },
+    }
+}
+
+/// How long to wait for a registered drainable command to finish its in-flight work after
+/// an exit signal before shutdown proceeds anyway.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default timeout for waiting on the tokio runtime to shut down.
+const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Shut down the given [`Runtime`](smartnet_tasks::Runtime), and wait for it if `wait` is set.
+///
+/// Dropping the runtime on the current thread could block due to tokio pool teardown.
+/// Instead, we drop it on a separate thread and optionally wait for completion.
+fn runtime_shutdown(rt: smartnet_tasks::Runtime, wait: bool) {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("rt-shutdown".to_string())
+        .spawn(move || {
+            drop(rt);
+            let _ = tx.send(());
+        })
+        .unwrap();
+
+    if wait {
+        let _ = rx.recv_timeout(DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT).inspect_err(|err| {
+            tracing::warn!(target: "smartnet::cli", %err, "runtime shutdown timed out");
+        });
+    }
+}

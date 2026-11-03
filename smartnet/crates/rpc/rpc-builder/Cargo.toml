@@ -1,0 +1,75 @@
+[package]
+name = "smartnet-rpc-builder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Helpers for configuring RPC"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-primitives-traits.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-consensus.workspace = true
+smartnet-engine-primitives.workspace = true
+smartnet-rpc-engine-api.workspace = true
+smartnet-payload-primitives.workspace = true
+smartnet-network-api.workspace = true
+smartnet-node-core.workspace = true
+smartnet-rpc.workspace = true
+smartnet-rpc-api.workspace = true
+smartnet-rpc-eth-api.workspace = true
+smartnet-rpc-eth-types.workspace = true
+smartnet-rpc-server-types.workspace = true
+smartnet-tasks = { workspace = true, features = ["rayon"] }
+smartnet-transaction-pool.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-chain-state.workspace = true
+smartnet-evm.workspace = true
+
+# rpc/net
+jsonrpsee = { workspace = true, features = ["server", "jsonrpsee-http-client", "jsonrpsee-ws-client"] }
+jsonrpsee-http-client.workspace = true
+tower-http = { workspace = true, features = ["cors", "compression-br", "compression-deflate", "compression-gzip"] }
+tower = { workspace = true, features = ["full"] }
+http.workspace = true
+pin-project.workspace = true
+
+# metrics
+smartnet-metrics.workspace = true
+metrics.workspace = true
+
+# misc
+dyn-clone.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+alloy-provider.workspace = true
+alloy-network.workspace = true
+
+[dev-dependencies]
+smartnet-ethereum-primitives.workspace = true
+smartnet-network-types.workspace = true
+smartnet-evm-ethereum.workspace = true
+smartnet-payload-builder = { workspace = true, features = ["test-utils"] }
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-rpc-api = { workspace = true, features = ["client"] }
+smartnet-tracing.workspace = true
+smartnet-transaction-pool = { workspace = true, features = ["test-utils"] }
+smartnet-node-ethereum.workspace = true
+smartnet-tasks = { workspace = true, features = ["test-utils"] }
+
+alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
+alloy-rpc-types-trace.workspace = true
+alloy-eips.workspace = true
+alloy-rpc-types-engine.workspace = true
+
+serde_json.workspace = true
+clap = { workspace = true, features = ["derive"] }
+reqwest.workspace = true

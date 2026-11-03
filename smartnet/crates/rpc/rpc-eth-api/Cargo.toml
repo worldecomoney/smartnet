@@ -1,0 +1,64 @@
+[package]
+name = "smartnet-rpc-eth-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SmartNet RPC eth namespace API"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+revm = { workspace = true, features = ["optional_block_gas_limit", "optional_eip3607", "optional_no_base_fee", "optional_fee_charge", "memory_limit"] }
+smartnet-chain-state.workspace = true
+revm-inspectors.workspace = true
+smartnet-primitives-traits = { workspace = true, features = ["rpc-compat"] }
+smartnet-errors.workspace = true
+smartnet-evm.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-revm.workspace = true
+smartnet-rpc-convert.workspace = true
+smartnet-tasks = { workspace = true, features = ["rayon"] }
+smartnet-transaction-pool.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-rpc-eth-types.workspace = true
+smartnet-rpc-server-types.workspace = true
+smartnet-network-api.workspace = true
+smartnet-node-api.workspace = true
+smartnet-trie-common = { workspace = true, features = ["eip1186"] }
+
+# ethereum
+alloy-evm = { workspace = true, features = ["overrides", "call-util"] }
+alloy-rlp.workspace = true
+alloy-serde.workspace = true
+alloy-eips.workspace = true
+alloy-eip7928 = { workspace = true, features = ["rlp"] }
+alloy-dyn-abi = { workspace = true, features = ["eip712"] }
+alloy-json-rpc.workspace = true
+alloy-network.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
+alloy-rpc-types-mev.workspace = true
+alloy-consensus.workspace = true
+
+# rpc
+jsonrpsee = { workspace = true, features = ["server", "macros"] }
+jsonrpsee-types.workspace = true
+
+# async
+async-trait.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+
+# misc
+auto_impl.workspace = true
+dyn-clone.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[features]
+client = ["jsonrpsee/client", "jsonrpsee/async-client"]

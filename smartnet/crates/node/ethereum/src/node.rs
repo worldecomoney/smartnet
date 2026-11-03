@@ -1,0 +1,788 @@
+//! Ethereum Node types config.
+
+pub use crate::{payload::EthereumPayloadBuilder, EthereumEngineValidator};
+use crate::{validator::InProcValidatorIo, EthEngineTypes, EthEvmConfig};
+use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
+use alloy_network::Ethereum;
+use alloy_rpc_types_engine::ExecutionData;
+use smartnet_eth_wire_types::BasicNetworkPrimitives;
+use smartnet_ethereum_primitives::{EthPrimitives, TransactionSigned};
+use smartnet_evm::{
+    eth::spec::{DisableBlockRewards, EthExecutorSpec},
+    ConfigureEvm, EvmFactory, EvmFactoryFor, NextBlockEnvAttributes,
+};
+use smartnet_network_api::noop::NoopNetwork;
+use smartnet_transaction_pool::{
+    blobstore::DiskFileBlobStore, EthTransactionPool, PoolPooledTx, PoolTransaction,
+    TransactionPool, TransactionValidationTaskExecutor,
+};
+use revm::context::TxEnv;
+use smartnet_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, Hardforks};
+use smartnet_engine_primitives::EngineTypes;
+use smartnet_ethereum_consensus::EthBeaconConsensus;
+use smartnet_engine_primitives::ethereum::{EthBuiltPayload, EthPayloadAttributes};
+use smartnet_mesh::sync_gate;
+use smartnet_node_api::{
+    AddOnsContext, FullNodeComponents, HeaderTy, NodeAddOns, NodePrimitives, PrimitivesTy, TxTy,
+};
+use smartnet_node_builder::{
+    components::{
+        BasicPayloadServiceBuilder, ComponentsBuilder, ConsensusBuilder, ExecutorBuilder,
+        NetworkBuilder, PoolBuilder, TxPoolBuilder,
+    },
+    node::{FullNodeTypes, NodeTypes},
+    rpc::{
+        BasicEngineApiBuilder, BasicEngineValidatorBuilder, Either, EngineApiBuilder,
+        EngineValidatorAddOn, EngineValidatorBuilder, EthApiBuilder, EthApiCtx, Identity,
+        PayloadValidatorBuilder, SmartnetAuthHttpMiddleware, SmartnetRpcAddOns, SmartnetRpcMiddleware,
+        RpcAddOns, RpcHandle, Stack,
+    },
+    BuilderContext, Node, NodeAdapter,
+};
+use smartnet_payload_primitives::PayloadTypes;
+use smartnet_provider::{providers::ProviderFactoryBuilder, EthStorage};
+use smartnet_rpc::{
+    eth::core::{EthApiFor, EthRpcConverterFor},
+    ValidationApi,
+};
+use smartnet_rpc_api::servers::BlockSubmissionValidationApiServer;
+use smartnet_rpc_builder::config::SmartnetRpcServerConfig;
+use smartnet_rpc_eth_api::{
+    helpers::{
+        config::{EthConfigApiServer, EthConfigHandler},
+        pending_block::BuildPendingEnv,
+    },
+    FullEthApiServer, RpcConvert, RpcTypes, SignableTxRequest,
+};
+use smartnet_rpc_eth_types::{error::FromEvmError, EthApiError};
+use smartnet_rpc_server_types::SmartnetRpcModule;
+use smartnet_tracing::tracing::{debug, info, warn};
+use smartnet_validator::ValidatorDaemon;
+use std::{
+    marker::PhantomData,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
+
+/// Type configuration for a regular Ethereum node.
+#[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
+pub struct EthereumNode;
+
+impl EthereumNode {
+    /// Returns a [`ComponentsBuilder`] configured for a regular Ethereum node.
+    pub fn components<Node>() -> ComponentsBuilder<
+        Node,
+        EthereumPoolBuilder,
+        BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
+        EthereumNetworkBuilder,
+        EthereumExecutorBuilder,
+        EthereumConsensusBuilder,
+    >
+    where
+        Node: FullNodeTypes<
+            Types: NodeTypes<
+                ChainSpec: Hardforks + EthereumHardforks + EthExecutorSpec + DisableBlockRewards,
+                Primitives = EthPrimitives,
+            >,
+        >,
+        <Node::Types as NodeTypes>::Payload:
+            PayloadTypes<BuiltPayload = EthBuiltPayload, PayloadAttributes = EthPayloadAttributes>,
+    {
+        ComponentsBuilder::default()
+            .node_types::<Node>()
+            .pool(EthereumPoolBuilder::default())
+            .executor(EthereumExecutorBuilder::default())
+            .payload(BasicPayloadServiceBuilder::default())
+            .network(EthereumNetworkBuilder::default())
+            .consensus(EthereumConsensusBuilder::default())
+    }
+
+    /// Instantiates the [`ProviderFactoryBuilder`] for an ethereum node.
+    ///
+    /// # Open a Providerfactory in read-only mode from a datadir
+    ///
+    /// See also: [`ProviderFactoryBuilder`] and
+    /// [`ReadOnlyConfig`](smartnet_provider::providers::ReadOnlyConfig).
+    ///
+    /// ```no_run
+    /// use smartnet_chainspec::MAINNET;
+    /// use smartnet_node_ethereum::EthereumNode;
+    ///
+    /// fn demo(runtime: smartnet_tasks::Runtime) {
+    ///     let factory = EthereumNode::provider_factory_builder()
+    ///         .open_read_only(MAINNET.clone(), "datadir", runtime)
+    ///         .unwrap();
+    /// }
+    /// ```
+    ///
+    /// See also [`ProviderFactory::new`](smartnet_provider::ProviderFactory::new) for constructing
+    /// a [`ProviderFactory`](smartnet_provider::ProviderFactory) manually with all required
+    /// components.
+    pub fn provider_factory_builder() -> ProviderFactoryBuilder<Self> {
+        ProviderFactoryBuilder::default()
+    }
+}
+
+impl NodeTypes for EthereumNode {
+    type Primitives = EthPrimitives;
+    type ChainSpec = ChainSpec;
+    type Storage = EthStorage;
+    type Payload = EthEngineTypes;
+}
+
+/// Builds [`EthApi`](smartnet_rpc::EthApi) for Ethereum.
+#[derive(Debug)]
+pub struct EthereumEthApiBuilder<NetworkT = Ethereum>(PhantomData<NetworkT>);
+
+impl<NetworkT> Default for EthereumEthApiBuilder<NetworkT> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<N, NetworkT> EthApiBuilder<N> for EthereumEthApiBuilder<NetworkT>
+where
+    N: FullNodeComponents<
+        Types: NodeTypes<ChainSpec: Hardforks + EthereumHardforks>,
+        Evm: ConfigureEvm<NextBlockEnvCtx: BuildPendingEnv<HeaderTy<N::Types>>>,
+    >,
+    NetworkT: RpcTypes<TransactionRequest: SignableTxRequest<TxTy<N::Types>>>,
+    EthRpcConverterFor<N, NetworkT>: RpcConvert<
+        Primitives = PrimitivesTy<N::Types>,
+        Error = EthApiError,
+        Network = NetworkT,
+        Evm = N::Evm,
+    >,
+    EthApiError: FromEvmError<N::Evm>,
+{
+    type EthApi = EthApiFor<N, NetworkT>;
+
+    async fn build_eth_api(self, ctx: EthApiCtx<'_, N>) -> eyre::Result<Self::EthApi> {
+        Ok(ctx.eth_api_builder().map_converter(|r| r.with_network()).build())
+    }
+}
+
+/// Add-ons w.r.t. l1 ethereum.
+#[derive(Debug)]
+pub struct EthereumAddOns<
+    N: FullNodeComponents,
+    EthB: EthApiBuilder<N>,
+    PVB,
+    EB = BasicEngineApiBuilder<PVB>,
+    EVB = BasicEngineValidatorBuilder<PVB>,
+    RpcMiddleware = Identity,
+    AuthHttpMiddleware = Identity,
+> {
+    inner: RpcAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware>,
+}
+
+impl<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware>
+    EthereumAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware>
+where
+    N: FullNodeComponents,
+    EthB: EthApiBuilder<N>,
+{
+    /// Creates a new instance from the inner `RpcAddOns`.
+    pub const fn new(
+        inner: RpcAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware>,
+    ) -> Self {
+        Self { inner }
+    }
+}
+
+impl<N> Default for EthereumAddOns<N, EthereumEthApiBuilder, EthereumEngineValidatorBuilder>
+where
+    N: FullNodeComponents<
+        Types: NodeTypes<
+            ChainSpec: EthereumHardforks + Clone + 'static,
+            Payload: EngineTypes<ExecutionData = ExecutionData>
+                         + PayloadTypes<PayloadAttributes = EthPayloadAttributes>,
+            Primitives = EthPrimitives,
+        >,
+    >,
+    EthereumEthApiBuilder: EthApiBuilder<N>,
+{
+    fn default() -> Self {
+        Self::new(RpcAddOns::new(
+            EthereumEthApiBuilder::default(),
+            EthereumEngineValidatorBuilder::default(),
+            BasicEngineApiBuilder::default(),
+            BasicEngineValidatorBuilder::default(),
+            Default::default(),
+            Identity::new(),
+        ))
+    }
+}
+
+impl<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware>
+    EthereumAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware>
+where
+    N: FullNodeComponents,
+    EthB: EthApiBuilder<N>,
+{
+    /// Replace the engine API builder.
+    pub fn with_engine_api<T>(
+        self,
+        engine_api_builder: T,
+    ) -> EthereumAddOns<N, EthB, PVB, T, EVB, RpcMiddleware, AuthHttpMiddleware>
+    where
+        T: Send,
+    {
+        let Self { inner } = self;
+        EthereumAddOns::new(inner.with_engine_api(engine_api_builder))
+    }
+
+    /// Replace the payload validator builder.
+    pub fn with_payload_validator<V, T>(
+        self,
+        payload_validator_builder: T,
+    ) -> EthereumAddOns<N, EthB, T, EB, EVB, RpcMiddleware, AuthHttpMiddleware> {
+        let Self { inner } = self;
+        EthereumAddOns::new(inner.with_payload_validator(payload_validator_builder))
+    }
+
+    /// Sets rpc middleware
+    pub fn with_rpc_middleware<T>(
+        self,
+        rpc_middleware: T,
+    ) -> EthereumAddOns<N, EthB, PVB, EB, EVB, T, AuthHttpMiddleware>
+    where
+        T: Send,
+    {
+        let Self { inner } = self;
+        EthereumAddOns::new(inner.with_rpc_middleware(rpc_middleware))
+    }
+
+    /// Configures the HTTP transport middleware for the auth / Engine API server.
+    pub fn with_auth_http_middleware<T>(
+        self,
+        auth_http_middleware: T,
+    ) -> EthereumAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware, T>
+    where
+        T: Send,
+    {
+        let Self { inner } = self;
+        EthereumAddOns::new(inner.with_auth_http_middleware(auth_http_middleware))
+    }
+
+    /// Stacks an additional HTTP transport middleware layer for the auth / Engine API server.
+    pub fn layer_auth_http_middleware<T>(
+        self,
+        layer: T,
+    ) -> EthereumAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware, Stack<AuthHttpMiddleware, T>> {
+        let Self { inner } = self;
+        EthereumAddOns::new(inner.layer_auth_http_middleware(layer))
+    }
+
+    /// Conditionally stacks an HTTP transport middleware layer for the auth / Engine API server.
+    #[expect(clippy::type_complexity)]
+    pub fn option_layer_auth_http_middleware<T>(
+        self,
+        layer: Option<T>,
+    ) -> EthereumAddOns<
+        N,
+        EthB,
+        PVB,
+        EB,
+        EVB,
+        RpcMiddleware,
+        Stack<AuthHttpMiddleware, Either<T, Identity>>,
+    > {
+        let Self { inner } = self;
+        EthereumAddOns::new(inner.option_layer_auth_http_middleware(layer))
+    }
+
+    /// Sets the tokio runtime for the RPC servers.
+    ///
+    /// Caution: This runtime must not be created from within asynchronous context.
+    pub fn with_tokio_runtime(self, tokio_runtime: Option<tokio::runtime::Handle>) -> Self {
+        let Self { inner } = self;
+        Self { inner: inner.with_tokio_runtime(tokio_runtime) }
+    }
+}
+
+impl<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware> NodeAddOns<N>
+    for EthereumAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware>
+where
+    N: FullNodeComponents<
+        Types: NodeTypes<
+            ChainSpec: Hardforks + EthereumHardforks,
+            Primitives = EthPrimitives,
+            Payload: EngineTypes<ExecutionData = ExecutionData>,
+        >,
+        Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes>,
+    >,
+    EthB: EthApiBuilder<N>,
+    PVB: Send,
+    EB: EngineApiBuilder<N>,
+    EB::EngineApi: Clone,
+    EVB: EngineValidatorBuilder<N>,
+    EthApiError: FromEvmError<N::Evm>,
+    EvmFactoryFor<N::Evm>: EvmFactory<Tx = TxEnv>,
+    RpcMiddleware: SmartnetRpcMiddleware,
+    AuthHttpMiddleware: SmartnetAuthHttpMiddleware<Identity>,
+    EthB::EthApi: FullEthApiServer<NetworkTypes = Ethereum, Primitives = EthPrimitives>
+        + Send
+        + Sync
+        + 'static,
+{
+    type Handle = RpcHandle<N, EthB::EthApi>;
+
+    async fn launch_add_ons(
+        self,
+        ctx: smartnet_node_api::AddOnsContext<'_, N>,
+    ) -> eyre::Result<Self::Handle> {
+        // RPC catch-up service — fully isolated in the `smartnet-engine-rpc-sync` crate
+        // (own task, no shared code with mesh / RLP import / the RPC server). This is the
+        // only call into it: whether the service runs is decided in one place — `sync_gate`
+        // in that crate — from the operator keys: `RPC_SYNC = true` (master switch, default
+        // off) AND non-empty `SYNC_PEERS` AND `SYNC_BATCH >= 1` AND a non-zero
+        // `SYNC_POLL_INTERVAL`. Anything else stays off and is logged once, so
+        // `RPC_SYNC` unset or `SYNC_BATCH = 0` can never start a catch-up loop.
+        smartnet_engine_rpc_sync::spawn_rpc_sync_service(
+            ctx.config.rpc.rpc_sync.unwrap_or(false),
+            ctx.config.rpc.sync_peers.clone().unwrap_or_default(),
+            ctx.config.rpc.sync_batch,
+            ctx.config.rpc.sync_poll_interval,
+            ctx.beacon_engine_handle.clone(),
+            ctx.node.provider().clone(),
+            ctx.node.task_executor().clone(),
+        );
+
+        // Validator heartbeat cadence (`HEARTBEAT_MS`). The validator section is still
+        // the on/off switch: a malformed validator section aborts boot (fail-closed),
+        // exactly as before. The mesh needs no heartbeat — each peer keeps its own
+        // persistent link with PING/PONG keepalive and reconnect backoff.
+        //
+        // The launch flag is checked first: `smartnet import` clears it, so the import
+        // run never arms the validator — no heartbeat task, no seal pass, and the
+        // config's validator section is not even read (import and the sync path both
+        // feed the engine directly; sealing belongs to a live producing node only).
+        let config_path = ctx.config.config.clone();
+        let validator_enabled = ctx.config.validator_daemon &&
+            match config_path.as_deref() {
+                Some(path) => smartnet_validator::validator_daemon_enabled(path)?,
+                None => false,
+            };
+        let heartbeat = Duration::from_millis(
+            ctx.config.rpc.heartbeat_ms.unwrap_or(smartnet_validator::DEFAULT_HEARTBEAT_MS),
+        );
+        let chain_id = ctx.config.chain.chain_id();
+        let task_executor = ctx.node.task_executor().clone();
+
+        let validation_api = ValidationApi::<_, _, <N::Types as NodeTypes>::Payload>::new(
+            ctx.node.provider().clone(),
+            Arc::new(ctx.node.consensus().clone()),
+            ctx.node.evm_config().clone(),
+            ctx.config.rpc.flashbots_config(),
+            ctx.node.task_executor().clone(),
+            Arc::new(EthereumEngineValidator::new(ctx.config.chain.clone())),
+        );
+
+        let eth_config =
+            EthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
+
+        // Stage the RPC modules WITHOUT binding the transport: the HTTP/WS listener
+        // comes up only after the mesh is synced (engine → mesh → sync → rumor → RPC),
+        // so the node's first external answer is a synced one.
+        let staged = self
+            .inner
+            .prepare_add_ons_with(ctx.clone(), move |container| {
+                container.modules.merge_if_module_configured(
+                    SmartnetRpcModule::Flashbots,
+                    validation_api.into_rpc(),
+                )?;
+
+                container
+                    .modules
+                    .merge_if_module_configured(SmartnetRpcModule::Eth, eth_config.into_rpc())?;
+
+                // testing_buildBlockV1 is intentionally not wired here:
+                // `SmartnetRpcModule::Testing` is hard-blocked by the production
+                // allowlist (`SmartnetRpcModule::is_allowed`), so
+                // `create_transport_rpc_modules` filters it out of every transport selection before
+                // `modules.config` is stored. A
+                // `merge_if_module_configured(SmartnetRpcModule::Testing, …)` would therefore
+                // always be a no-op — the gated module can never be "configured".
+                // Wiring `testing_buildBlockV1` again requires an explicit decision
+                // to relax that allowlist, not dead plumbing that looks like a
+                // working opt-in.
+
+                Ok(())
+            })
+            .await?;
+
+        // The node's own RPC objects, once the modules exist: tx inject goes through the
+        // live EthApi, block inject through the engine — in-process, no loopback socket.
+        let eth_api = staged.eth_api().clone();
+
+        // Mesh service: closed-list all-to-all gossip (txs + blocks over the binary
+        // WebSocket). Bound and preconnected inside — every peer is dialed now (links
+        // used to spawn lazily on first spread, so a quiet chain never caught up at
+        // boot), and the engine loop is already running so those in-process injects are
+        // answered. The gate receiver below is how boot learns catch-up finished.
+        let mesh = crate::mesh::spawn_mesh_service(&ctx, eth_api.clone()).await;
+        let mesh_enabled = mesh.enabled;
+
+        // Sync gate: wait until every peer link completed a bootstrap exchange, the
+        // local tip has reached the highest reported peer tip, and no ordered pull is
+        // armed — or the boot timeout fires (warn and proceed: a dead peer must not
+        // brick the RPC).
+        if sync_gate::wait_ready(mesh.ready, sync_gate::BOOT_READY_TIMEOUT).await {
+            info!(
+                target: "smartnet::mesh",
+                "mesh sync gate passed — binding RPC transport"
+            );
+        } else {
+            warn!(
+                target: "smartnet::mesh",
+                "mesh sync gate timed out — serving RPC without confirmed catch-up"
+            );
+        }
+
+        // Fully up: bind the HTTP/WS transport, then start the heartbeat.
+        let handle = staged.serve().await?;
+        let engine = handle.beacon_engine_handle.clone();
+
+        // Validator heartbeat. On each beat: one validator seal pass (only when
+        // `SEAL = true`). The task is critical but a failed beat is logged and retried —
+        // it never takes the node down.
+        if validator_enabled {
+            task_executor.spawn_critical_task("node-heartbeat", async move {
+                let validator = if validator_enabled {
+                    match config_path {
+                        Some(path) => {
+                            let io = InProcValidatorIo::new(eth_api, engine, chain_id);
+                            match ValidatorDaemon::load(path, chain_id, io).await {
+                                Ok(validator) => validator,
+                                Err(err) => {
+                                    warn!(
+                                        target: "smartnet_validator",
+                                        %err,
+                                        "merged validator disabled for this run — no seal \
+                                         beats this boot"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+
+                info!(
+                    target: "smartnet::heartbeat",
+                    interval_ms = heartbeat.as_millis() as u64,
+                    validator = validator.is_some(),
+                    mesh = mesh_enabled,
+                    "validator heartbeat started"
+                );
+
+                let mut tick = tokio::time::interval(heartbeat);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    if let Some(validator) = validator.as_ref() {
+                        validator.beat().await;
+                    }
+                }
+            });
+        }
+
+        Ok(handle)
+    }
+}
+
+impl<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware> SmartnetRpcAddOns<N>
+    for EthereumAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware>
+where
+    N: FullNodeComponents<
+        Types: NodeTypes<
+            ChainSpec: Hardforks + EthereumHardforks,
+            Primitives = EthPrimitives,
+            Payload: EngineTypes<ExecutionData = ExecutionData>,
+        >,
+        Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes>,
+    >,
+    EthB: EthApiBuilder<N>,
+    PVB: PayloadValidatorBuilder<N>,
+    EB: EngineApiBuilder<N>,
+    EB::EngineApi: Clone,
+    EVB: EngineValidatorBuilder<N>,
+    EthApiError: FromEvmError<N::Evm>,
+    EvmFactoryFor<N::Evm>: EvmFactory<Tx = TxEnv>,
+    RpcMiddleware: SmartnetRpcMiddleware,
+    AuthHttpMiddleware: SmartnetAuthHttpMiddleware<Identity>,
+    EthB::EthApi: FullEthApiServer<NetworkTypes = Ethereum, Primitives = EthPrimitives>
+        + Send
+        + Sync
+        + 'static,
+{
+    type EthApi = EthB::EthApi;
+
+    fn hooks_mut(&mut self) -> &mut smartnet_node_builder::rpc::RpcHooks<N, Self::EthApi> {
+        self.inner.hooks_mut()
+    }
+}
+
+impl<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware> EngineValidatorAddOn<N>
+    for EthereumAddOns<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware>
+where
+    N: FullNodeComponents<
+        Types: NodeTypes<
+            ChainSpec: EthChainSpec + EthereumHardforks,
+            Primitives = EthPrimitives,
+            Payload: EngineTypes<ExecutionData = ExecutionData>,
+        >,
+        Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes>,
+    >,
+    EthB: EthApiBuilder<N>,
+    PVB: Send,
+    EB: EngineApiBuilder<N>,
+    EVB: EngineValidatorBuilder<N>,
+    EthApiError: FromEvmError<N::Evm>,
+    EvmFactoryFor<N::Evm>: EvmFactory<Tx = TxEnv>,
+    RpcMiddleware: Send,
+    AuthHttpMiddleware: Send,
+    EthB::EthApi: FullEthApiServer<NetworkTypes = Ethereum, Primitives = EthPrimitives>
+        + Send
+        + Sync
+        + 'static,
+{
+    type ValidatorBuilder = EVB;
+
+    fn engine_validator_builder(&self) -> Self::ValidatorBuilder {
+        self.inner.engine_validator_builder()
+    }
+}
+
+impl<N> Node<N> for EthereumNode
+where
+    N: FullNodeTypes<Types = Self>,
+{
+    type ComponentsBuilder = ComponentsBuilder<
+        N,
+        EthereumPoolBuilder,
+        BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
+        EthereumNetworkBuilder,
+        EthereumExecutorBuilder,
+        EthereumConsensusBuilder,
+    >;
+
+    type AddOns =
+        EthereumAddOns<NodeAdapter<N>, EthereumEthApiBuilder, EthereumEngineValidatorBuilder>;
+
+    fn components_builder(&self) -> Self::ComponentsBuilder {
+        Self::components()
+    }
+
+    fn add_ons(&self) -> Self::AddOns {
+        EthereumAddOns::default()
+    }
+}
+
+/// A regular ethereum evm and executor builder.
+#[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
+pub struct EthereumExecutorBuilder;
+
+impl<Types, Node> ExecutorBuilder<Node> for EthereumExecutorBuilder
+where
+    Types: NodeTypes<
+        ChainSpec: Hardforks + EthExecutorSpec + EthereumHardforks + DisableBlockRewards,
+        Primitives = EthPrimitives,
+    >,
+    Node: FullNodeTypes<Types = Types>,
+{
+    type EVM = EthEvmConfig<Types::ChainSpec>;
+
+    async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
+        Ok(EthEvmConfig::new(ctx.chain_spec()))
+    }
+}
+
+/// A basic ethereum transaction pool.
+///
+/// This contains various settings that can be configured and take precedence over the node's
+/// config.
+#[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
+pub struct EthereumPoolBuilder {
+    // TODO add options for txpool args
+}
+
+impl<Types, Node, Evm> PoolBuilder<Node, Evm> for EthereumPoolBuilder
+where
+    Types: NodeTypes<
+        ChainSpec: EthereumHardforks,
+        Primitives: NodePrimitives<SignedTx = TransactionSigned>,
+    >,
+    Node: FullNodeTypes<Types = Types>,
+    Evm: ConfigureEvm<Primitives = PrimitivesTy<Types>> + Clone + 'static,
+{
+    type Pool = EthTransactionPool<Node::Provider, DiskFileBlobStore, Evm>;
+
+    async fn build_pool(
+        self,
+        ctx: &BuilderContext<Node>,
+        evm_config: Evm,
+    ) -> eyre::Result<Self::Pool> {
+        let pool_config = ctx.pool_config();
+
+        // This build has no KZG verifier, so blob transactions can never be accepted.
+        let blobs_disabled = true;
+
+        let blob_cache_size = if let Some(blob_cache_size) = pool_config.blob_cache_size {
+            Some(blob_cache_size)
+        } else {
+            // get the current blob params for the current timestamp, fallback to default Cancun
+            // params
+            let current_timestamp =
+                SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+            let blob_params = ctx
+                .chain_spec()
+                .blob_params_at_timestamp(current_timestamp)
+                .unwrap_or_else(BlobParams::cancun);
+
+            // Derive the blob cache size from the target blob count, to auto scale it by
+            // multiplying it with the slot count for 2 epochs: 384 for pectra
+            Some((blob_params.target_blob_count * EPOCH_SLOTS * 2) as u32)
+        };
+
+        let blob_store =
+            smartnet_node_builder::components::create_blob_store_with_cache(ctx, blob_cache_size)?;
+
+        let validator =
+            TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
+                .set_eip4844(!blobs_disabled)
+                .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
+                .with_local_transactions_config(pool_config.local_transactions_config.clone())
+                .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+                .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+                .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
+                .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
+                .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+
+        let transaction_pool = TxPoolBuilder::new(ctx)
+            .with_validator(validator)
+            .build_and_spawn_maintenance_task(blob_store, pool_config)?;
+
+        info!(target: "smartnet::cli", "Transaction pool initialized");
+        debug!(target: "smartnet::cli", "Spawned txpool maintenance task");
+
+        Ok(transaction_pool)
+    }
+}
+
+/// Network component for `SmartNet`: inert (devp2p/kademlia removed, mesh carries gossip).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EthereumNetworkBuilder {
+    // TODO add closure to modify network
+}
+
+impl<Node, Pool> NetworkBuilder<Node, Pool> for EthereumNetworkBuilder
+where
+    Node: FullNodeTypes<Types: NodeTypes<ChainSpec: Hardforks>>,
+    Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Node::Types>>>
+        + Unpin
+        + 'static,
+{
+    type Network =
+        NoopNetwork<BasicNetworkPrimitives<PrimitivesTy<Node::Types>, PoolPooledTx<Pool>>>;
+
+    async fn build_network(
+        self,
+        ctx: &BuilderContext<Node>,
+        _pool: Pool,
+    ) -> eyre::Result<Self::Network> {
+        // Devp2p/kademlia neutralized (p2p2mesh.md Stage 2): no discovery, no 30303
+        // listener, no "P2P networking initialized". Gossip runs on the mesh
+        // (smartnet-mesh) and block acquisition on rpc-sync; this component stays an
+        // inert Noop so FullNodeComponents, net_*/admin_* RPC, events and the pipeline
+        // wiring keep compiling until Stage 3 detaches them for good.
+        debug!(
+            target: "smartnet::cli",
+            chain_id = ctx.chain_spec().chain_id(),
+            "network component is noop; gossip runs on the mesh"
+        );
+        Ok(NoopNetwork::new().with_chain_id(ctx.chain_spec().chain_id()))
+    }
+}
+
+/// A basic ethereum consensus builder.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EthereumConsensusBuilder {
+    // TODO add closure to modify consensus
+}
+
+impl<Node> ConsensusBuilder<Node> for EthereumConsensusBuilder
+where
+    Node: FullNodeTypes<
+        Types: NodeTypes<ChainSpec: EthChainSpec + EthereumHardforks, Primitives = EthPrimitives>,
+    >,
+{
+    type Consensus = Arc<EthBeaconConsensus<<Node::Types as NodeTypes>::ChainSpec>>;
+
+    async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
+        let chain_spec = ctx.chain_spec();
+        let mut consensus = EthBeaconConsensus::new(chain_spec.clone());
+        let genesis_cfg = &chain_spec.genesis().config;
+        // The Calibri-Lite consensus setup keys on the genesis carrying a validator section in
+        // `extraData` (the legacy `config.clique` object is inert; see `GENESIS-LEGACY-CONFIG.md`).
+        if !smartnet_chainspec::extra_data_validators(chain_spec.genesis().extra_data.as_ref())
+            .is_empty()
+        {
+            if genesis_cfg.london_block.is_none() && chain_spec.is_london_active_at_block(1) {
+                warn!(
+                    target: "smartnet::cli",
+                    event = "CALIBRI_LITE_TX_COMPAT_PROFILE",
+                    london_execution_from_block = 1,
+                    "Calibri Lite execution compatibility profile active (EIP-1559/type-2 for wallet/EVM; not consensus identity)"
+                );
+            }
+            if chain_spec.is_paris_active_at_block(1) {
+                warn!(
+                    target: "smartnet::cli",
+                    event = "CALIBRI_LITE_GENESIS_MERGE_FIELDS",
+                    "Genesis includes Merge-era fields; Calibri Lite runtime profile skips merge header checks — remove terminalTotalDifficulty* for a clean genesis if desired"
+                );
+            }
+            consensus = consensus
+                .with_max_extra_data_size(smartnet_chainspec::CALIBRI_LITE_MAX_EXTRA_DATA_SIZE);
+            let profile = calibri_lite_consensus::SmartNetRuntimeProfile::detect(
+                chain_spec.chain().id(),
+                chain_spec.genesis(),
+            );
+            if let Some(profile) = profile {
+                consensus = consensus.with_smartnet_runtime_profile(profile);
+            }
+        }
+
+        Ok(Arc::new(consensus))
+    }
+}
+
+/// Builder for [`EthereumEngineValidator`].
+#[derive(Debug, Default, Clone)]
+#[non_exhaustive]
+pub struct EthereumEngineValidatorBuilder;
+
+impl<Node, Types> PayloadValidatorBuilder<Node> for EthereumEngineValidatorBuilder
+where
+    Types: NodeTypes<
+        ChainSpec: Hardforks + EthereumHardforks + Clone + 'static,
+        Payload: EngineTypes<ExecutionData = ExecutionData>
+                     + PayloadTypes<PayloadAttributes = EthPayloadAttributes>,
+        Primitives = EthPrimitives,
+    >,
+    Node: FullNodeComponents<Types = Types>,
+{
+    type Validator = EthereumEngineValidator<Types::ChainSpec>;
+
+    async fn build(self, ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
+        Ok(EthereumEngineValidator::new(ctx.config.chain.clone()))
+    }
+}

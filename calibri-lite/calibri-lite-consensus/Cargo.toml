@@ -1,0 +1,23 @@
+[package]
+name = "calibri-lite-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Calibri Lite consensus: pre-consensus block admission and CALIBRI stubs."
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-genesis.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-rpc-types-engine.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-primitives-traits.workspace = true
+k256.workspace = true
+tracing.workspace = true

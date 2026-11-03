@@ -1,0 +1,93 @@
+[package]
+name = "smartnet-eth-wire-types"
+description = "types for eth-wire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-codecs-derive.workspace = true
+smartnet-ethereum-primitives.workspace = true
+smartnet-primitives-traits.workspace = true
+
+# ethereum
+alloy-eip7928 = { workspace = true, features = ["rlp"], optional = true }
+alloy-eips.workspace = true
+alloy-primitives = { workspace = true, features = ["map"] }
+alloy-rlp = { workspace = true, features = ["derive"] }
+alloy-consensus.workspace = true
+
+bytes.workspace = true
+derive_more.workspace = true
+serde = { workspace = true, optional = true }
+thiserror.workspace = true
+
+# arbitrary utils
+arbitrary = { workspace = true, features = ["derive"], optional = true }
+proptest = { workspace = true, optional = true }
+proptest-arbitrary-interop = { workspace = true, optional = true }
+
+[dev-dependencies]
+smartnet-chainspec.workspace = true
+smartnet-ethereum-primitives = { workspace = true, features = ["arbitrary"] }
+alloy-primitives = { workspace = true, features = ["arbitrary", "rand"] }
+alloy-consensus = { workspace = true, features = ["arbitrary"] }
+alloy-eip7928 = { workspace = true, features = ["arbitrary", "rlp"] }
+alloy-eips = { workspace = true, features = ["arbitrary"] }
+alloy-genesis.workspace = true
+alloy-chains = { workspace = true, features = ["arbitrary"] }
+arbitrary = { workspace = true, features = ["derive"] }
+proptest.workspace = true
+proptest-arbitrary-interop.workspace = true
+rand.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "alloy-chains/std",
+    "alloy-consensus/std",
+    "alloy-eip7928?/std",
+    "alloy-eips/std",
+    "alloy-genesis/std",
+    "alloy-primitives/std",
+    "alloy-rlp/std",
+    "bytes/std",
+    "derive_more/std",
+    "smartnet-ethereum-primitives/std",
+    "smartnet-primitives-traits/std",
+    "serde?/std",
+    "thiserror/std",
+    "smartnet-chainspec/std",
+]
+arbitrary = [
+    "smartnet-ethereum-primitives/arbitrary",
+    "alloy-chains/arbitrary",
+    "dep:alloy-eip7928",
+    "alloy-eip7928/arbitrary",
+    "dep:arbitrary",
+    "dep:proptest",
+    "dep:proptest-arbitrary-interop",
+    "smartnet-chainspec/arbitrary",
+    "alloy-consensus/arbitrary",
+    "alloy-eips/arbitrary",
+    "alloy-primitives/arbitrary",
+    "smartnet-primitives-traits/arbitrary",
+]
+serde = [
+    "dep:serde",
+    "alloy-chains/serde",
+    "alloy-consensus/serde",
+    "alloy-eips/serde",
+    "alloy-primitives/serde",
+    "bytes/serde",
+    "rand/serde",
+    "smartnet-primitives-traits/serde",
+    "smartnet-ethereum-primitives/serde",
+    "alloy-eip7928?/serde",
+]

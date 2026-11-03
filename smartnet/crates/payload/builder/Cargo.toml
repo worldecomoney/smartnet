@@ -1,0 +1,50 @@
+[package]
+name = "smartnet-payload-builder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SmartNet payload builder"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-execution-cache.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-chain-state.workspace = true
+smartnet-payload-primitives.workspace = true
+smartnet-engine-primitives.workspace = true
+smartnet-trie-parallel.workspace = true
+
+# alloy
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types = { workspace = true, features = ["engine"] }
+
+# async
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream.workspace = true
+futures-util.workspace = true
+
+# metrics
+smartnet-metrics.workspace = true
+metrics.workspace = true
+
+# misc
+derive_more.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "rt"] }
+
+[features]
+test-utils = [
+    "smartnet-chain-state/test-utils",
+    "smartnet-primitives-traits/test-utils",
+    "tokio/rt",
+    "smartnet-execution-cache/test-utils",
+    "smartnet-trie-parallel/test-utils",
+]

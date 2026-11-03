@@ -1,0 +1,52 @@
+[package]
+name = "smartnet-rpc-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SmartNet RPC API definitions"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-rpc-eth-api.workspace = true
+smartnet-engine-primitives.workspace = true
+smartnet-trie-common = { workspace = true, features = ["serde"] }
+smartnet-chain-state.workspace = true
+smartnet-payload-types.workspace = true
+
+# ethereum
+alloy-eips.workspace = true
+alloy-json-rpc.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
+alloy-rpc-types.workspace = true
+alloy-rpc-types-debug.workspace = true
+alloy-rpc-types-trace.workspace = true
+alloy-rpc-types-anvil.workspace = true
+alloy-rpc-types-mev.workspace = true
+alloy-rpc-types-txpool.workspace = true
+alloy-rpc-types-admin.workspace = true
+alloy-serde.workspace = true
+alloy-rpc-types-beacon.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-genesis.workspace = true
+
+# misc
+jsonrpsee = { workspace = true, features = ["server", "macros"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[features]
+client = [
+    "jsonrpsee/client",
+    "jsonrpsee/async-client",
+    "smartnet-rpc-eth-api/client",
+    "smartnet-chain-state/serde",
+]
+
+[dev-dependencies]
+jsonrpsee = { workspace = true, features = ["client", "async-client", "http-client"] }

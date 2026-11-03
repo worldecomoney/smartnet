@@ -1,0 +1,18 @@
+[package]
+name = "smartnet-payload-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared JSON-RPC wire types for smartnet_newPayload / wem_newPayload (node + validator)."
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["serde"] }
+alloy-rpc-types-engine = { workspace = true, default-features = false, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

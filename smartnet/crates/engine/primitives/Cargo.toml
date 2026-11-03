@@ -1,0 +1,64 @@
+[package]
+name = "smartnet-engine-primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-evm.workspace = true
+smartnet-execution-types.workspace = true
+smartnet-payload-primitives.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-ethereum-primitives.workspace = true
+smartnet-chain-state.workspace = true
+smartnet-errors.workspace = true
+smartnet-trie-common.workspace = true
+
+# calibri (seal signer recovery — the source consensus's fee beneficiary)
+calibri-lite-consensus.workspace = true
+
+# alloy
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-eips.workspace = true
+
+# async
+tokio = { workspace = true, features = ["sync"], optional = true }
+futures = { workspace = true, optional = true }
+
+# misc
+auto_impl.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+assert_matches.workspace = true
+alloy-rlp.workspace = true
+
+[features]
+default = ["std"]
+trie-debug = []
+std = [
+    "smartnet-chainspec/std",
+    "smartnet-execution-types/std",
+    "smartnet-ethereum-primitives/std",
+    "smartnet-primitives-traits/std",
+    "smartnet-trie-common/std",
+    "alloy-primitives/std",
+    "alloy-consensus/std",
+    "alloy-rpc-types-engine/std",
+    "alloy-eips/std",
+    "futures/std",
+    "tokio",
+    "serde/std",
+    "thiserror/std",
+    "smartnet-evm/std",
+]

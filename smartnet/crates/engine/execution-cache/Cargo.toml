@@ -1,0 +1,38 @@
+[package]
+name = "smartnet-execution-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-block execution cache for payload processing"
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+fixed-cache = { workspace = true, features = ["stats"] }
+metrics.workspace = true
+parking_lot.workspace = true
+smartnet-errors.workspace = true
+smartnet-metrics.workspace = true
+smartnet-primitives-traits = { workspace = true, features = ["std"] }
+smartnet-provider.workspace = true
+smartnet-revm.workspace = true
+smartnet-trie.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+alloy-primitives = { workspace = true, features = ["rand"] }
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-revm = { workspace = true, features = ["test-utils"] }
+revm-state.workspace = true
+
+[features]
+test-utils = [
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-revm/test-utils",
+    "smartnet-provider/test-utils",
+    "smartnet-trie/test-utils",
+]

@@ -1,0 +1,60 @@
+[package]
+name = "smartnet-stages-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-codecs.workspace = true
+smartnet-provider.workspace = true
+smartnet-consensus.workspace = true
+smartnet-prune.workspace = true
+smartnet-errors.workspace = true
+smartnet-db-api.workspace = true
+smartnet-stages-types.workspace = true
+
+# alloy
+alloy-primitives.workspace = true
+alloy-eips.workspace = true
+
+# metrics
+smartnet-metrics.workspace = true
+metrics.workspace = true
+
+# async
+smartnet-tasks.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+futures-util.workspace = true
+
+# misc
+aquamarine.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+auto_impl.workspace = true
+
+[dev-dependencies]
+assert_matches.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-db = { workspace = true, features = ["test-utils"] }
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["sync", "rt-multi-thread"] }
+tokio-stream.workspace = true
+smartnet-testing-utils.workspace = true
+
+[features]
+test-utils = [
+    "smartnet-chainspec/test-utils",
+    "smartnet-consensus/test-utils",
+    "smartnet-db-api/test-utils",
+    "smartnet-db/test-utils",
+    "smartnet-provider/test-utils",
+    "smartnet-stages-types/test-utils",
+    "smartnet-tasks/test-utils",
+    "smartnet-codecs/test-utils",
+]

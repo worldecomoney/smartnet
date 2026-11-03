@@ -1,0 +1,71 @@
+[package]
+name = "smartnet-trie-parallel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Parallel implementation of merkle root algorithm"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-primitives-traits = { workspace = true, features = ["dashmap", "std"] }
+smartnet-storage-api = { workspace = true, features = ["db-api"] }
+smartnet-storage-errors.workspace = true
+smartnet-trie-sparse = { workspace = true, features = ["std"] }
+smartnet-tasks = { workspace = true, features = ["rayon"] }
+smartnet-trie.workspace = true
+
+# alloy
+alloy-eip7928.workspace = true
+alloy-evm.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+
+# tracing
+tracing.workspace = true
+
+# revm
+revm-state.workspace = true
+
+# misc
+thiserror.workspace = true
+derive_more.workspace = true
+rayon.workspace = true
+itertools.workspace = true
+crossbeam-channel.workspace = true
+crossbeam-utils.workspace = true
+
+# `metrics` feature
+smartnet-metrics = { workspace = true, optional = true }
+metrics = { workspace = true, optional = true }
+
+# `trie-debug` feature
+rand = { workspace = true, optional = true }
+
+[dev-dependencies]
+# upstream-derived
+smartnet-primitives-traits.workspace = true
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-trie-db.workspace = true
+smartnet-trie = { workspace = true, features = ["test-utils"] }
+
+# misc
+rand.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+
+[features]
+default = ["metrics"]
+metrics = ["smartnet-metrics", "dep:metrics", "smartnet-trie/metrics", "smartnet-trie-sparse/metrics"]
+trie-debug = ["dep:rand", "smartnet-trie-sparse/trie-debug"]
+test-utils = [
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-provider/test-utils",
+    "smartnet-trie-db/test-utils",
+    "smartnet-trie-sparse/test-utils",
+    "smartnet-trie/test-utils",
+    "smartnet-tasks/test-utils",
+]

@@ -1,0 +1,75 @@
+[package]
+name = "jsonrpsee-client-transport"
+description = "JSON-RPC client transports"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+readme.workspace = true
+publish = true
+
+[lints]
+workspace = true
+
+[dependencies]
+jsonrpsee-core = { workspace = true, features = ["client"] }
+
+# optional
+thiserror = { workspace = true, optional = true }
+futures-util = { workspace = true, features = ["alloc"], optional = true }
+http = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tokio-util = { workspace = true, features = ["compat"], optional = true }
+tokio = { workspace = true, features = ["net", "time", "macros"], optional = true }
+pin-project = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+
+# tls
+tokio-rustls = { workspace = true, optional = true, features = ["logging", "tls12", "ring"] }
+rustls-pki-types = { workspace = true, optional = true }
+rustls-platform-verifier = { workspace = true, optional = true }
+rustls = { workspace = true, default-features = false, optional = true }
+
+# ws
+soketto = { workspace = true, optional = true }
+
+# web-sys
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-net = { workspace = true, features = ["json", "websocket"], optional = true }
+futures-channel = { workspace = true, optional = true }
+
+[features]
+tls = ["rustls", "tokio-rustls", "rustls-pki-types"]
+tls-rustls-platform-verifier = ["tls", "rustls-platform-verifier"]
+
+ws = [
+    "base64",
+    "futures-util",
+    "http",
+    "tokio",
+    "tokio-util",
+    "soketto",
+    "pin-project",
+    "thiserror",
+    "tracing",
+    "url",
+]
+web = [
+    "gloo-net",
+    "futures-channel",
+    "futures-util",
+    "thiserror",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[package.metadata.playground]
+all-features = true

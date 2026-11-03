@@ -1,0 +1,67 @@
+[package]
+name = "smartnet-revm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SmartNet revm adapter utilities"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-primitives-traits.workspace = true
+smartnet-storage-errors.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-trie = { workspace = true, optional = true }
+
+# alloy
+alloy-primitives.workspace = true
+alloy-rlp = { workspace = true, optional = true }
+alloy-rpc-types-debug = { workspace = true, optional = true }
+
+# revm
+revm.workspace = true
+
+[dev-dependencies]
+smartnet-trie.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "smartnet-primitives-traits/std",
+    "alloy-primitives/std",
+    "alloy-rlp?/std",
+    "revm/std",
+    "smartnet-storage-api/std",
+    "smartnet-storage-errors/std",
+]
+witness = ["dep:smartnet-trie", "dep:alloy-rlp", "dep:alloy-rpc-types-debug"]
+test-utils = [
+    "dep:smartnet-trie",
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-trie?/test-utils",
+]
+serde = [
+    "revm/serde",
+    "alloy-primitives/serde",
+    "smartnet-trie?/serde",
+    "smartnet-primitives-traits/serde",
+    "smartnet-storage-api/serde",
+]
+portable = ["revm/portable"]
+optional-balance-check = ["revm/optional_balance_check"]
+optional-block-gas-limit = ["revm/optional_block_gas_limit"]
+optional-eip3541 = ["revm/optional_eip3541"]
+optional-eip3607 = ["revm/optional_eip3607"]
+optional-no-base-fee = ["revm/optional_no_base_fee"]
+optional-checks = [
+    "optional-balance-check",
+    "optional-block-gas-limit",
+    "optional-eip3541",
+    "optional-eip3607",
+    "optional-no-base-fee",
+]
+memory_limit = ["revm/memory_limit"]

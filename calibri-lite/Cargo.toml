@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = ["calibri-lite-consensus", "smartnet-payload-types"]
+
+[workspace.package]
+version = "3.7.2"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+repository = ""
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+
+[workspace.dependencies]
+alloy-consensus = { version = "2.0.0", default-features = false }
+alloy-eips = { version = "2.0.0", default-features = false }
+alloy-genesis = { version = "2.0.0", default-features = false }
+alloy-primitives = { version = "1.5.6", default-features = false, features = ["map-foldhash"] }
+alloy-rlp = { version = "0.3.13", default-features = false, features = ["core-net"] }
+alloy-rpc-types-engine = { version = "2.0.0", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+tracing = { version = "0.1.0", default-features = false, features = ["attributes"] }
+
+smartnet-chainspec = { path = "../smartnet/crates/chainspec", default-features = false }
+smartnet-primitives-traits = { path = "../smartnet/crates/primitives/traits", default-features = false }
+
+# See smartnet/Cargo.toml [profile.dev]: incremental caches cost gigabytes and buy nothing
+# for a full `cargo check` + `cargo test` gate (rule: `CARGO_INCREMENTAL=0`).
+[profile.dev]
+incremental = false
+
+[patch.crates-io]
+# Same vendored alloy-evm as the smartnet workspace: seal block-reward opt-out.
+alloy-evm = { path = "../smartnet/vendor/alloy-evm" }
+# Same vendored proc-macro-error2: E0365 future-incompat fix (see smartnet/Cargo.toml).
+proc-macro-error2 = { path = "../smartnet/vendor/proc-macro-error2" }

@@ -1,0 +1,40 @@
+[package]
+name = "smartnet-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-prune-types.workspace = true
+smartnet-stages-types.workspace = true
+
+# serde
+serde = { workspace = true, optional = true }
+humantime-serde = { workspace = true, optional = true }
+
+# toml
+toml = { workspace = true, optional = true }
+eyre = { workspace = true, optional = true }
+
+# value objects
+
+[features]
+serde = [
+    "dep:serde",
+    "dep:toml",
+    "dep:humantime-serde",
+    "dep:eyre",
+    "smartnet-prune-types/serde",
+    "smartnet-stages-types/serde",
+    "alloy-primitives/serde",
+]
+
+[dev-dependencies]
+tempfile.workspace = true
+alloy-primitives = { workspace = true, features = ["getrandom"] }

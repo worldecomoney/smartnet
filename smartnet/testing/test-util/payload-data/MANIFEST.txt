@@ -1,0 +1,31 @@
+# generated probe payloads — edit PARENT via PARENT_HASH env
+
+1.dat — extra_data 32 (post-merge cap probe) (537 bytes)
+2.dat — extra_data 97 fake seal (clique runtime shape) (603 bytes)
+3.dat — extra_data 0 (505 bytes)
+4.dat — extra_data 33 (538 bytes)
+5.dat — extra_data 65 seal-only (571 bytes)
+6.dat — extra_data 117 (32 vanity + 20 signer-ish + 65 seal) (623 bytes)
+7.dat — extra_data 128 (634 bytes)
+8.dat — with base_fee_per_gas=1 (604 bytes)
+9.dat — withdrawals_root set (636 bytes)
+10.dat — difficulty 99 (603 bytes)
+11.dat — wrong parent_hash (603 bytes)
+12.dat — blob gas fields (605 bytes)
+13.dat — garbage 64 bytes (not RLP block) (64 bytes)
+14.dat — rlp empty list 0xc0 (1 bytes)
+15.dat — timestamp 0 (603 bytes)
+
+16.dat — validator-sealed empty block #1 (canonical probe after genesis).
+  Built with run-once --dump-payload …/16.dat when head=0.
+  header_hash_slow=0x007631517bd46e6f90919594480239206eb51d3832a577ac07d5a51c16fe331d
+  state_root=0x68d26af9b488fc194e4ac5c85ef7e68eff342119278b88d921523fba509ac69e
+
+17.dat — block #2 (build when latest number is 1):
+  ./target/release/smartnet-test-util head --node-url http://127.0.0.1:8545
+  ./target/release/smartnet-validator run-once … --dump-payload …/17.dat
+
+16-with-txs — optional: mempool + block #1 with one native transfer (fresh genesis node):
+  ./target/release/smartnet-validator seed-tx --node-url … --secret-key …
+  ./target/release/smartnet-validator run-once … --dump-payload …/16.dat
+  (overwrites empty 16.dat; expect non-empty transactions_root / receipts_root)

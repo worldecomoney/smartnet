@@ -1,0 +1,91 @@
+//! A lazily-resolved handle to a value computed on a background thread.
+
+use std::sync::{Arc, OnceLock};
+use tokio::sync::oneshot;
+
+/// Handle to a value computed on a background thread.
+///
+/// The computation is spawned immediately on creation and runs concurrently.
+/// The result is resolved on first access via [`Self::get`] and cached in a
+/// [`OnceLock`] for subsequent calls.
+///
+/// This type is cheaply cloneable via internal [`Arc`].
+///
+/// Create via [`Runtime::spawn_blocking_named`](crate::Runtime::spawn_blocking_named).
+#[derive(Clone)]
+pub struct LazyHandle<T> {
+    inner: Arc<LazyHandleInner<T>>,
+}
+
+struct LazyHandleInner<T> {
+    /// Pending receiver, taken on first access.
+    rx: std::sync::Mutex<Option<oneshot::Receiver<T>>>,
+    /// Cached result after the first successful receive.
+    value: OnceLock<T>,
+}
+
+impl<T: Send + 'static> LazyHandle<T> {
+    /// Creates a new handle from a background task receiver.
+    pub(crate) fn new(rx: oneshot::Receiver<T>) -> Self {
+        Self {
+            inner: Arc::new(LazyHandleInner {
+                rx: std::sync::Mutex::new(Some(rx)),
+                value: OnceLock::new(),
+            }),
+        }
+    }
+
+    /// Creates a handle that is already resolved with the given value.
+    pub fn ready(value: T) -> Self {
+        let inner =
+            LazyHandleInner { rx: std::sync::Mutex::new(None), value: OnceLock::from(value) };
+        Self { inner: Arc::new(inner) }
+    }
+
+    /// Blocks until the background task completes and returns a reference to the result.
+    ///
+    /// On the first call this awaits the receiver; subsequent calls return the cached value
+    /// without blocking.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the background task was dropped without producing a value.
+    pub fn get(&self) -> &T {
+        self.inner.value.get_or_init(|| {
+            let rx = self
+                .inner
+                .rx
+                .lock()
+                .expect("lock poisoned")
+                .take()
+                .expect("LazyHandle receiver already taken without value being set");
+            rx.blocking_recv().expect("LazyHandle task dropped without producing a value")
+        })
+    }
+
+    /// Consumes the handle and returns the inner value if this is the only handle.
+    ///
+    /// Returns `Err(self)` if other clones exist, so the caller can fall back
+    /// to a reference-based path (e.g. `clone_into_sorted` instead of `into_sorted`).
+    ///
+    /// Blocks if the background task hasn't completed yet.
+    pub fn try_into_inner(self) -> Result<T, Self> {
+        self.get();
+        match Arc::try_unwrap(self.inner) {
+            Ok(inner) => Ok(inner.value.into_inner().expect("value was just set by get()")),
+            Err(arc) => Err(Self { inner: arc }),
+        }
+    }
+}
+
+impl<T: Send + std::fmt::Debug + 'static> std::fmt::Debug for LazyHandle<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("LazyHandle");
+        if let Some(value) = self.inner.value.get() {
+            s.field("value", value);
+        } else {
+            s.field("value", &"<pending>");
+        }
+        s.finish()
+    }
+}

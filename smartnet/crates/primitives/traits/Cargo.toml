@@ -1,0 +1,127 @@
+[package]
+name = "smartnet-primitives-traits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Common primitive types for SmartNet execution."
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-codecs = { workspace = true, optional = true }
+
+# ethereum
+alloy-consensus = { workspace = true, features = ["k256"] }
+alloy-eips.workspace = true
+alloy-genesis.workspace = true
+alloy-primitives = { workspace = true, features = ["k256"] }
+alloy-rlp.workspace = true
+alloy-trie.workspace = true
+revm-primitives.workspace = true
+revm-bytecode.workspace = true
+revm-state.workspace = true
+
+# misc
+byteorder = { workspace = true, optional = true }
+bytes.workspace = true
+dashmap = { workspace = true, features = ["inline"], optional = true }
+derive_more.workspace = true
+once_cell.workspace = true
+quanta = { workspace = true, optional = true }
+thiserror.workspace = true
+
+# required by smartnet-codecs
+modular-bitfield = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+# arbitrary utils
+arbitrary = { workspace = true, features = ["derive"], optional = true }
+proptest = { workspace = true, optional = true }
+proptest-arbitrary-interop = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+alloy-rpc-types-eth = { workspace = true, optional = true }
+
+[dev-dependencies]
+smartnet-codecs.workspace = true
+
+alloy-primitives = { workspace = true, features = ["arbitrary", "serde"] }
+alloy-consensus = { workspace = true, features = ["arbitrary", "serde"] }
+
+arbitrary = { workspace = true, features = ["derive"] }
+modular-bitfield.workspace = true
+byteorder.workspace = true
+proptest-arbitrary-interop.workspace = true
+proptest.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "alloy-consensus/std",
+    "alloy-eips/std",
+    "alloy-genesis/std",
+    "alloy-primitives/std",
+    "revm-primitives/std",
+    "serde?/std",
+    "alloy-rlp/std",
+    "bytes/std",
+    "derive_more/std",
+    "once_cell/std",
+    "quanta",
+    "thiserror/std",
+    "alloy-trie/std",
+    "serde_json/std",
+    "revm-bytecode/std",
+    "revm-state/std",
+    "alloy-rpc-types-eth?/std",
+]
+test-utils = [
+    "arbitrary",
+    "smartnet-codecs?/test-utils",
+]
+arbitrary = [
+    "std",
+    "alloy-consensus/arbitrary",
+    "alloy-primitives/arbitrary",
+    "dep:arbitrary",
+    "dep:proptest",
+    "dep:proptest-arbitrary-interop",
+    "alloy-eips/arbitrary",
+    "revm-primitives/arbitrary",
+    "smartnet-codecs?/arbitrary",
+    "alloy-trie/arbitrary",
+    "alloy-rpc-types-eth?/arbitrary",
+    "dashmap?/arbitrary",
+]
+serde = [
+    "dep:serde",
+    "alloy-consensus/serde",
+    "alloy-eips/serde",
+    "alloy-primitives/serde",
+    "bytes/serde",
+    "smartnet-codecs?/serde",
+    "revm-primitives/serde",
+    "revm-primitives/serde",
+    "alloy-trie/serde",
+    "revm-bytecode/serde",
+    "revm-state/serde",
+    "alloy-rpc-types-eth?/serde",
+    "dashmap?/serde",
+    "rand/serde",
+]
+smartnet-codec = [
+    "dep:smartnet-codecs",
+    "dep:modular-bitfield",
+    "dep:byteorder",
+]
+rayon = [
+    "dep:rayon",
+]
+dashmap = ["dep:dashmap"]
+rpc-compat = ["alloy-rpc-types-eth"]

@@ -1,0 +1,98 @@
+[package]
+name = "smartnet-rpc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SmartNet RPC implementation"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-chainspec.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-rpc-api.workspace = true
+smartnet-rpc-eth-api.workspace = true
+smartnet-engine-primitives.workspace = true
+smartnet-errors.workspace = true
+smartnet-mesh.workspace = true
+smartnet-metrics.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-execution-types = { workspace = true, features = ["serde"] }
+smartnet-chain-state = { workspace = true, features = ["serde"] }
+smartnet-transaction-pool.workspace = true
+smartnet-network-api.workspace = true
+smartnet-rpc-engine-api.workspace = true
+smartnet-revm = { workspace = true, features = ["witness"] }
+smartnet-tasks = { workspace = true, features = ["rayon"] }
+smartnet-rpc-convert.workspace = true
+smartnet-evm.workspace = true
+smartnet-evm-ethereum.workspace = true
+smartnet-rpc-eth-types.workspace = true
+smartnet-rpc-server-types.workspace = true
+smartnet-consensus.workspace = true
+smartnet-node-api.workspace = true
+smartnet-trie-common.workspace = true
+
+# ethereum
+alloy-evm = { workspace = true, features = ["overrides"] }
+alloy-consensus.workspace = true
+alloy-signer.workspace = true
+alloy-signer-local = { workspace = true, features = ["mnemonic"] }
+alloy-eips.workspace = true
+alloy-dyn-abi.workspace = true
+alloy-genesis.workspace = true
+alloy-network.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-client.workspace = true
+alloy-rpc-types-beacon.workspace = true
+alloy-rpc-types.workspace = true
+alloy-rpc-types-eth = { workspace = true, features = ["serde"] }
+alloy-rpc-types-debug.workspace = true
+alloy-rpc-types-trace.workspace = true
+alloy-rpc-types-mev.workspace = true
+alloy-rpc-types-txpool.workspace = true
+alloy-rpc-types-admin.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-serde.workspace = true
+revm = { workspace = true, features = ["optional_block_gas_limit", "optional_eip3607", "optional_no_base_fee", "memory_limit"] }
+revm-primitives = { workspace = true, features = ["serde"] }
+
+# rpc
+jsonrpsee.workspace = true
+serde_json.workspace = true
+jsonrpsee-types.workspace = true
+
+# async
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream.workspace = true
+pin-project.workspace = true
+parking_lot.workspace = true
+
+# misc
+dyn-clone.workspace = true
+tracing.workspace = true
+tracing-futures.workspace = true
+futures.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+derive_more.workspace = true
+itertools.workspace = true
+
+[dev-dependencies]
+smartnet-ethereum-primitives.workspace = true
+smartnet-testing-utils.workspace = true
+smartnet-transaction-pool = { workspace = true, features = ["test-utils"] }
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-db-api.workspace = true
+smartnet-file-tier.workspace = true
+tempfile.workspace = true
+
+rand.workspace = true
+
+jsonrpsee = { workspace = true, features = ["client"] }

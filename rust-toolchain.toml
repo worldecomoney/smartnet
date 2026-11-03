@@ -1,0 +1,5 @@
+# Pin the whole monorepo to the exact stable that compiles today — no floating
+# "stable" channel. `make fmt` / `make clippy` still opt into nightly explicitly
+# (`cargo +nightly fmt` / `cargo +nightly clippy`), which overrides this file.
+[toolchain]
+channel = "1.98.0"

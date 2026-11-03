@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smartnet:
+    name: smartnet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins 1.98.0 — no toolchain action needed (rustup resolves the
+      # pin from the file on every invocation; the former @stable action was dead weight).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: smartnet
+      - name: cargo check
+        working-directory: smartnet
+        run: cargo check --workspace --all-targets
+      - name: cargo test
+        working-directory: smartnet
+        run: make test
+
+  calibri-lite:
+    name: calibri-lite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: calibri-lite
+      - name: cargo test
+        working-directory: calibri-lite
+        run: cargo test
+      - name: fmt check
+        working-directory: calibri-lite
+        run: cargo fmt -- --check
+      - name: clippy
+        working-directory: calibri-lite
+        run: cargo clippy --all-targets -- -D warnings
+
+  gates:
+    name: fmt-clippy-typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `make fmt` / `make clippy` opt into nightly explicitly (`cargo +nightly`), which
+      # overrides the pinned rust-toolchain.toml. Nightly floats, so the clippy warning
+      # budget can drift on nightly updates — raise `clippy.budget` with a reason when
+      # that happens (documented in smartnet/Makefile).
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: smartnet
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: typos-cli
+      - name: fmt check
+        working-directory: smartnet
+        run: make fmt-check
+      - name: clippy budget
+        working-directory: smartnet
+        run: make clippy
+      - name: typos
+        working-directory: smartnet
+        run: make lint-typos

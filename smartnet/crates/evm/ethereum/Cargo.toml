@@ -1,0 +1,60 @@
+[package]
+name = "smartnet-evm-ethereum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-execution-types.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-ethereum-forks.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-ethereum-primitives.workspace = true
+smartnet-engine-primitives.workspace = true
+revm.workspace = true
+smartnet-evm.workspace = true
+smartnet-storage-errors.workspace = true
+
+# Alloy
+alloy-primitives.workspace = true
+alloy-eips.workspace = true
+alloy-evm.workspace = true
+alloy-consensus.workspace = true
+alloy-rpc-types-engine.workspace = true
+
+[dev-dependencies]
+smartnet-testing-utils.workspace = true
+smartnet-evm = { workspace = true, features = ["test-utils"] }
+alloy-genesis.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "alloy-consensus/std",
+    "alloy-eips/std",
+    "alloy-genesis/std",
+    "alloy-primitives/std",
+    "smartnet-ethereum-forks/std",
+    "smartnet-chainspec/std",
+    "alloy-evm/std",
+    "smartnet-execution-types/std",
+    "smartnet-evm/std",
+    "smartnet-primitives-traits/std",
+    "revm/std",
+    "smartnet-ethereum-primitives/std",
+    "alloy-rpc-types-engine/std",
+    "smartnet-storage-errors/std",
+]
+test-utils = [
+    "std",
+    "smartnet-chainspec/test-utils",
+    "smartnet-ethereum-primitives/test-utils",
+    "smartnet-evm/test-utils",
+    "smartnet-primitives-traits/test-utils",
+]

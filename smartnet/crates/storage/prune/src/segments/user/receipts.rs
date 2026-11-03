@@ -1,0 +1,63 @@
+use crate::{
+    segments::{PruneInput, Segment},
+    PrunerError,
+};
+use smartnet_primitives_traits::NodePrimitives;
+use smartnet_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment, SegmentOutput};
+use smartnet_db_api::{table::Value, transaction::DbTxMut};
+use smartnet_provider::{
+    errors::provider::ProviderResult, BlockReader, DBProvider, NodePrimitivesProvider,
+    PruneCheckpointWriter, StorageSettingsCache, TransactionsProvider,
+};
+use tracing::instrument;
+
+#[derive(Debug)]
+pub struct Receipts {
+    mode: PruneMode,
+}
+
+impl Receipts {
+    pub const fn new(mode: PruneMode) -> Self {
+        Self { mode }
+    }
+}
+
+impl<Provider> Segment<Provider> for Receipts
+where
+    Provider: DBProvider<Tx: DbTxMut>
+        + PruneCheckpointWriter
+        + TransactionsProvider
+        + BlockReader
+        + StorageSettingsCache
+        + NodePrimitivesProvider<Primitives: NodePrimitives<Receipt: Value>>,
+{
+    fn segment(&self) -> PruneSegment {
+        PruneSegment::Receipts
+    }
+
+    fn mode(&self) -> Option<PruneMode> {
+        Some(self.mode)
+    }
+
+    fn purpose(&self) -> PrunePurpose {
+        PrunePurpose::User
+    }
+
+    #[instrument(
+        name = "Receipts::prune",
+        target = "pruner",
+        skip(self, provider),
+        ret(level = "trace")
+    )]
+    fn prune(&self, provider: &Provider, input: PruneInput) -> Result<SegmentOutput, PrunerError> {
+        crate::segments::receipts::prune(provider, input)
+    }
+
+    fn save_checkpoint(
+        &self,
+        provider: &Provider,
+        checkpoint: PruneCheckpoint,
+    ) -> ProviderResult<()> {
+        crate::segments::receipts::save_checkpoint(provider, checkpoint)
+    }
+}

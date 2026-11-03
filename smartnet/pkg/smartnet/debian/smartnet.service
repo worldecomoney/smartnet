@@ -1,0 +1,13 @@
+[Unit]
+Description=SmartNet execution node (Calibri Lite pre-consensus)
+Wants=network-online.target
+After=network.target network-online.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+StateDirectory=smartnet
+ExecStart=/usr/bin/smartnet --config /etc/smartnet/smartnet.toml
+
+[Install]
+WantedBy=multi-user.target

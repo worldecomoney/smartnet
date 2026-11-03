@@ -1,0 +1,28 @@
+[package]
+name = "smartnet-rpc-server-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "RPC server types and constants"
+
+[lints]
+workspace = true
+
+[dependencies]
+smartnet-errors.workspace = true
+smartnet-network-api.workspace = true
+
+# ethereum
+alloy-primitives.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-eips.workspace = true
+
+# rpc
+jsonrpsee-core.workspace = true
+jsonrpsee-types.workspace = true
+
+# misc
+strum = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }

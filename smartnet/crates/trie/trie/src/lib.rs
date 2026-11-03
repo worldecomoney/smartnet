@@ -1,0 +1,69 @@
+//! The implementation of Merkle Patricia Trie, a cryptographically
+//! authenticated radix trie that is used to store key-value bindings.
+//! <https://ethereum.org/en/developers/docs/data-structures-and-encoding/patricia-merkle-trie/>
+//!
+//! ## Feature Flags
+//!
+//! - `rayon`: uses rayon for parallel [`HashedPostState`] creation.
+//! - `test-utils`: Export utilities for testing
+
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+/// The implementation of forward-only in-memory cursor.
+pub mod forward_cursor;
+
+/// The cursor implementations for navigating account and storage tries.
+pub mod trie_cursor;
+
+/// The cursor implementations for navigating hashed state.
+pub mod hashed_cursor;
+
+/// The trie walker for iterating over the trie nodes.
+pub mod walker;
+
+/// The iterators for traversing existing intermediate hashes and updated trie leaves.
+pub mod node_iter;
+
+/// Merkle proof generation.
+pub mod proof;
+
+/// Merkle proof generation v2 (leaf-only implementation).
+pub mod proof_v2;
+
+/// Trie witness generation.
+pub mod witness;
+
+/// Trie changeset computation.
+pub mod changesets;
+
+/// The implementation of the Merkle Patricia Trie.
+mod trie;
+pub use trie::{StateRoot, StorageRoot, TrieType};
+
+/// Utilities for state root checkpoint progress.
+mod progress;
+pub use progress::{
+    IntermediateStateRootState, IntermediateStorageRootState, StateRootProgress,
+    StorageRootProgress,
+};
+
+/// Trie calculation stats.
+pub mod stats;
+
+// re-export for convenience
+pub use smartnet_trie_common::*;
+
+/// Trie calculation metrics.
+#[cfg(feature = "metrics")]
+pub mod metrics;
+
+/// Collection of trie-related test utilities.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
+
+/// Collection of mock types for testing.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod mock;
+
+/// Verification of existing stored trie nodes against state data.
+pub mod verify;

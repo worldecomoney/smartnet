@@ -1,0 +1,10 @@
+# Hook so `cargo build --release` at repo root runs `make build` → bin/smartnet.
+# Libraries and apps live in calibri-lite/ and smartnet/ workspaces.
+[package]
+name = "smartnet-monorepo"
+version = "0.0.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+license = "MIT"

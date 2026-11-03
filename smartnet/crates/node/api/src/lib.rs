@@ -1,0 +1,26 @@
+//! Standalone crate for `SmartNet` configuration traits and builder types.
+
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+/// Traits, validation methods, and helper types used to abstract over engine types.
+pub use smartnet_engine_primitives as engine;
+pub use smartnet_engine_primitives::*;
+
+/// Traits and helper types used to abstract over payload types.
+pub use smartnet_payload_primitives as payload;
+pub use smartnet_payload_primitives::*;
+
+/// Traits and helper types used to abstract over payload builder types
+/// (merged into `smartnet_payload_primitives`).
+pub use smartnet_payload_primitives as payload_builder;
+
+/// Traits and helper types used to abstract over EVM methods and types.
+pub use smartnet_evm::{ConfigureEvm, NextBlockEnvAttributes};
+
+pub mod node;
+pub use node::*;
+
+// re-export for convenience
+pub use smartnet_node_types::*;
+pub use smartnet_provider::FullProvider;

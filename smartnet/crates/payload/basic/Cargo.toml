@@ -1,0 +1,41 @@
+[package]
+name = "smartnet-basic-payload-builder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Basic payload builder using the txpool API."
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-execution-cache.workspace = true
+smartnet-trie-parallel.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-payload-builder.workspace = true
+smartnet-payload-primitives.workspace = true
+smartnet-tasks.workspace = true
+smartnet-revm.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-chain-state.workspace = true
+
+# ethereum
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+
+# async
+tokio = { workspace = true, features = ["sync", "time"] }
+futures-core.workspace = true
+futures-util.workspace = true
+
+# metrics
+smartnet-metrics.workspace = true
+metrics.workspace = true
+
+# misc
+tracing.workspace = true
+serde.workspace = true

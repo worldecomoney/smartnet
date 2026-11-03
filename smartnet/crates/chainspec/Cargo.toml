@@ -1,0 +1,64 @@
+[package]
+name = "smartnet-chainspec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-ethereum-forks.workspace = true
+alloy-trie = { workspace = true, features = ["ethereum"] }
+smartnet-primitives-traits.workspace = true
+
+# ethereum
+alloy-evm.workspace = true
+alloy-chains = { workspace = true, features = ["serde", "rlp"] }
+alloy-eips = { workspace = true, features = ["serde"] }
+alloy-genesis.workspace = true
+alloy-primitives = { workspace = true, features = ["rlp"] }
+alloy-consensus.workspace = true
+
+# misc
+auto_impl.workspace = true
+serde_json.workspace = true
+derive_more.workspace = true
+
+[dev-dependencies]
+# eth
+alloy-trie = { workspace = true, features = ["arbitrary"] }
+alloy-eips = { workspace = true, features = ["arbitrary"] }
+alloy-rlp = { workspace = true, features = ["arrayvec"] }
+
+[features]
+default = ["std"]
+std = [
+    "alloy-chains/std",
+    "alloy-eips/std",
+    "alloy-genesis/std",
+    "alloy-primitives/std",
+    "alloy-trie/std",
+    "smartnet-primitives-traits/std",
+    "alloy-consensus/std",
+    "alloy-rlp/std",
+    "smartnet-ethereum-forks/std",
+    "derive_more/std",
+    "serde_json/std",
+    "alloy-evm/std",
+]
+arbitrary = [
+    "alloy-chains/arbitrary",
+    "smartnet-ethereum-forks/arbitrary",
+    "smartnet-primitives-traits/arbitrary",
+    "alloy-consensus/arbitrary",
+    "alloy-eips/arbitrary",
+    "alloy-primitives/arbitrary",
+    "alloy-trie/arbitrary",
+]
+test-utils = [
+    "smartnet-primitives-traits/test-utils",
+]

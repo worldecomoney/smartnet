@@ -1,0 +1,13 @@
+[package]
+name = "smartnet-timing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Wall-clock duration formatting for SmartNet logs (non-decimal, e.g. 0s120ms)."
+
+[lints]
+workspace = true
+
+[dependencies]

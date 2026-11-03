@@ -1,0 +1,44 @@
+[package]
+name = "smartnet-ethereum-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-execution-types.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-consensus.workspace = true
+calibri-lite-consensus.workspace = true
+
+# alloy
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+
+tracing.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "alloy-consensus/std",
+    "alloy-eips/std",
+    "alloy-primitives/std",
+    "smartnet-chainspec/std",
+    "smartnet-consensus/std",
+    "smartnet-ethereum-primitives/std",
+    "smartnet-execution-types/std",
+    "smartnet-primitives-traits/std",
+    "tracing/std",
+]
+
+[dev-dependencies]
+smartnet-ethereum-primitives.workspace = true
+alloy-primitives = { workspace = true, features = ["getrandom"] }
+alloy-genesis.workspace = true

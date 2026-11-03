@@ -1,0 +1,84 @@
+[package]
+name = "smartnet-trie-sparse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sparse MPT implementation"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-primitives-traits.workspace = true
+smartnet-trie-common.workspace = true
+tracing = { workspace = true, features = ["attributes"] }
+alloy-trie.workspace = true
+
+# alloy
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+
+# misc
+auto_impl.workspace = true
+rayon = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+smallvec.workspace = true
+slotmap = { workspace = true, optional = true }
+
+# metrics
+smartnet-metrics = { workspace = true, optional = true }
+metrics = { workspace = true, optional = true }
+
+[dev-dependencies]
+smartnet-primitives-traits = { workspace = true, features = ["arbitrary"] }
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-trie = { workspace = true, features = ["test-utils"] }
+smartnet-trie-common = { workspace = true, features = ["test-utils", "arbitrary"] }
+smartnet-trie-db = { workspace = true, features = ["test-utils"] }
+smartnet-tracing.workspace = true
+
+arbitrary.workspace = true
+assert_matches.workspace = true
+itertools.workspace = true
+pretty_assertions.workspace = true
+proptest-arbitrary-interop.workspace = true
+proptest.workspace = true
+rand.workspace = true
+
+[features]
+default = ["std", "metrics"]
+std = [
+    "dep:rayon",
+    "dep:slotmap",
+    "alloy-primitives/std",
+    "alloy-rlp/std",
+    "alloy-trie/std",
+    "smartnet-primitives-traits/std",
+    "smartnet-primitives-traits/rayon",
+    "smartnet-trie-common/std",
+    "tracing/std",
+    "serde?/std",
+    "serde_json?/std",
+]
+metrics = ["dep:smartnet-metrics", "dep:metrics", "std"]
+trie-debug = ["std", "dep:serde", "dep:serde_json", "alloy-primitives/serde", "alloy-trie/serde"]
+test-utils = [
+    "std",
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-provider/test-utils",
+    "smartnet-trie-common/test-utils",
+    "smartnet-trie-db/test-utils",
+    "smartnet-trie/test-utils",
+]
+arbitrary = [
+    "std",
+    "alloy-primitives/arbitrary",
+    "alloy-trie/arbitrary",
+    "smartnet-primitives-traits/arbitrary",
+    "smartnet-trie-common/arbitrary",
+    "smallvec/arbitrary",
+]

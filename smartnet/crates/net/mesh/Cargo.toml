@@ -1,0 +1,47 @@
+[package]
+name = "smartnet-mesh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Closed-list all-to-all binary WebSocket mesh — SmartNet's devp2p replacement"
+
+[lints]
+workspace = true
+
+[dependencies]
+# async runtime / io
+tokio = { workspace = true, features = ["net", "io-util", "time", "rt", "sync", "macros"] }
+futures.workspace = true
+async-trait.workspace = true
+
+# wire format
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+reqwest.workspace = true
+tokio-tungstenite.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }
+
+# Layer-2 identity handshake: recoverable secp256k1 sign/verify (HELLO).
+k256 = { workspace = true, features = ["ecdsa"] }
+getrandom.workspace = true
+
+# Node identity keystore: encrypted Ethereum JSON v3 decrypt (the one shared loader).
+# `alloy-signer-local` provides `PrivateKeySigner::decrypt_keystore` (scrypt/AES-128-CTR),
+# same format geth and the validator's `smartnet-validator keystore` writer produce.
+alloy-signer-local = { workspace = true, features = ["keystore"] }
+eyre.workspace = true
+
+# logging / errors
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+# Keystore test fixture builder encrypts a key with OsRng.
+rand_08 = { package = "rand", version = "0.8" }
+# Tests build reqwest clients; the workspace `rustls-no-provider` reqwest needs a
+# process-default crypto provider installed first (the node binary does this in `main`).
+smartnet-tls-provider.workspace = true

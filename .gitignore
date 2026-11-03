@@ -1,0 +1,23 @@
+# Monorepo: calibri-lite + smartnet + validator (all Rust/Cargo).
+# Single project-root file; the former calibri-lite/, smartnet/, validator/
+# and bin/ .gitignore files are merged here. Each workspace builds under `target/`.
+
+# Rust / Cargo build output (matches `target/` at any depth).
+target/
+
+# Built binaries — root `make build` copies target/ → bin/. Git keeps only the placeholder.
+/bin/*
+!/bin/.gitkeep
+
+# Reference archive (nested git repo, intentionally kept out of the project repo).
+.ref/
+
+# Secrets (none in-tree today; guard the convention).
+.env
+.env.*tmp/
+
+# per-session run artifacts
+tmp/
+
+# Downloaded solc compilers (multi-MB toolchain, not source).
+solc/

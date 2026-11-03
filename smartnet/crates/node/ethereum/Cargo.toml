@@ -1,0 +1,101 @@
+[package]
+name = "smartnet-node-ethereum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-ethereum-payload-builder.workspace = true
+smartnet-ethereum-consensus.workspace = true
+calibri-lite-consensus.workspace = true
+smartnet-ethereum-primitives.workspace = true
+smartnet-primitives-traits = { workspace = true, features = ["rayon"] }
+smartnet-node-builder.workspace = true
+smartnet-tracing.workspace = true
+smartnet-provider.workspace = true
+smartnet-transaction-pool.workspace = true
+smartnet-eth-wire-types.workspace = true
+smartnet-network-api.workspace = true
+smartnet-evm.workspace = true
+smartnet-evm-ethereum = { workspace = true, features = ["std"] }
+smartnet-rpc.workspace = true
+smartnet-rpc-api.workspace = true
+smartnet-rpc-eth-api.workspace = true
+smartnet-rpc-builder.workspace = true
+smartnet-rpc-server-types.workspace = true
+smartnet-node-api.workspace = true
+smartnet-validator.workspace = true
+smartnet-mesh.workspace = true
+smartnet-chain-state.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-revm = { workspace = true, features = ["std"] }
+smartnet-rpc-eth-types.workspace = true
+smartnet-engine-primitives = { workspace = true, features = ["std"] }
+smartnet-payload-primitives.workspace = true
+# ethereum
+alloy-eips.workspace = true
+alloy-network.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-rpc-types-eth.workspace = true
+alloy-rpc-types-txpool.workspace = true
+alloy-consensus.workspace = true
+alloy-rlp.workspace = true
+serde_json.workspace = true
+
+# async
+futures.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+
+# revm with required ethereum features
+# Note: this must be kept to ensure all features are properly enabled/forwarded
+revm = { workspace = true, features = ["memory_limit"] }
+
+# misc
+eyre.workspace = true
+tracing.workspace = true
+
+smartnet-engine-rpc-sync.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-tasks.workspace = true
+smartnet-timing.workspace = true
+alloy-primitives.workspace = true
+
+[dev-dependencies]
+smartnet-db.workspace = true
+smartnet-node-core.workspace = true
+smartnet-stages-types.workspace = true
+tempfile.workspace = true
+jsonrpsee-core.workspace = true
+
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+
+tokio.workspace = true
+
+[features]
+default = []
+keccak-cache-global = [
+    "alloy-primitives/keccak-cache-global",
+    "smartnet-node-core/keccak-cache-global",
+]
+test-utils = [
+    "smartnet-node-builder/test-utils",
+    "smartnet-chainspec/test-utils",
+    "smartnet-ethereum-primitives/test-utils",
+    "smartnet-revm/test-utils",
+    "smartnet-db/test-utils",
+    "smartnet-provider/test-utils",
+    "smartnet-transaction-pool/test-utils",
+    "smartnet-evm/test-utils",
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-evm-ethereum/test-utils",
+    "smartnet-stages-types/test-utils",
+    "smartnet-tasks/test-utils",
+]

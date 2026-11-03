@@ -1,0 +1,58 @@
+[package]
+name = "smartnet-payload-primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-primitives-traits.workspace = true
+smartnet-errors.workspace = true
+smartnet-chain-state.workspace = true
+smartnet-execution-types.workspace = true
+smartnet-trie-common.workspace = true
+
+# alloy
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
+
+# misc
+auto_impl.workspace = true
+either.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, default-features = false, features = ["sync"] }
+pin-project.workspace = true
+tokio-stream = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "smartnet-execution-types/std",
+    "smartnet-trie-common/std",
+    "alloy-eips/std",
+    "alloy-primitives/std",
+    "alloy-rpc-types-engine/std",
+    "serde/std",
+    "thiserror/std",
+    "smartnet-primitives-traits/std",
+    "either/std",
+    "alloy-consensus/std",
+    "alloy-rlp/std",
+    "serde_json/std",
+    "sha2/std",
+]

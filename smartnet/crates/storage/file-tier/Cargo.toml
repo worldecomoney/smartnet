@@ -1,0 +1,34 @@
+[package]
+name = "smartnet-file-tier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Stage 6 gz write-once file tier: shard math, path derivation, seal and crash recovery for aged-out block payloads."
+
+[lints]
+workspace = true
+
+[dependencies]
+# misc
+flate2.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+# alloy
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-eips.workspace = true
+
+# local
+smartnet-fs-util = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "file_tier_batch"
+harness = false

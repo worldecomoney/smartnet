@@ -1,0 +1,130 @@
+[package]
+name = "smartnet-transaction-pool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transaction pool implementation"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-chain-state.workspace = true
+smartnet-ethereum-primitives.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-eth-wire-types.workspace = true
+smartnet-evm.workspace = true
+smartnet-evm-ethereum.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-execution-types.workspace = true
+smartnet-fs-util.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-tasks.workspace = true
+revm.workspace = true
+revm-interpreter.workspace = true
+revm-primitives.workspace = true
+
+# ethereum
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-consensus.workspace = true
+
+# async/futures
+futures-util.workspace = true
+parking_lot.workspace = true
+pin-project.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream.workspace = true
+
+# metrics
+smartnet-metrics.workspace = true
+metrics.workspace = true
+
+# misc
+aquamarine.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rustc-hash.workspace = true
+schnellru.workspace = true
+serde = { workspace = true, features = ["derive", "rc"] }
+serde_json.workspace = true
+bitflags.workspace = true
+auto_impl.workspace = true
+imbl.workspace = true
+smallvec.workspace = true
+
+# testing
+rand = { workspace = true, optional = true }
+paste = { workspace = true, optional = true }
+proptest = { workspace = true, optional = true }
+proptest-arbitrary-interop = { workspace = true, optional = true }
+
+[dev-dependencies]
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-tracing.workspace = true
+alloy-primitives = { workspace = true, features = ["rand"] }
+paste.workspace = true
+rand.workspace = true
+proptest.workspace = true
+proptest-arbitrary-interop.workspace = true
+assert_matches.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+futures.workspace = true
+
+[features]
+serde = [
+    "smartnet-execution-types/serde",
+    "smartnet-eth-wire-types/serde",
+    "alloy-consensus/serde",
+    "alloy-eips/serde",
+    "alloy-primitives/serde",
+    "bitflags/serde",
+    "imbl/serde",
+    "parking_lot/serde",
+    "rand?/serde",
+    "smallvec/serde",
+    "revm-interpreter/serde",
+    "revm-primitives/serde",
+    "smartnet-primitives-traits/serde",
+    "smartnet-ethereum-primitives/serde",
+    "smartnet-chain-state/serde",
+    "smartnet-storage-api/serde",
+    "revm/serde",
+]
+test-utils = [
+    "rand",
+    "paste",
+    "serde",
+    "smartnet-chain-state/test-utils",
+    "smartnet-chainspec/test-utils",
+    "smartnet-provider/test-utils",
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-ethereum-primitives/test-utils",
+    "alloy-primitives/rand",
+    "smartnet-evm/test-utils",
+    "smartnet-evm-ethereum/test-utils",
+    "smartnet-tasks/test-utils",
+]
+arbitrary = [
+    "proptest",
+    "proptest-arbitrary-interop",
+    "imbl/arbitrary",
+    "smartnet-chainspec/arbitrary",
+    "smartnet-eth-wire-types/arbitrary",
+    "alloy-consensus/arbitrary",
+    "alloy-eips/arbitrary",
+    "alloy-primitives/arbitrary",
+    "bitflags/arbitrary",
+    "smartnet-primitives-traits/arbitrary",
+    "smallvec/arbitrary",
+    "revm-interpreter/arbitrary",
+    "smartnet-ethereum-primitives/arbitrary",
+    "revm-primitives/arbitrary",
+    "revm/arbitrary",
+    "imbl/arbitrary",
+]

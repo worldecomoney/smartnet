@@ -1,0 +1,39 @@
+[package]
+name = "smartnet-rpc-convert"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compatibility layer for primitives and Ethereum RPC types"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-primitives-traits.workspace = true
+smartnet-evm.workspace = true
+
+# ethereum
+alloy-primitives.workspace = true
+alloy-rpc-types-eth = { workspace = true, features = ["serde"] }
+alloy-consensus.workspace = true
+alloy-network.workspace = true
+alloy-signer.workspace = true
+alloy-json-rpc.workspace = true
+alloy-evm = { workspace = true, features = ["rpc"] }
+
+# io
+jsonrpsee-types.workspace = true
+
+# error
+thiserror.workspace = true
+
+auto_impl.workspace = true
+dyn-clone.workspace = true
+
+[dev-dependencies]
+
+[features]
+default = []

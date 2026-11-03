@@ -1,0 +1,119 @@
+[package]
+name = "smartnet-node-builder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+## upstream-derived
+smartnet-chain-state.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-config = { workspace = true, features = ["serde"] }
+smartnet-consensus.workspace = true
+smartnet-db = { workspace = true }
+smartnet-db-api.workspace = true
+smartnet-engine-primitives = { workspace = true, features = ["std"] }
+smartnet-engine-tree.workspace = true
+smartnet-evm.workspace = true
+smartnet-file-tier.workspace = true
+smartnet-fs-util.workspace = true
+smartnet-eth-wire-types.workspace = true
+smartnet-network-api.workspace = true
+smartnet-node-api.workspace = true
+smartnet-node-core.workspace = true
+smartnet-payload-builder.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-provider.workspace = true
+smartnet-prune.workspace = true
+smartnet-rpc.workspace = true
+smartnet-rpc-api = { workspace = true, features = ["client"] }
+smartnet-rpc-builder.workspace = true
+smartnet-rpc-engine-api.workspace = true
+smartnet-rpc-eth-types.workspace = true
+smartnet-stages.workspace = true
+calibri-lite-consensus.workspace = true
+smartnet-errors.workspace = true
+smartnet-prune-types.workspace = true
+smartnet-payload-primitives.workspace = true
+smartnet-revm = { workspace = true, features = ["serde"] }
+smartnet-storage-api = { workspace = true, features = ["std"] }
+smartnet-timing.workspace = true
+smartnet-tasks = { workspace = true, features = ["rayon"] }
+smartnet-tracing.workspace = true
+smartnet-transaction-pool.workspace = true
+smartnet-trie-db = { workspace = true, features = ["metrics"] }
+smartnet-basic-payload-builder.workspace = true
+
+## ethereum
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types = { workspace = true, features = ["engine"] }
+alloy-eips.workspace = true
+alloy-rpc-types-engine.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+derive_more.workspace = true
+humantime.workspace = true
+itertools.workspace = true
+pin-project.workspace = true
+## async
+futures.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "time", "rt-multi-thread"] }
+tokio-stream.workspace = true
+tokio-util.workspace = true
+
+## crypto
+
+## misc
+aquamarine.workspace = true
+eyre.workspace = true
+parking_lot.workspace = true
+jsonrpsee.workspace = true
+fdlimit.workspace = true
+rayon.workspace = true
+
+# tracing
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+smartnet-ethereum-primitives.workspace = true
+smartnet-revm = { workspace = true, features = ["test-utils"] }
+smartnet-testing-utils.workspace = true
+smartnet-payload-builder = { workspace = true, features = ["test-utils"] }
+smartnet-node-ethereum.workspace = true
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-evm-ethereum = { workspace = true, features = ["test-utils"] }
+
+[features]
+default = []
+test-utils = [
+    "smartnet-db/test-utils",
+    "smartnet-chain-state/test-utils",
+    "smartnet-chainspec/test-utils",
+    "smartnet-consensus/test-utils",
+    "smartnet-engine-tree/test-utils",
+    "smartnet-evm/test-utils",
+    "smartnet-payload-builder/test-utils",
+    "smartnet-stages/test-utils",
+    "smartnet-db-api/test-utils",
+    "smartnet-provider/test-utils",
+    "smartnet-transaction-pool/test-utils",
+    "smartnet-trie-db/test-utils",
+    "smartnet-evm-ethereum/test-utils",
+    "smartnet-node-ethereum/test-utils",
+    "smartnet-primitives-traits/test-utils",
+    "smartnet-tasks/test-utils",
+]
+trie-debug = [
+    "smartnet-engine-tree/trie-debug",
+    "smartnet-engine-primitives/trie-debug",
+    "smartnet-node-core/trie-debug",
+]

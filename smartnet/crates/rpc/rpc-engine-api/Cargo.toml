@@ -1,0 +1,57 @@
+[package]
+name = "smartnet-rpc-engine-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Implementation of Engine API"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-chainspec.workspace = true
+smartnet-rpc-api.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-payload-builder.workspace = true
+smartnet-payload-primitives.workspace = true
+smartnet-tasks.workspace = true
+smartnet-engine-primitives.workspace = true
+smartnet-timing.workspace = true
+smartnet-transaction-pool.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-network-api.workspace = true
+
+# ethereum
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-rpc-types-engine.workspace = true
+
+# async
+tokio = { workspace = true, features = ["sync"] }
+
+# metrics
+smartnet-metrics.workspace = true
+metrics.workspace = true
+
+# misc
+async-trait.workspace = true
+jsonrpsee-core.workspace = true
+jsonrpsee-types.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+smartnet-provider = { workspace = true, features = ["test-utils"] }
+smartnet-ethereum-primitives.workspace = true
+smartnet-payload-builder = { workspace = true, features = ["test-utils"] }
+smartnet-testing-utils.workspace = true
+alloy-rlp.workspace = true
+smartnet-node-ethereum.workspace = true
+smartnet-tasks = { workspace = true, features = ["test-utils"] }
+
+assert_matches.workspace = true

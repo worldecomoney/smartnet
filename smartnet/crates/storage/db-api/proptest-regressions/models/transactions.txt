@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 41d2dd979f9cd5d5f1af647248901faaa2f8a2427af0de52980cb71609283b20 # shrinks to field = StoredTransaction { sender: None, block_number: 0, transaction: Legacy(Signed { tx: TxLegacy { chain_id: None, nonce: 0, gas_price: 0, gas_limit: 0, to: Create, value: 0, input: 0x }, signature: Signature { y_parity: true, r: 78700907510650311386029420616731932502827700582611382139705786111104143734063, s: 54720932009415799151642900496218109961251290031100085831104640005942186435884 }, hash: OnceLock(<uninit>) }) }

@@ -1,0 +1,41 @@
+[package]
+name = "smartnet-ethereum-payload-builder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ethereum payload builder using the txpool API."
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-ethereum-primitives.workspace = true
+smartnet-execution-cache.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-revm.workspace = true
+smartnet-transaction-pool.workspace = true
+smartnet-payload-builder.workspace = true
+smartnet-storage-api.workspace = true
+smartnet-payload-primitives.workspace = true
+smartnet-basic-payload-builder.workspace = true
+smartnet-evm.workspace = true
+smartnet-evm-ethereum = { workspace = true, features = ["std"] }
+smartnet-errors.workspace = true
+smartnet-chainspec.workspace = true
+calibri-lite-consensus.workspace = true
+
+# ethereum
+alloy-rlp.workspace = true
+alloy-rpc-types-engine.workspace = true
+revm.workspace = true
+
+# alloy
+alloy-eips.workspace = true
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+
+# misc
+tracing.workspace = true

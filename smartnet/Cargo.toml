@@ -1,0 +1,528 @@
+[workspace.package]
+version = "3.7.2"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+repository = ""
+exclude = [".github/"]
+
+[workspace]
+members = [
+    "bin/smartnet/",
+    "crates/chain-state/",
+    "crates/chainspec/",
+    "crates/config/",
+    "crates/consensus/consensus/",
+    "crates/crypto/tls-provider/",
+    "crates/primitives/traits/",
+    "crates/storage/codecs/",
+    "crates/storage/codecs/derive/",
+    "testing/test-util/",
+    "crates/engine/primitives/",
+    "crates/engine/execution-cache/",
+    "crates/engine/rpc-sync/",
+    "crates/engine/tree/",
+    "crates/errors/",
+    "crates/ethereum/hardforks/",
+    "crates/node/cli/",
+    "crates/consensus/ethereum/",
+    "crates/evm/ethereum",
+    "crates/node/ethereum",
+    "crates/payload/ethereum/",
+    "crates/node/validator/",
+    "crates/primitives/ethereum/",
+    "crates/evm/evm",
+    "crates/evm/execution-errors",
+    "crates/evm/execution-types",
+    "crates/metrics/",
+    "crates/net/eth-wire-types",
+    "crates/net/mesh/",
+    "crates/net/network-api/",
+    "crates/net/network-types/",
+    "crates/net/rpc-sync/",
+    "crates/node/api/",
+    "crates/node/builder/",
+    "crates/node/core/",
+    "crates/node/types",
+    "crates/payload/basic/",
+    "crates/payload/builder/",
+    "crates/payload/primitives/",
+    "crates/storage/prune",
+    "crates/storage/prune-types",
+    "crates/evm/revm/",
+    "crates/rpc/rpc-api/",
+    "crates/rpc/rpc-builder/",
+    "crates/rpc/rpc-engine-api/",
+    "crates/rpc/rpc-eth-api/",
+    "crates/rpc/rpc-eth-types/",
+    "crates/rpc/rpc-server-types/",
+    "crates/rpc/rpc-convert/",
+    "crates/rpc/rpc/",
+    "crates/stages/api/",
+    "crates/stages/stages/",
+    "crates/stages/types/",
+    "crates/storage/db-api/",
+    "crates/storage/db-models/",
+    "crates/storage/db/",
+    "crates/storage/errors/",
+    "crates/storage/file-tier/",
+    "crates/storage/provider/",
+    "crates/storage/storage-api/",
+    "crates/tasks/",
+    "crates/timing/",
+    "crates/tracing/",
+    "crates/txpool/",
+    "crates/trie/common",
+    "crates/trie/db",
+    "crates/trie/parallel/",
+    "crates/trie/sparse",
+    "crates/trie/trie",
+    "testing/testing-utils",
+]
+default-members = ["bin/smartnet", "testing/test-util"]
+exclude = ["docs/cli"]
+
+# Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021
+# https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html
+resolver = "2"
+
+[workspace.lints]
+rust.missing_debug_implementations = "warn"
+rust.missing_docs = "warn"
+rust.rust_2018_idioms = { level = "deny", priority = -1 }
+rust.unreachable_pub = "warn"
+rust.unused_must_use = "deny"
+rust.rust_2024_incompatible_pat = "warn"
+rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
+rustdoc.all = "warn"
+# rust.unnameable-types = "warn"
+
+[workspace.lints.clippy]
+# These are some of clippy's nursery (i.e., experimental) lints that we like.
+# By default, nursery lints are allowed. Some of the lints below have made good
+# suggestions which we fixed. The others didn't have any findings, so we can
+# assume they don't have that many false positives. Let's enable them to
+# prevent future problems.
+borrow_as_ptr = "warn"
+branches_sharing_code = "warn"
+clear_with_drain = "warn"
+cloned_instead_of_copied = "warn"
+collection_is_never_read = "warn"
+dbg_macro = "warn"
+derive_partial_eq_without_eq = "warn"
+doc_markdown = "warn"
+empty_line_after_doc_comments = "warn"
+empty_line_after_outer_attr = "warn"
+enum_glob_use = "warn"
+equatable_if_let = "warn"
+explicit_into_iter_loop = "warn"
+explicit_iter_loop = "warn"
+flat_map_option = "warn"
+if_not_else = "warn"
+if_then_some_else_none = "warn"
+implicit_clone = "warn"
+imprecise_flops = "warn"
+iter_on_empty_collections = "warn"
+iter_on_single_items = "warn"
+iter_with_drain = "warn"
+iter_without_into_iter = "warn"
+large_stack_frames = "warn"
+manual_assert = "warn"
+manual_clamp = "warn"
+manual_is_variant_and = "warn"
+manual_string_new = "warn"
+match_same_arms = "warn"
+missing_const_for_fn = "warn"
+mutex_integer = "warn"
+naive_bytecount = "warn"
+needless_bitwise_bool = "warn"
+needless_continue = "warn"
+needless_for_each = "warn"
+needless_pass_by_ref_mut = "warn"
+nonstandard_macro_braces = "warn"
+option_as_ref_cloned = "warn"
+or_fun_call = "warn"
+path_buf_push_overwrite = "warn"
+read_zero_byte_vec = "warn"
+result_large_err = "allow"
+redundant_clone = "warn"
+redundant_else = "warn"
+single_char_pattern = "warn"
+string_lit_as_bytes = "warn"
+string_lit_chars_any = "warn"
+suboptimal_flops = "warn"
+suspicious_operation_groupings = "warn"
+trailing_empty_array = "warn"
+trait_duplication_in_bounds = "warn"
+transmute_undefined_repr = "warn"
+trivial_regex = "warn"
+tuple_array_conversions = "warn"
+type_repetition_in_bounds = "warn"
+uninhabited_references = "warn"
+unnecessary_self_imports = "warn"
+unnecessary_struct_initialization = "warn"
+unnested_or_patterns = "warn"
+unused_peekable = "warn"
+unused_rounding = "warn"
+use_self = "warn"
+useless_let_if_seq = "warn"
+while_float = "warn"
+zero_sized_map_values = "warn"
+
+# These are nursery lints which have findings. Allow them for now. Some are not
+# quite mature enough for use in our codebase and some we don't really want.
+# Explicitly listing should make it easier to fix in the future.
+as_ptr_cast_mut = "allow"
+cognitive_complexity = "allow"
+debug_assert_with_mut_call = "allow"
+fallible_impl_from = "allow"
+future_not_send = "allow"
+needless_collect = "allow"
+non_send_fields_in_send_ty = "allow"
+redundant_pub_crate = "allow"
+significant_drop_in_scrutinee = "allow"
+significant_drop_tightening = "allow"
+too_long_first_doc_paragraph = "allow"
+
+# Speed up compilation time for dev builds by reducing emitted debug info.
+# NOTE: Debuggers may provide less useful information with this setting.
+# Uncomment this section if you're using a debugger.
+[profile.dev]
+# https://davidlattimore.github.io/posts/2024/02/04/speeding-up-the-rust-edit-build-run-cycle.html
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+# Incremental compilation held ~18 GB under target/debug/incremental for this workspace and
+# bought nothing: the build gate is a full `cargo check` + `cargo test`, and the documented
+# rule for this repo is `CARGO_INCREMENTAL=0`. Off so the cache cannot come back.
+incremental = false
+
+# Speed up tests.
+[profile.dev.package]
+proptest.opt-level = 3
+rand_chacha.opt-level = 3
+rand_xorshift.opt-level = 3
+unarray.opt-level = 3
+
+# Meant for testing - all optimizations, but with debug assertions and overflow checks.
+[profile.hivetests]
+inherits = "test"
+opt-level = 3
+lto = "thin"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = "none"
+strip = "symbols"
+panic = "unwind"
+codegen-units = 16
+
+# Use the `--profile profiling` flag to show symbols in release mode.
+# e.g. `cargo build --profile profiling`
+[profile.profiling]
+inherits = "release"
+debug = "full"
+strip = "none"
+
+# Include debug info in benchmarks too.
+[profile.bench]
+inherits = "profiling"
+
+[profile.maxperf]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[profile.maxperf-symbols]
+inherits = "maxperf"
+debug = "full"
+strip = "none"
+
+[profile.reproducible]
+inherits = "release"
+panic = "abort"
+codegen-units = 1
+incremental = false
+
+[workspace.dependencies]
+# smartnet-* crates (renamed in phase 7; see migration plan)
+smartnet-basic-payload-builder = { path = "crates/payload/basic" }
+smartnet-chain-state = { path = "crates/chain-state" }
+smartnet-chainspec = { path = "crates/chainspec", default-features = false }
+smartnet-validator = { path = "crates/node/validator" }
+smartnet-codecs = { path = "crates/storage/codecs", default-features = false }
+smartnet-codecs-derive = { path = "crates/storage/codecs/derive" }
+smartnet-config = { path = "crates/config", default-features = false }
+smartnet-consensus = { path = "crates/consensus/consensus", default-features = false }
+calibri-lite-consensus = { path = "../calibri-lite/calibri-lite-consensus" }
+smartnet-payload-types = { path = "../calibri-lite/smartnet-payload-types" }
+smartnet-db = { path = "crates/storage/db", default-features = false, features = ["fjall"] }
+smartnet-db-api = { path = "crates/storage/db-api" }
+smartnet-db-models = { path = "crates/storage/db-models", default-features = false }
+smartnet-file-tier = { path = "crates/storage/file-tier" }
+smartnet-execution-cache = { path = "crates/engine/execution-cache" }
+smartnet-engine-primitives = { path = "crates/engine/primitives", default-features = false }
+smartnet-engine-rpc-sync = { path = "crates/engine/rpc-sync" }
+smartnet-engine-tree = { path = "crates/engine/tree" }
+smartnet-errors = { path = "crates/errors" }
+smartnet-eth-wire-types = { path = "crates/net/eth-wire-types" }
+smartnet-ethereum-payload-builder = { path = "crates/payload/ethereum" }
+smartnet-cli = { path = "crates/node/cli", default-features = false }
+smartnet-ethereum-consensus = { path = "crates/consensus/ethereum", default-features = false }
+smartnet-ethereum-forks = { path = "crates/ethereum/hardforks", default-features = false }
+smartnet-ethereum-primitives = { path = "crates/primitives/ethereum", default-features = false }
+smartnet-evm = { path = "crates/evm/evm", default-features = false }
+smartnet-evm-ethereum = { path = "crates/evm/ethereum", default-features = false }
+smartnet-execution-errors = { path = "crates/evm/execution-errors", default-features = false }
+smartnet-execution-types = { path = "crates/evm/execution-types", default-features = false }
+smartnet-fs-util = { path = "crates/fs-util" }
+fjall = "3.1.10"
+smartnet-mesh = { path = "crates/net/mesh" }
+smartnet-metrics = { path = "crates/metrics" }
+smartnet-network-api = { path = "crates/net/network-api" }
+smartnet-network-types = { path = "crates/net/network-types" }
+smartnet-node-api = { path = "crates/node/api" }
+smartnet-node-builder = { path = "crates/node/builder" }
+smartnet-node-core = { path = "crates/node/core" }
+smartnet-node-ethereum = { path = "crates/node/ethereum" }
+smartnet-node-types = { path = "crates/node/types" }
+smartnet-payload-builder = { path = "crates/payload/builder" }
+smartnet-payload-primitives = { path = "crates/payload/primitives" }
+smartnet-primitives-traits = { path = "crates/primitives/traits", default-features = false }
+smartnet-provider = { path = "crates/storage/provider" }
+smartnet-prune = { path = "crates/storage/prune" }
+smartnet-prune-types = { path = "crates/storage/prune-types", default-features = false }
+smartnet-revm = { path = "crates/evm/revm", default-features = false }
+smartnet-rpc = { path = "crates/rpc/rpc" }
+smartnet-rpc-api = { path = "crates/rpc/rpc-api" }
+smartnet-rpc-builder = { path = "crates/rpc/rpc-builder" }
+smartnet-rpc-engine-api = { path = "crates/rpc/rpc-engine-api" }
+smartnet-rpc-eth-api = { path = "crates/rpc/rpc-eth-api" }
+smartnet-rpc-eth-types = { path = "crates/rpc/rpc-eth-types", default-features = false }
+smartnet-rpc-server-types = { path = "crates/rpc/rpc-server-types" }
+smartnet-rpc-convert = { path = "crates/rpc/rpc-convert" }
+smartnet-stages = { path = "crates/stages/stages" }
+smartnet-stages-api = { path = "crates/stages/api" }
+smartnet-stages-types = { path = "crates/stages/types", default-features = false }
+smartnet-storage-api = { path = "crates/storage/storage-api", default-features = false }
+smartnet-net-rpc-sync = { path = "crates/net/rpc-sync" }
+smartnet-storage-errors = { path = "crates/storage/errors", default-features = false }
+smartnet-tasks = { path = "crates/tasks" }
+smartnet-timing = { path = "crates/timing" }
+smartnet-tls-provider = { path = "crates/crypto/tls-provider" }
+smartnet-testing-utils = { path = "testing/testing-utils" }
+smartnet-tracing = { path = "crates/tracing", default-features = false }
+smartnet-transaction-pool = { path = "crates/txpool" }
+smartnet-trie = { path = "crates/trie/trie" }
+smartnet-trie-common = { path = "crates/trie/common", default-features = false }
+smartnet-trie-db = { path = "crates/trie/db" }
+smartnet-trie-parallel = { path = "crates/trie/parallel" }
+smartnet-trie-sparse = { path = "crates/trie/sparse", default-features = false }
+
+# revm
+revm = { version = "38.0.0", default-features = false }
+revm-bytecode = { version = "10.0.0", default-features = false }
+revm-database = { version = "13.0.0", default-features = false }
+revm-state = { version = "11.0.0", default-features = false }
+revm-primitives = { version = "23.0.0", default-features = false }
+revm-interpreter = { version = "35.0.0", default-features = false }
+revm-database-interface = { version = "11.0.0", default-features = false }
+revm-inspectors = "0.39.0"
+
+# eth
+alloy-dyn-abi = "1.5.6"
+alloy-primitives = { version = "1.5.6", default-features = false, features = ["map-foldhash"] }
+alloy-sol-types = { version = "1.5.6", default-features = false }
+
+alloy-chains = { version = "0.2.33", default-features = false }
+alloy-eip2124 = { version = "0.2.0", default-features = false }
+alloy-eip7928 = { version = "0.3.0", default-features = false }
+alloy-evm = { version = "0.33.0", default-features = false }
+alloy-rlp = { version = "0.3.13", default-features = false, features = ["core-net"] }
+alloy-trie = { version = "0.9.4", default-features = false }
+
+alloy-hardforks = "0.4.7"
+
+alloy-consensus = { version = "2.0.0", default-features = false }
+alloy-eips = { version = "2.0.0", default-features = false }
+alloy-genesis = { version = "2.0.0", default-features = false }
+alloy-json-rpc = { version = "2.0.0", default-features = false }
+alloy-network = { version = "2.0.0", default-features = false }
+alloy-provider = { version = "2.0.0", features = ["reqwest", "debug-api"], default-features = false }
+alloy-rpc-client = { version = "2.0.0", default-features = false }
+alloy-rpc-types = { version = "2.0.0", features = ["eth"], default-features = false }
+alloy-rpc-types-admin = { version = "2.0.0", default-features = false }
+alloy-rpc-types-anvil = { version = "2.0.0", default-features = false }
+alloy-rpc-types-beacon = { version = "2.0.0", default-features = false }
+alloy-rpc-types-debug = { version = "2.0.0", default-features = false }
+alloy-rpc-types-engine = { version = "2.0.0", default-features = false }
+alloy-rpc-types-eth = { version = "2.0.0", default-features = false }
+alloy-rpc-types-mev = { version = "2.0.0", default-features = false }
+alloy-rpc-types-trace = { version = "2.0.0", default-features = false }
+alloy-rpc-types-txpool = { version = "2.0.0", default-features = false }
+alloy-serde = { version = "2.0.0", default-features = false }
+alloy-signer = { version = "2.0.0", default-features = false }
+alloy-signer-local = { version = "2.0.0", default-features = false }
+alloy-transport = { version = "2.0.0" }
+# misc
+either = { version = "1.15.0", default-features = false }
+arrayvec = { version = "0.7.6", default-features = false }
+aquamarine = "0.6"
+auto_impl = "1"
+bincode = "1.3"
+bitflags = "2.4"
+boyer-moore-magiclen = "0.2.16"
+bytes = { version = "1.11.1", default-features = false }
+clap = "4"
+dashmap = "6.0"
+derive_more = { version = "2", default-features = false, features = ["full"] }
+dirs-next = "2.0.0"
+dyn-clone = "1.0.17"
+eyre = "0.6"
+fdlimit = "0.3.0"
+humantime = "2.1"
+imbl = "7"
+humantime-serde = "1.1"
+itertools = { version = "0.14", default-features = false }
+libc = "0.2"
+modular-bitfield = "0.13.1"
+parity-scale-codec = { version = "=3.2.1", features = ["bytes", "std"], default-features = false }
+nybbles = { version = "0.4.8", default-features = false }
+once_cell = { version = "1.19", default-features = false, features = ["critical-section"] }
+parking_lot = "0.12"
+quanta = "0.12"
+paste = "1.0"
+rand = "0.9"
+rayon = "1.7"
+thread-priority = "3.0.0"
+rustc-hash = { version = "2.0", default-features = false }
+schnellru = "0.2"
+serde = { version = "1.0", default-features = false }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+serde_with = { version = "3", default-features = false, features = ["macros"] }
+sha2 = { version = "0.10", default-features = false }
+slotmap = "1"
+smallvec = "1"
+strum = { version = "0.27", default-features = false }
+syn = "2.0"
+thiserror = { version = "2.0.0", default-features = false }
+tracing = { version = "0.1.0", default-features = false, features = ["attributes"] }
+tracing-appender = "0.2"
+url = { version = "2.3", default-features = false }
+byteorder = "1"
+fixed-cache = { version = "0.1.7", features = ["stats"] }
+moka = "0.12"
+
+# metrics
+metrics = "0.24.0"
+metrics-derive = "0.1.1"
+metrics-util = { default-features = false, version = "0.20.0" }
+
+# proc-macros
+proc-macro2 = "1.0"
+quote = "1.0"
+
+# tokio
+tokio = { version = "1.51.1", default-features = false }
+tokio-stream = "0.1.11"
+tokio-tungstenite = "0.28.0"
+tokio-util = { version = "0.7.4", features = ["codec"] }
+
+# async
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+async-trait = "0.1.68"
+futures = "0.3"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false }
+pin-project = "1.0.12"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream"] }
+tracing-futures = "0.2"
+tower = "0.5"
+tower-http = "0.6"
+
+# rpc
+jsonrpsee = "0.26.0"
+jsonrpsee-core = "0.26.0"
+jsonrpsee-http-client = "0.26.0"
+jsonrpsee-types = "0.26.0"
+
+# http
+http = "1.0"
+proptest-arbitrary-interop = "0.1.0"
+
+# crypto
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+# rand 0.8 (rand_core 0.6) for k256::SigningKey::random
+rand_08 = { package = "rand", version = "0.8" }
+# pure-Rust TLS stack (smartnet-tls-provider); no ring/aws-lc-sys
+rustls = { version = "0.23.40", default-features = false, features = ["std"] }
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
+p256 = { version = "0.13.2", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+p384 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
+rsa = { version = "0.9.10", default-features = false, features = ["std", "u64_digit"] }
+ed25519-dalek = { version = "2.2" }
+x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
+signature = { version = "2.2", features = ["rand_core"] }
+getrandom = "0.2"
+
+# for eip-4844
+
+# config
+toml = "0.9"
+
+# misc-testing
+arbitrary = "1.3"
+assert_matches = "1.5.0"
+criterion = "0.5"
+proptest = "1.7"
+similar-asserts = { version = "1.5.0", features = ["serde"] }
+tempfile = "3.20"
+test-fuzz = "7"
+rstest = "0.26.1"
+
+# ssz encoding
+
+# allocators
+
+crossbeam-channel = "0.5.13"
+crossbeam-utils = "0.8"
+hash-db = "=0.15.2"
+hickory-resolver = "0.25.0"
+hmac = "0.12.1"
+indexmap = "2"
+lz4_flex = { version = "0.13", default-features = false }
+num-traits = "0.2.15"
+plain_hasher = "0.2"
+pretty_assertions = "1.4"
+roaring = "0.11.3"
+rolling-file = "0.2.0"
+sysinfo = { version = "0.38", default-features = false }
+tracing-journald = "0.3"
+tracing-logfmt = "0.3.7"
+tracing-samply = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false }
+triehash = "0.8"
+vergen = "9.1.0"
+visibility = "0.1.1"
+# networking
+
+[patch.crates-io]
+# Vendored alloy-evm: adds the `DisableBlockRewards` spec opt-out so signer-sealed chains
+# (SmartNet/WEM) pay no block reward, matching geth exactly (empty blocks leave state
+# unchanged). See vendor/alloy-evm and doc/istanbul-london-header-rlp.md.
+alloy-evm = { path = "vendor/alloy-evm" }
+# Vendored jsonrpsee client crates: drop the hard-coded C-based rustls `ring` provider
+# features (and the corresponding `install_default` calls) so TLS runs on the pure-Rust
+# CryptoProvider installed by the application. See vendor/jsonrpsee-*.
+jsonrpsee-client-transport = { path = "vendor/jsonrpsee-client-transport" }
+jsonrpsee-http-client = { path = "vendor/jsonrpsee-http-client" }
+# Vendored proc-macro-error2 2.0.1: upstream re-exports a private `extern crate proc_macro`
+# (E0365), so every build printed "packages contain code that will be rejected by a future
+# version of Rust". One-line fix (make the extern crate public); pulled in by
+# alloy-sol-macro/aquamarine, both pinned to versions requiring `<=2.0.1`.
+proc-macro-error2 = { path = "vendor/proc-macro-error2" }
+# Vendored proptest-arbitrary-interop 0.1.0: upstream makes a single generation attempt
+# per test case over one fixed-size random buffer and treats buffer exhaustion as a hard
+# failure ("initial arbitrary call failed"), so any `arb::<T>()` proptest with nested
+# collections was flaky (~10%). Retry with fresh buffers before failing.
+proptest-arbitrary-interop = { path = "vendor/proptest-arbitrary-interop" }

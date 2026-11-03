@@ -1,0 +1,76 @@
+[package]
+name = "smartnet-ethereum-primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ethereum primitive types"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-codecs = { workspace = true, optional = true, features = ["alloy"] }
+smartnet-primitives-traits.workspace = true
+
+# ethereum
+alloy-eips = { workspace = true, features = ["k256"] }
+alloy-primitives.workspace = true
+alloy-consensus = { workspace = true, features = ["serde"] }
+alloy-rpc-types-eth = { workspace = true, optional = true }
+
+# misc
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+alloy-rlp.workspace = true
+smartnet-codecs = { workspace = true, features = ["test-utils"] }
+alloy-consensus = { workspace = true, features = ["serde", "arbitrary"] }
+serde_json.workspace = true
+
+[features]
+default = ["std"]
+test-utils = [
+    "smartnet-codecs?/test-utils",
+    "smartnet-primitives-traits/test-utils",
+]
+std = [
+    "alloy-consensus/std",
+    "alloy-primitives/std",
+    "smartnet-primitives-traits/std",
+    "serde?/std",
+    "alloy-eips/std",
+    "alloy-rpc-types-eth?/std",
+    "alloy-rlp/std",
+    "serde_json/std",
+    "smartnet-codecs?/std",
+]
+smartnet-codec = [
+    "std",
+    "dep:smartnet-codecs",
+]
+arbitrary = [
+    "std",
+    "alloy-consensus/arbitrary",
+    "alloy-consensus/k256",
+    "alloy-primitives/arbitrary",
+    "smartnet-codecs?/arbitrary",
+    "smartnet-primitives-traits/arbitrary",
+    "alloy-eips/arbitrary",
+    "alloy-rpc-types-eth?/arbitrary",
+]
+serde = [
+    "dep:serde",
+    "alloy-consensus/serde",
+    "alloy-eips/serde",
+    "alloy-primitives/serde",
+    "smartnet-codecs?/serde",
+    "smartnet-primitives-traits/serde",
+    "alloy-rpc-types-eth?/serde",
+]
+rpc = [
+    "dep:alloy-rpc-types-eth",
+    "alloy-rpc-types-eth?/serde",
+]

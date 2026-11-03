@@ -1,0 +1,50 @@
+[package]
+name = "jsonrpsee-http-client"
+description = "JSON-RPC HTTP client"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+readme.workspace = true
+publish = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-rustls = { workspace = true, features = ["http1", "http2", "tls12", "logging", "ring"], optional = true }
+hyper-util = { workspace = true, features = ["client", "client-legacy", "tokio", "http1", "http2"] }
+http-body = { workspace = true }
+jsonrpsee-types = { workspace = true }
+jsonrpsee-core = { workspace = true, features = ["client", "http-helpers"] }
+rustls = { workspace = true, optional = true, features = ["logging", "std", "tls12", "ring"] }
+rustls-platform-verifier = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tower = { workspace = true, features = ["util"] }
+url = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+jsonrpsee-test-utils = { path = "../../test-utils" }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "macros"] }
+
+[features]
+default = ["tls"]
+tls = ["hyper-rustls", "rustls", "rustls-platform-verifier"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[package.metadata.playground]
+all-features = true

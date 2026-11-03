@@ -1,0 +1,27 @@
+[package]
+name = "smartnet-testing-utils"
+description = "Testing utilities for SmartNet workspace."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smartnet-ethereum-primitives = { workspace = true, features = ["arbitrary", "std"] }
+smartnet-primitives-traits = { workspace = true, features = ["arbitrary"] }
+alloy-genesis.workspace = true
+alloy-primitives = { workspace = true, features = ["rand"] }
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+
+rand.workspace = true
+k256 = { workspace = true, features = ["serde"] }
+rand_08.workspace = true
+
+[dev-dependencies]
+smartnet-chainspec.workspace = true
+alloy-rlp.workspace = true

@@ -1,0 +1,76 @@
+[package]
+name = "smartnet-node-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-chainspec.workspace = true
+smartnet-primitives-traits = { workspace = true, features = ["rayon"] }
+smartnet-fs-util.workspace = true
+smartnet-db = { workspace = true }
+smartnet-storage-errors.workspace = true
+smartnet-storage-api = { workspace = true, features = ["std", "db-api"] }
+smartnet-rpc-eth-types.workspace = true
+smartnet-rpc-server-types.workspace = true
+smartnet-rpc-convert.workspace = true
+smartnet-transaction-pool.workspace = true
+smartnet-tracing.workspace = true
+smartnet-config = { workspace = true, features = ["serde"] }
+smartnet-prune-types.workspace = true
+smartnet-stages-types.workspace = true
+smartnet-ethereum-forks.workspace = true
+smartnet-engine-primitives.workspace = true
+
+# ethereum
+alloy-primitives.workspace = true
+alloy-rpc-types-engine = { workspace = true, features = ["std"] }
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+
+# misc
+eyre.workspace = true
+clap = { workspace = true, features = ["derive", "env", "string"] }
+humantime.workspace = true
+derive_more.workspace = true
+toml.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+url.workspace = true
+# io
+dirs-next.workspace = true
+
+# obs
+tracing.workspace = true
+
+# crypto
+
+# async
+futures.workspace = true
+
+[dev-dependencies]
+# test vectors generation
+tokio.workspace = true
+rand.workspace = true
+
+[features]
+# Features for vergen to generate correct env vars
+keccak-cache-global = ["alloy-primitives/keccak-cache-global"]
+
+min-error-logs = ["tracing/release_max_level_error"]
+min-warn-logs = ["tracing/release_max_level_warn"]
+min-info-logs = ["tracing/release_max_level_info"]
+min-debug-logs = ["tracing/release_max_level_debug"]
+min-trace-logs = ["tracing/release_max_level_trace"]
+
+# Debug recording for sparse trie mutations
+trie-debug = ["smartnet-engine-primitives/trie-debug"]
+
+[build-dependencies]
+vergen = { workspace = true, features = ["build", "cargo", "emit_and_set"] }

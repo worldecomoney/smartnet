@@ -1,0 +1,81 @@
+[package]
+name = "smartnet-storage-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Storage provider traits and types"
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-db-models.workspace = true
+smartnet-chainspec.workspace = true
+smartnet-db-api = { workspace = true, optional = true }
+smartnet-execution-types.workspace = true
+smartnet-primitives-traits.workspace = true
+smartnet-prune-types.workspace = true
+smartnet-stages-types.workspace = true
+smartnet-storage-errors.workspace = true
+smartnet-trie-common.workspace = true
+revm-database.workspace = true
+smartnet-ethereum-primitives.workspace = true
+
+# ethereum
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-rpc-types-engine.workspace = true
+
+auto_impl.workspace = true
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = [
+    "smartnet-chainspec/std",
+    "alloy-consensus/std",
+    "alloy-eips/std",
+    "alloy-primitives/std",
+    "alloy-rpc-types-engine/std",
+    "smartnet-primitives-traits/std",
+    "smartnet-stages-types/std",
+    "revm-database/std",
+    "smartnet-ethereum-primitives/std",
+    "smartnet-execution-types/std",
+    "smartnet-prune-types/std",
+    "smartnet-storage-errors/std",
+    "smartnet-db-models/std",
+    "smartnet-trie-common/std",
+    "serde_json?/std",
+]
+
+db-api = [
+    "dep:smartnet-db-api",
+    "dep:serde_json",
+]
+
+serde = [
+    "smartnet-ethereum-primitives/serde",
+    "smartnet-db-models/serde",
+    "smartnet-execution-types/serde",
+    "smartnet-primitives-traits/serde",
+    "smartnet-prune-types/serde",
+    "smartnet-stages-types/serde",
+    "smartnet-trie-common/serde",
+    "revm-database/serde",
+    "alloy-eips/serde",
+    "alloy-primitives/serde",
+    "alloy-consensus/serde",
+    "alloy-rpc-types-engine/serde",
+]
+
+serde-bincode-compat = [
+    "smartnet-execution-types/serde-bincode-compat",
+    "smartnet-trie-common/serde-bincode-compat",
+    "alloy-eips/serde-bincode-compat",
+    "alloy-consensus/serde-bincode-compat",
+]

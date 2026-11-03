@@ -1,0 +1,71 @@
+[package]
+name = "smartnet-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Database primitives for SmartNet execution."
+
+[lints]
+workspace = true
+
+[dependencies]
+# upstream-derived
+smartnet-db-api.workspace = true
+smartnet-fs-util.workspace = true
+smartnet-storage-errors.workspace = true
+smartnet-tracing.workspace = true
+
+# ethereum
+alloy-primitives.workspace = true
+
+# fjall
+fjall = { workspace = true, optional = true }
+
+eyre = { workspace = true, optional = true }
+
+# misc
+thiserror.workspace = true
+tempfile = { workspace = true, optional = true }
+sysinfo = { workspace = true, features = ["system"] }
+parking_lot = { workspace = true, optional = true }
+
+# arbitrary utils
+
+[dev-dependencies]
+# libs with arbitrary
+
+alloy-primitives = { workspace = true, features = ["getrandom"] }
+
+# watermark tests build stage checkpoints
+smartnet-stages-types.workspace = true
+
+# F0 baseline benches construct typed account values directly
+smartnet-primitives-traits.workspace = true
+
+tempfile.workspace = true
+parking_lot.workspace = true
+
+assert_matches.workspace = true
+
+criterion.workspace = true
+
+[[bench]]
+name = "fjall_baseline"
+harness = false
+
+[features]
+default = ["fjall"]
+fjall = ["dep:fjall", "dep:eyre"]
+test-utils = [
+    "dep:tempfile",
+    "fjall",
+    "arbitrary",
+    "parking_lot",
+    "smartnet-db-api/test-utils",
+]
+arbitrary = [
+    "smartnet-db-api/arbitrary",
+    "alloy-primitives/arbitrary",
+]

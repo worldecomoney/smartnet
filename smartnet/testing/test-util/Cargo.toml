@@ -1,0 +1,33 @@
+[package]
+name = "smartnet-test-util"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Submit pre-created .dat block RLP probes via wem_newPayload (minimal deps)."
+default-run = "smartnet-test-util"
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-consensus = { workspace = true, default-features = false, features = ["std"] }
+alloy-primitives = { workspace = true, default-features = false, features = ["std"] }
+alloy-rlp.workspace = true
+clap = { workspace = true, features = ["derive"] }
+eyre.workspace = true
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+reqwest = { workspace = true, features = ["json"] }
+serde_json.workspace = true
+smartnet-timing.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[bin]]
+name = "gen-payload-dat"
+path = "bin/gen-payload-dat.rs"
+required-features = ["gen"]
+
+[features]
+gen = []
