@@ -1,7 +1,5 @@
 # IMPORTANT-NEVER-DO-NOT-TOUCH.md
 
-> **STATUS: CURRENT — active design/reference**
-
 # WHAT WE ARE
 
 - A separate, private, open network derived from Ethereum — not committed to Ethereum legacy.
@@ -25,44 +23,37 @@
 - ERC-20 token fees
 - DeFi V2 compatibility
 - **Never**: touch `eth_*` RPC names , tx types 0x0/0x2, MetaMask behavior.
-- Fixed fees for native ETH like coin transfers and validator queve for natives
+- Fixed fees for native ETH like coin transfers and validator queue for natives
 - Keep as is ERC-20 market economy, validator EVM normal way.
-- keep all calibri-lite as is unless explicid permission is given to work with consensus protocol.
+- keep all calibri-lite as is unless explicit permission is given to work with consensus protocol.
 
 # WHAT IS REMOVED BY DESIGN AND MUST NEVER BE RESTORED OR ASSUMED AS AN ISSUE:
 
 - P2P and KAD, NAT traversal, replaced by Mesh
 - JWT and Auth/Secure RPC, replaced by Mesh protocol
-- MDBX and RocksDB, replcaed by Fjall and FileSystem
+- MDBX and RocksDB, replaced by Fjall and FileSystem
 - BOA, js stuff, no need to be replaced
 - WebSocket RPC Protocol, changed with WebSocket Mesh Protocol
-- Ethereum network Fork and leghacy support, most of it is gone
+- Ethereum network Fork and legacy support, most of it is gone
 - there's more
 - All Cities like Istanbul, London, etc.. is gone, now it's all Mars! Support is mixed.
 
 # DO NOT
 
-- over-engenner
-- fix what is not broken
-- replace working blocks with your "better" design without proposal first
-- do shady/background fixes without reporting first no matter how small, collect all to todo first
+- do not over-engineer
+- do not fix what is not broken
+- do not replace working blocks with your "better" design
+- do not invent anything, consult, play along with the team
+- do not do shady/background fixes without reporting first no matter how small, collect all to todo first
+- do not do stuff that was not asked from you, do not try to be just helpful, follow designer lead, play along with the team
+- do not abuse build, it still does some network activity, do only when many changes is done
 
 # Special cases, IMPORTANT:
 
-> **STATUS: CURRENT — standing environment/working rules (offline builds, no build abuse, newer-doc-wins)**
-
- - we are on meterred connection, all crates are presnt, use --offline to build
- - do not abuse build, it still does some network activity, do only when many changes is done, and really need to test, otherwise ask operator
- - this repo is not yet on GH, it is a very heavily modified Reth v2.1, it is not a fork of Reth per-se, it is inspied by and used as a base to 
+ - this repo is very heavily modified Reth v2.1, it is not a fork of Reth per-se, it is inspired by and used as a base to
+ - we follow KISS ideology, DO NOT over-engineer anything, smart things always simple
 build most efficient client for a private EVM compatible network, no Ethereum legacy must be preserved, it is not an Ethereum node.
- - when you read md files make sure you check their creation time, fresh files data always outweight the old file data in case of contradiction!
- - if/when operator asks to compress md files use yonger data prevails rule to construct/compile new file.
- - we follow KISS ideology, DO NOT over-engeneer anything, smart thigs always simple!
- - do not invent anything, consult, we are team!
- - do bit do stuff that was not asked from you, do not try to be just helpful, follow designer lead, play along with the team!
+ - when you read md files make sure you check their creation time, fresh files data always outweigh the old file data in case of contradiction!
+ - if/when operator asks to compress md files use younger data prevails rule to construct/compile new file.
  - commit rule: no partial commits unless absolutely necessary; after each and any meaningful green build (tests + lint pass), do one full `commit All` of the whole repo — never leave changes uncommitted across a green checkpoint.
 
-
-# Features we expect already implemented here, including but not limited to!
-
- - 2 DataBase systems, 1 - FileSystem, for now, we decide to keep immutable data in files, shards are wery well optimized so it works, 2 - Fjall - LSM/KV database, to store rest, like state, hot window, some bas esettings
