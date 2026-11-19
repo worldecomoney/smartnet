@@ -12,6 +12,15 @@ pub const CONSENSUS_NAME: &str = "Calibri-Lite";
 
 pub mod consensus;
 pub mod pre_consensus;
+pub mod registry;
+pub mod select;
+
+pub use select::{
+    check_seal, get_val_chair,
+    Purpose as SelectPurpose, addr_key, chair_entropy, chair_for, committee_size, current_chair,
+    current_slot, normalize_eth, parse_addr, score, score_rehash, select_chair_and_quorum,
+    select_k, select_one,
+};
 
 pub use consensus::{
     BlockNr, CalibriError, INTERIM_QUORUM_THRESHOLD, calibri_schedule_available,

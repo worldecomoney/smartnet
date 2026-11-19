@@ -20,6 +20,7 @@ use smartnet_storage_errors::provider::ProviderResult;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
+    io,
     sync::mpsc::{self, Receiver},
 };
 use tracing::*;
@@ -29,6 +30,10 @@ const MAXIMUM_CHANNELS: usize = 10_000;
 
 /// Maximum number of storage entries to hash per rayon worker job.
 const WORKER_CHUNK_SIZE: usize = 100;
+
+/// One worker's result stream plus its expected entry count — a worker that dies
+/// mid-chunk (panic) shows up as a short count instead of a silent successful collect.
+type HashChannel = Receiver<(Vec<u8>, CompactU256)>;
 
 /// Keccak256 hash of the zero address.
 const HASHED_ZERO_ADDRESS: B256 =
@@ -110,13 +115,14 @@ where
             let mut storage_cursor = tx.cursor_read::<tables::PlainStorageState>()?;
             let mut collector =
                 Collector::new(self.etl_config.file_size, self.etl_config.dir.clone());
-            let mut channels = Vec::with_capacity(MAXIMUM_CHANNELS);
+            let mut channels: Vec<(HashChannel, usize)> = Vec::with_capacity(MAXIMUM_CHANNELS);
 
             for chunk in &storage_cursor.walk(None)?.chunks(WORKER_CHUNK_SIZE) {
                 // An _unordered_ channel to receive results from a rayon job
                 let chunk = chunk.collect::<Result<Vec<_>, _>>()?;
                 let (tx, rx) = mpsc::sync_channel(chunk.len());
-                channels.push(rx);
+                let expected = chunk.len();
+                channels.push((rx, expected));
                 // Spawn the hashing task onto the global rayon pool
                 rayon::spawn(move || {
                     // Cache hashed address since PlainStorageState is sorted by address
@@ -218,13 +224,27 @@ where
 }
 
 /// Flushes channels hashes to ETL collector.
+///
+/// Iterates each channel to its natural end and fails loudly when a worker died
+/// early (panic mid-chunk): the stage must not report success over a partially
+/// collected set — that would silently corrupt the hashed state.
 fn collect(
-    channels: &mut Vec<Receiver<(Vec<u8>, CompactU256)>>,
+    channels: &mut Vec<(HashChannel, usize)>,
     collector: &mut Collector<Vec<u8>, CompactU256>,
 ) -> Result<(), StageError> {
-    for channel in channels.iter_mut() {
+    for (channel, expected) in channels.iter_mut() {
+        let mut received = 0usize;
+        // Sender dropped ends the loop — either the worker finished every entry or it
+        // died mid-chunk; the count check below tells the two apart.
         while let Ok((key, v)) = channel.recv() {
             collector.insert(key, v)?;
+            received += 1;
+        }
+        if received != *expected {
+            return Err(io::Error::other(format!(
+                "storage hashing worker channel closed after {received}/{expected} entries"
+            ))
+            .into());
         }
     }
     info!(target: "sync::stages::hashing_storage", "Hashed {} entries", collector.len());

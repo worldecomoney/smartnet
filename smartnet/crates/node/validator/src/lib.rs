@@ -2,8 +2,9 @@
 
 // eyre::bail!/ensure! expansions end in a `;` we do not control (third-party macro).
 
-/// Default seal-beat cadence (`HEARTBEAT_MS` absent → this), ms.
-pub const DEFAULT_HEARTBEAT_MS: u64 = 2000;
+/// Default heartbeat when `NODE_HEARTBEAT` is absent — **500 ms**, advised alike for a
+/// plain node and a validator (a bridge may run 2000; everything is adjustable).
+pub const DEFAULT_HEARTBEAT_MS: u64 = 500;
 
 pub mod app;
 pub mod balances;
@@ -17,6 +18,7 @@ pub mod outcome;
 pub mod payload_checkpoints;
 pub mod run_once;
 pub mod seed_tx;
+pub mod validators;
 
 use clap::{Parser, Subcommand};
 use std::{
@@ -41,7 +43,7 @@ pub struct Cli {
     /// The operator subcommand to run; `None` runs the default (daemon) behaviour.
     pub command: Option<Commands>,
 
-    /// Operator config (`KEY_PATH`, `KEY_FILE`, `NODE_URL`, `COINBASE`, `ALLOW_EMPTY`, …).
+    /// Operator config (`KEY_PATH`, `PASSWORD_FILE`, `NODE_URL`, `COINBASE`, `ALLOW_EMPTY`, …).
     /// Defaults to `~/.smartnet/config.toml` if not specified.
     #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<PathBuf>,
@@ -233,6 +235,17 @@ where
             })?;
 
         let signer = run_once::signer_address(&secret_key);
+
+        // Bootstrap: read `validators.jsonl` ONCE into the RAM array (user-in.md #3).
+        // Fail closed — no readable registry means no sealer for this run.
+        let registry_path = calibri_lite_consensus::registry::default_validators_file();
+        if let Err(err) = crate::validators::load_validators(&registry_path) {
+            eyre::bail!(
+                "validators.jsonl unreadable ({}) : {err} — validator stays off for this run \
+                 (fail closed)",
+                registry_path.display()
+            );
+        }
         let heartbeat_ms = cfg.heartbeat_ms;
         // The daemon re-checks on the next beat anyway, so the post-import canonical probe is
         // bounded by one heartbeat: a slow promotion is benign (`IMPORT_CANONICAL_STALLED`) and

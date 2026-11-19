@@ -52,8 +52,9 @@ pub struct Limits {
     /// Per-link rumor queue depth — one peer's backlog between spreads and the wire.
     /// Bounded memory on the outbound side.
     pub link_queue_capacity: usize,
-    /// Client keepalive ping cadence on a persistent link. `MESH_HEARTBEAT` (ms) —
-    /// the ping fires after half of this passes with no outbound traffic.
+    /// Client keepalive ping cadence on a persistent link — a **hardcoded** liveness
+    /// constant, deliberately independent of `NODE_HEARTBEAT`. The ping fires after half
+    /// of this passes with no outbound traffic.
     pub keepalive: Duration,
     /// One shared silence bound, both ends: no inbound frames for this long = dead
     /// peer (server closes, client link exits and reconnects). Derived as
@@ -62,7 +63,7 @@ pub struct Limits {
     pub silence: Duration,
 }
 
-/// Default client keepalive cadence (`MESH_HEARTBEAT` absent → this): ping after ~half
+/// Default client keepalive cadence (hardcoded liveness constant): ping after ~half
 /// of it passes with no outbound traffic. Fast enough to track a ~1 s (soon ~100 ms)
 /// block cadence, cheap on quiet chains (two tiny frames per second per idle link).
 pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(500);

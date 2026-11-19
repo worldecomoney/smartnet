@@ -356,10 +356,13 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                         "Stage encountered a validation error: {validation_error}"
                     );
 
-                    // FIXME: When handling errors, we do not commit the database transaction. This
-                    // leads to the Merkle stage not clearing its checkpoint, and restarting from an
-                    // invalid place.
-                    // Only reset MerkleExecute checkpoint if MerkleExecute itself failed
+                    // Phase 4b semantics (doc/ark/DONE.md): on error the stage's transaction
+                    // is dropped — a rollback, no unwind — which is correct for partial data
+                    // writes. MerkleExecute is the exception that needs the reset below: it
+                    // clears its inner checkpoint *inside* execute (merkle.rs) just before the
+                    // final root check, so a validation failure would roll that clear back and
+                    // a restart would resume from stale inner progress. Re-do the clear in a
+                    // fresh transaction — kept for safe restart.
                     if stage_id == StageId::MerkleExecute {
                         let provider_rw = self.provider_factory.database_provider_rw()?;
                         provider_rw

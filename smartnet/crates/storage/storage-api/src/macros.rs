@@ -43,7 +43,7 @@ macro_rules! delegate_provider_impls {
                 fn storage(&self, account: alloy_primitives::Address, storage_key: alloy_primitives::StorageKey) -> smartnet_storage_api::errors::provider::ProviderResult<Option<alloy_primitives::StorageValue>>;
             }
             BytecodeReader $(where [$($generics)*])? {
-                fn bytecode_by_hash(&self, code_hash: &alloy_primitives::B256) -> smartnet_storage_api::errors::provider::ProviderResult<Option<smartnet_primitives_traits::Bytecode>>;
+                fn code_by_address(&self, address: &alloy_primitives::Address) -> smartnet_storage_api::errors::provider::ProviderResult<Option<smartnet_primitives_traits::Bytecode>>;
             }
             StateRootProvider $(where [$($generics)*])? {
                 fn state_root(&self, state: smartnet_trie::HashedPostState) -> smartnet_storage_api::errors::provider::ProviderResult<alloy_primitives::B256>;

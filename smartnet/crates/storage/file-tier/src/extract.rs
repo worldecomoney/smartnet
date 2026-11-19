@@ -19,6 +19,7 @@ use alloy_consensus::{
 };
 use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::{b256, Address, Log, Signature, B256};
+use smartnet_primitives_traits::hexfmt::prefixed;
 
 use crate::records::{
     AccessListRecord, AuthorizationRecord, BlockLogsRecord, BtRecord, Erc4626Event, Erc4626Record,
@@ -207,6 +208,54 @@ pub fn extract_empty_block<H: BlockHeader>(header: &H, block_hash: B256) -> Bloc
         &[],
         None,
     )
+}
+
+/// Extracts the file-tier records for a **calibri\* genesis block that carries the
+/// pre-fund records as real transactions** (GENESIS.md): the alloc is the single source
+/// of truth for opening balances — the tx records are LISTINGS (`from = 0x0`, zero
+/// signature, never executed, never metered: `gasUsed` stays 0, no receipts to speak
+/// of beyond the success stubs). The txs are the chainspec-derived deterministic list;
+/// `from` is recorded as the zero address and `st` is always `true`.
+pub fn genesis_block_records<H: BlockHeader>(
+    header: &H,
+    block_hash: B256,
+    txs: &[crate::reader::TransactionSigned],
+) -> BlockRecords {
+    let records = extract_empty_block(header, block_hash);
+    let mut bt = records.bt;
+    bt.tc = txs.len() as u64;
+    // The persistence layer owns the tx counter: genesis starts it at zero.
+    bt.ft = Some(0);
+    let txs_records = txs
+        .iter()
+        .enumerate()
+        .map(|(idx, tx)| crate::records::TxRecord {
+            h: prefixed(&tx.tx_hash()),
+            b: header.number(),
+            i: idx as u64,
+            from: prefixed(&Address::ZERO),
+            to: tx.to().map(|to| prefixed(&to)).unwrap_or_else(|| prefixed(&Address::ZERO)),
+            contract: "0x0".to_string(),
+            t: "0x0".to_string(),
+            ty: "0x0".to_string(),
+            gas: prefixed(&tx.gas_limit()),
+            st: true,
+            gu: 0,
+            n: tx.nonce(),
+            input: "0x".to_string(),
+            mfp: prefixed(&tx.max_fee_per_gas()),
+            mtf: None,
+            mfb: None,
+            al: None,
+            bh: None,
+            auth: None,
+            yp: 0,
+            r: "0x0".to_string(),
+            s: "0x0".to_string(),
+            nv: prefixed(&tx.value()),
+        })
+        .collect();
+    BlockRecords { bt, txs: txs_records, logs: None, erc4626: None }
 }
 
 /// Builds one full [`TxRecord`] for a single transaction.

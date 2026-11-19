@@ -326,31 +326,6 @@ pub struct RpcServerArgs {
     #[arg(skip)]
     pub rpc_nodeinfo: bool,
 
-    /// Master switch for the in-node RPC catch-up service (operator key `RPC_SYNC`).
-    /// **Default off** (`None`/absent = false): the service starts only when this is `true`
-    /// **and** `SYNC_PEERS` is non-empty **and** `SYNC_BATCH >= 1` **and**
-    /// `SYNC_POLL_INTERVAL > 0`. Everything else (mesh, RLP import, the JSON-RPC server)
-    /// is independent of this key.
-    #[arg(skip)]
-    pub rpc_sync: Option<bool>,
-
-    /// `SmartNet` RPC sync peers: fixed allow-list of JSON-RPC endpoints (geth or smartnet
-    /// nodes) this node syncs blocks from when behind. Admission is by operator config only
-    /// (`SYNC_PEERS` in the operator TOML); block authenticity comes from seal validation at
-    /// import, not from the peer. Empty = sync service disabled.
-    #[arg(skip)]
-    pub sync_peers: Option<Vec<Url>>,
-
-    /// Number of blocks fetched per batch round trip (operator key `SYNC_BATCH`).
-    /// `0` switches sync off entirely — the catch-up service is never started.
-    #[arg(skip)]
-    pub sync_batch: Option<u64>,
-
-    /// Seconds between sync poll cycles (operator key `SYNC_POLL_INTERVAL`).
-    /// Only used while `SYNC_BATCH >= 1`; `0` is refused then because it would busy-loop.
-    #[arg(skip)]
-    pub sync_poll_interval: Option<u64>,
-
     /// Mesh gossip listen port (operator key `MESH_PORT`). `0`/unset = mesh off: the
     /// closed-list `POST /rumor` listener never starts. Must differ from `HTTP_PORT` and
     /// and must equal this node's `port_range` entry in every peer's
@@ -375,16 +350,10 @@ pub struct RpcServerArgs {
     #[arg(skip)]
     pub mesh_max_msg_mb: Option<usize>,
 
-    /// Mesh keepalive ping cadence in milliseconds (operator key `MESH_HEARTBEAT`).
-    /// Unset = 500 ms; `0` is rejected by the operator-config overlay. The shared
-    /// silence bound (both ends declare a silent peer dead) derives as this + 300 ms,
-    /// so a live connection always survives at least one full ping period.
-    #[arg(skip)]
-    pub mesh_heartbeat_ms: Option<u64>,
-
-    /// Validator heartbeat period in milliseconds (operator key `HEARTBEAT_MS`): the
-    /// validator's txpool/seal beat cadence. Unset = 2000 ms; `0` is rejected by the
-    /// operator-config overlay.
+    /// THE node heartbeat period in milliseconds (operator key `NODE_HEARTBEAT`): the
+    /// ONE trigger hook every service attaches to — validator seal beat, node duties,
+    /// 1 HB to bind them all. Unset = 500 ms; `0` is rejected by the operator-config
+    /// overlay. The mesh keepalive is NOT this — it is its own hardcoded constant.
     #[arg(skip)]
     pub heartbeat_ms: Option<u64>,
 
@@ -610,15 +579,10 @@ impl Default for RpcServerArgs {
             http_corsdomain,
             rpc_mempool,
             rpc_nodeinfo,
-            rpc_sync: None,
-            sync_peers: None,
-            sync_batch: None,
-            sync_poll_interval: None,
             mesh_port: None,
             mesh_addr: None,
             mesh_peers_file: None,
             mesh_max_msg_mb: None,
-            mesh_heartbeat_ms: None,
             heartbeat_ms: None,
             rpc_max_request_size,
             rpc_max_response_size,
@@ -723,8 +687,6 @@ mod tests {
         assert_eq!(args.rpc_gas_cap, constants::gas_oracle::RPC_DEFAULT_GAS_CAP);
         assert_eq!(args.rpc_tx_fee_cap, constants::DEFAULT_TX_FEE_CAP_WEI);
         assert!(args.rpc_forwarder.is_none());
-        assert!(args.rpc_sync.is_none());
-        assert!(args.sync_peers.is_none());
         assert!(args.mesh_port.is_none());
         CommandParser::<RpcServerArgs>::parse_from(["smartnet"]);
     }
@@ -735,18 +697,6 @@ mod tests {
         assert!(!args.rpc_mempool, "RPC_MEMPOOL must default to false");
         assert!(!args.rpc_nodeinfo, "RPC_NODEINFO must default to false");
     }
-
-    /// The RPC catch-up master switch is off unless the operator config sets it: absent =
-    /// `None`, and the launch path reads that as `false`.
-    #[test]
-    fn rpc_sync_defaults_off() {
-        let args = RpcServerArgs::default();
-        assert!(args.rpc_sync.is_none(), "RPC_SYNC must default to off");
-        assert!(!args.rpc_sync.unwrap_or(false), "absent RPC_SYNC must read as false");
-    }
-
-
-
 
     #[test]
     fn test_rpc_tx_fee_cap_parse_none() {

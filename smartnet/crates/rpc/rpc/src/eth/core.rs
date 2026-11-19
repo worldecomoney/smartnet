@@ -59,7 +59,8 @@ pub type EthApiBuilderFor<N, NetworkT = Ethereum> =
 /// server implementations (e.g. [`EthApiServer`](smartnet_rpc_eth_api::EthApiServer)) are
 /// implemented separately in submodules. The rpc handler implementation can then delegate to the
 /// main impls. This way [`EthApi`] is not limited to [`jsonrpsee`] and can be used standalone or in
-/// other network handlers (for example `WebSocket`).
+/// other network handlers. (JSON-RPC is `HTTP`-only on `SmartNet` — `WebSocket` carries the mesh
+/// binary protocol and never RPC.)
 ///
 /// ## Trait requirements
 ///

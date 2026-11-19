@@ -20,7 +20,7 @@
 //! `doc/fees.md`.
 //!
 //! The node pins the same value for wallet quotes via `GPO_DEFAULT_SUGGESTED_FEE` in
-//! `~/.smartnet/node/config.toml` (see `doc/FEES-CURR.md`).
+//! `~/.smartnet/config.toml` (see `doc/FEES-CURR.md`).
 
 /// `SmartNet` fixed gas price: `5_000_000_000_000_000 / 21_000 = 238_095_238_095` wei/gas
 /// (≈ 238.1 gwei). Sealed into every SmartNet-era header as `baseFeePerGas` and returned

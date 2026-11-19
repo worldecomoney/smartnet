@@ -1,5 +1,5 @@
 use crate::primitives::alloy_primitives::{BlockNumber, StorageKey, StorageValue};
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, KECCAK256_EMPTY, U256};
 use core::ops::{Deref, DerefMut};
 use smartnet_primitives_traits::Account;
 use revm::{bytecode::Bytecode, state::AccountInfo, Database, DatabaseRef};
@@ -20,9 +20,9 @@ pub trait EvmStateProvider {
     fn block_hash(&self, number: BlockNumber) -> ProviderResult<Option<B256>>;
 
     /// Get account code by hash.
-    fn bytecode_by_hash(
+    fn code_by_address(
         &self,
-        code_hash: &B256,
+        address: &Address,
     ) -> ProviderResult<Option<smartnet_primitives_traits::Bytecode>>;
 
     /// Get storage of the given account.
@@ -43,11 +43,11 @@ impl<T: StateProvider> EvmStateProvider for T {
         <T as BlockHashReader>::block_hash(self, number)
     }
 
-    fn bytecode_by_hash(
+    fn code_by_address(
         &self,
-        code_hash: &B256,
+        address: &Address,
     ) -> ProviderResult<Option<smartnet_primitives_traits::Bytecode>> {
-        <T as BytecodeReader>::bytecode_by_hash(self, code_hash)
+        <T as BytecodeReader>::code_by_address(self, address)
     }
 
     fn storage(
@@ -143,15 +143,28 @@ impl<DB: EvmStateProvider> DatabaseRef for StateProviderDatabase<DB> {
     ///
     /// Returns `Ok` with `Some(AccountInfo)` if the account exists,
     /// `None` if it doesn't, or an error if encountered.
+    ///
+    /// The code **rides the account**: the bytecode store is keyed by the deployed address
+    /// (operator layout) with no by-hash lookup, so this is the one place that knows the
+    /// address and can fetch the code. With `AccountInfo.code` set, the EVM's lazy
+    /// `code_by_hash` route never fires.
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        Ok(self.basic_account(&address)?.map(Into::into))
+        let mut info: Option<AccountInfo> = self.basic_account(&address)?.map(Into::into);
+        if let Some(info) = info.as_mut() &&
+            info.code_hash != KECCAK256_EMPTY &&
+            let Some(code) = self.code_by_address(&address)?
+        {
+            info.code = Some(code.0);
+        }
+        Ok(info)
     }
 
-    /// Retrieves the bytecode associated with a given code hash.
-    ///
-    /// Returns `Ok` with the bytecode if found, or the default bytecode otherwise.
+    /// Unreachable by design: runtime bytecode is stored per deployed address and rides
+    /// the account (see [`DatabaseRef::basic_ref`]), so code is never resolved by hash.
+    /// Fails loudly — if this ever fires, the embedding assumption broke, and returning
+    /// empty code would corrupt execution silently.
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-        Ok(self.bytecode_by_hash(&code_hash)?.unwrap_or_default().0)
+        Err(ProviderError::other(ByHashLookupError(code_hash)))
     }
 
     /// Retrieves the storage value at a specific index for a given address.
@@ -169,3 +182,21 @@ impl<DB: EvmStateProvider> DatabaseRef for StateProviderDatabase<DB> {
         Ok(self.0.block_hash(number)?.unwrap_or_default())
     }
 }
+
+/// Unreachable-by-design error for [`DatabaseRef::code_by_hash_ref`]: the bytecode store
+/// is keyed by deployed address, so a by-hash lookup means the code-riding-account
+/// invariant broke somewhere. A struct, not a string — this crate is `no_std` capable.
+#[derive(Debug)]
+struct ByHashLookupError(B256);
+
+impl core::fmt::Display for ByHashLookupError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "code_by_hash({}) reached — runtime bytecode is stored by contract address",
+            self.0
+        )
+    }
+}
+
+impl core::error::Error for ByHashLookupError {}

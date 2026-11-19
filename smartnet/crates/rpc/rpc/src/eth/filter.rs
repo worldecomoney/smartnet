@@ -88,6 +88,15 @@ const PARALLEL_PROCESSING_THRESHOLD: usize = 1000;
 /// Default concurrency for parallel processing
 const DEFAULT_PARALLEL_CONCURRENCY: usize = 4;
 
+/// Hard cap on simultaneously installed filters (`eth_newFilter` /
+/// `eth_newBlockFilter` / `eth_newPendingTransactionFilter`).
+///
+/// Filters expire only via `stale_filter_ttl` (default 5 min) or uninstall, so without
+/// a cap a client could grow the map linearly for the whole TTL window — each pending-
+/// tx filter also holds a buffering pool listener. Over the cap the install is rejected
+/// (`-32005`) instead of accepted unbounded; poll/uninstall or wait for TTL eviction.
+const MAX_ACTIVE_FILTERS: usize = 10_000;
+
 /// `Eth` filter RPC implementation.
 ///
 /// This type handles `eth_` rpc requests related to filters (`eth_getLogs`).
@@ -590,6 +599,9 @@ where
     }
 
     /// Installs a new filter and returns the new identifier.
+    ///
+    /// Refused with `-32005` once [`MAX_ACTIVE_FILTERS`] filters are live — the TTL
+    /// sweep is the only thing that would otherwise ever shrink the map.
     async fn install_filter(
         &self,
         kind: FilterKind<RpcTransaction<Eth::NetworkTypes>>,
@@ -602,6 +614,15 @@ where
             jsonrpsee_types::SubscriptionId::Str(s) => FilterId::Str(s.into_owned()),
         };
         let mut filters = self.active_filters.inner.lock().await;
+        if filters.len() >= MAX_ACTIVE_FILTERS {
+            return Err(rpc_error_with_code(
+                -32005,
+                format!(
+                    "active filter limit of {MAX_ACTIVE_FILTERS} reached — uninstall a \
+                     filter or wait for TTL eviction"
+                ),
+            ));
+        }
         filters.insert(
             id.clone(),
             ActiveFilter {

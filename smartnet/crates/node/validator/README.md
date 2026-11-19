@@ -24,36 +24,40 @@ built-in defaults anywhere in the code**: a missing, empty or unparseable value 
 with an error that lists every problem at once and names the key.
 
 The template already ships sane basics for everything that is the same on every install —
-`INTERVAL`, the three `CANONICAL_PROBE_*` timings, `RPC_TIMEOUT_MS` and the seed-tx amount and
-gas — so an unedited copy gets all the way up to the keys only you can answer:
+so an unedited copy gets all the way up to the keys only you can answer:
 
 | Left blank on purpose | Why |
 |---|---|
-| `KEY_PATH`, `KEY_FILE`, `PASSWORD_FILE` | where your keystore lives |
-| `NODE_URL` | your node's RPC endpoint |
-| `COINBASE`, `SEED_TX_TO` | your addresses |
-| `CHAINID` | **no default chain id** — `0` is a boot error, deliberately, rather than a fallback that could sign for the wrong chain |
+| `KEY_PATH`, `PASSWORD_FILE` | where your keystore lives and the password file that unlocks it (both mandatory full paths) |
+
+**Official params are NODE-owned — injected into the validator as hooks, never validator
+config keys:**
+
+- **Chain id** — genesis-determined, DB-stored (written at `smartnet init`), read by EVERY
+  consumer through the single call fn `smartnet_file_tier::get_chain_id()` (set once at
+  bootstrap, never changes; no config fallback, no default).
+- **Node id** — this node's ETH `0x…` address, published once by the official keyset
+  decrypt and read back through `smartnet_file_tier::get_node_id()` (single source of
+  truth; never re-derived ad hoc).
+- **Node RPC endpoint** (`seed-tx` / `ping`) — `HTTP_ADDR`/`HTTP_PORT` from config, the
+  same values the node binds; the node CLI resolves them and hands them over.
+- **Cadence** — `NODE_HEARTBEAT`, the node-owned heartbeat: the seal beat, the canonical
+  probe timings and every other hook derive from it. The mesh keepalive is its own
+  `MESH_HEARTBEAT`.
+- **Validator registry** — `~/.smartnet/validators.jsonl` (not a config key): one
+  `{"address":"0x…","status":true}` per line; `status: true` = may seal and is accepted as
+  a validator (the SELECT chair gate). Read at bootstrap, held in RAM for the run; a sample
+  ships at the repo root as `example.validators.jsonl`.
 
 Three keys are genuinely optional and do have defaults: `VERB` (log verbosity, `1`) and the four
 per-class block caps (`MAX_*_PER_BLOCK`, `64` / `32` / `1` / `2`).
 
 | Key | Meaning |
 |-----|---------|
-| `KEY_PATH` | Directory for encrypted keystores — an absolute path under `~/.smartnet/`, e.g. `~/.smartnet/validator/secure` (`~` expands via `HOME`; relative paths are rejected) |
-| `KEY_FILE` | Filename under `KEY_PATH`. **Empty** = no keystore; `keystore` creates `UTC--…--<address>` and writes this key |
-| `PASSWORD_FILE` | File read for the keystore password, e.g. `~/.smartnet/validator/pw.txt`. **Empty** = prompt on the terminal. Written by the `keystore` command from its `--password` path; a relative path resolves against the current working directory |
-| `NODE_URL` | Node JSON-RPC URL — no built-in endpoint; empty refuses to start |
-| `COINBASE` | Validator identity / block beneficiary; empty and zero address are rejected |
-| `CHAINID` | Chain id the validator signs for. **No default** — `0` is a boot error, never silently inherited. **The single source of truth**: cross-checked against the node's `eth_chainId` at startup (a mismatch refuses to seal), and every mempool tx must declare this exact chain id or it is dropped |
-| `INTERVAL` | Seconds between mempool polls — for future daemon loop; `0` is rejected |
+| `KEY_PATH` | Directory for encrypted keystores — an absolute path under `~/.smartnet/`, e.g. `~/.smartnet/validator/secure` (`~` expands via `HOME`; relative paths are rejected). **The directory is the source of truth**: it must hold EXACTLY ONE file — that file is the node/validator key |
+| `KEY_FILE` | **Legacy, ignored** — boot never consults it; the keystore is the unique file in `KEY_PATH` (kept only so older configs parse) |
+| `PASSWORD_FILE` | **Mandatory full path** to the password file, e.g. `~/.smartnet/validator/pw.txt` (relative paths are rejected). The password is ALWAYS a file: boot reads it to decrypt, `smartnet keystore` reads the SAME file to encrypt. Blank/absent = config error; there is no terminal prompt anywhere. Set it by hand — no command writes config |
 | `ALLOW_EMPTY` | `true` / `false` — seal empty block when txpool empty (required; `false` = don't) |
-| `CANONICAL_PROBE_TIMEOUT_MS` | A5 · M21 — how long a VALID import may take to become the canonical head before the outcome is classified (ms). `0` rejected; must be ≥ the interval |
-| `CANONICAL_PROBE_INTERVAL_MS` | A5 · M21 — base delay between canonical-head probes (ms); the backoff doubles it up to `CANONICAL_PROBE_MAX_INTERVAL_MS`. `0` rejected |
-| `CANONICAL_PROBE_MAX_INTERVAL_MS` | A5 · M21 — cap on the probe backoff (ms). `0` rejected; must be ≥ the interval |
-| `RPC_TIMEOUT_MS` | Timeout for every JSON-RPC request the validator sends (ms). `0` rejected |
-| `SEED_TX_TO` | `seed-tx` recipient; empty and zero address are rejected |
-| `SEED_TX_VALUE_WEI` | `seed-tx` amount in wei; `0` rejected |
-| `SEED_TX_GAS_LIMIT` | `seed-tx` gas limit; `0` rejected |
 | `VERB` | **Optional** log verbosity, `0`–`3`: `0` errors only, `1` info (default), `2` debug, `3` everything. Blank or absent keeps `1`. Written above `3` is a config error, not a silent clamp |
 | `MAX_NATIVE_PER_BLOCK` | **Optional** cap on plain value transfers sealed per block. Default `64`. Blank or absent keeps it; an explicit value must be ≥ 1 |
 | `MAX_ERC_20_PER_BLOCK` | **Optional** cap on ERC-20 txs per block. Default `32`. Same rules |
@@ -132,8 +136,10 @@ consecutive only (never a future nonce), signature.
 
 ## Selection protocol (per-class caps)
 
-**Chain id first.** `CHAINID` in the config is the validator's single source of truth. Every
-candidate tx must satisfy `tx.chain_id() == Some(CHAINID)` — this is checked *before* signature
+**Chain id first.** The chain id is genesis-determined and DB-stored — read through the
+single call fn `smartnet_file_tier::get_chain_id()` (the same value the node, mesh and ops
+commands use; never a config key, never a default). Every candidate tx must satisfy
+`tx.chain_id() == Some(chain_id)` — this is checked *before* signature
 recovery because it is the cheapest and most decisive gate. A tx that declares no chain at all,
 or a different one, is dropped with a `TX_DROPPED` at `VERB = 1`, and the rest of that sender's
 nonces go with it. Without this the validator would seal blocks the node rejects at execution.
@@ -165,59 +171,60 @@ execution.
 
 ## Create / replace keystore
 
-The **only** command that puts a key into the validator:
+**Node-level, not a validator command**: every node needs a keypair (it is the mesh
+identity); the validator merely uses this same keyset. The command lives on the node
+binary:
 
 ```bash
-smartnet-validator keystore --key ~/.smartnet/validator/key --password ~/.smartnet/validator/pw.txt --config ~/.smartnet/validator/config.toml
+smartnet keystore --key ~/.smartnet/validator/key --config ~/.smartnet/config.toml
 ```
 
 `--key` points at a plaintext private-key file (64 hex characters, `0x` optional, either case,
 whitespace tolerated) — the key itself is never a command-line argument (shell history and `ps`
 are leak vectors, only the file path is). There is no random-key generator and no other import
 path: generate the key material however you like, put it in a file, hand `keystore` the file.
+There is **no `--password`**: the password is always config's `PASSWORD_FILE` (mandatory full
+path), and the same file is what boot decrypts with.
 
 The protocol, in order:
 
-1. Read the key and derive the address.
-2. Name the keystore `UTC--{timestamp}.{nanos}Z--{lowercase address}` (geth-style, no `0x`),
-   always — any previous `KEY_FILE` value is ignored.
-3. Write the encrypted keystore at `KEY_PATH`, **replacing** an existing one at that name —
-   this is the key-change flow: run the same command again with a new key and the config
-   follows. An old keystore file under a different name is left alone.
-4. Rewrite the config: `KEY_FILE`, `PASSWORD_FILE` (the `--password` path, as given; it is
-   read with `~` expansion at run time), `COINBASE` and `SEED_TX_TO` — the addresses all
-   `0x` + lowercase hex — leaving every other line (comments included) untouched.
-5. **Delete the source key file.** Only after 3 and 4 both succeeded; if either failed, the
-   plaintext key is left in place because it is your only copy.
+1. Read `KEY_PATH` and `PASSWORD_FILE` from config (both mandatory full paths).
+2. Read the key and derive the address.
+3. Name the keystore `UTC--{timestamp}.{nanos}Z--{lowercase address}` (geth-style, no `0x`),
+   always.
+4. Write the encrypted keystore at `KEY_PATH`, **replacing** an existing one at that name —
+   this is the key-change flow: run the same command again with a new key. An old keystore
+   file under a different name is left alone (and the command then warns that `KEY_PATH`
+   holds more than one file — boot requires exactly one, so remove the stale one).
+5. **Delete the source key file.** Only after 4 succeeded; if it failed, the plaintext key
+   is left in place because it is your only copy.
 
-Password handling: a `--password` path with content is used as-is; a missing or empty file
-prompts on the terminal (with confirmation) and writes the file — then `PASSWORD_FILE` in the
-config already points at it for the production run. A relative password path resolves against
-the current working directory.
+**config.toml is NEVER written** by this command (or any command): boot resolves the key
+as `KEY_PATH`'s unique file, so nothing stored in config can go stale.
 
-Production run reads the password from `PASSWORD_FILE` in the config (empty → prompt, run
-verbosity permitting) — the `keystore` command above is what keeps that key filled in.
+Production run (and the mesh identity) read the password from `PASSWORD_FILE` in the
+config — create that file by hand before the first boot.
 
 ## Production run (default — no subcommand)
 
 ```bash
 smartnet-validator --config ~/.smartnet/validator/config.toml
-smartnet-validator --config ~/.smartnet/validator/config.toml --password ~/.smartnet/validator/secure/password.txt
 ```
 
 **Default:** empty txpool → `NOTHING_TO_SEAL` log, process ends naturally (no seal).  
 **Intentional empty block** (T0-GATE D): `ALLOW_EMPTY = true` in config.
 
-**Exit codes** — `main` maps the run outcome (see `outcome.rs`):
+**Exit codes** — the node binary maps the run outcome (dispatched through
+`run_validator_cli`; see `outcome.rs`):
 
 | Code | Meaning |
 |------|---------|
 | `0` | Sealed and accepted, or a benign idle (`NOTHING_TO_SEAL`, node down, already initialized, canonical-stalled) |
 | `1` | Operation failed (config error, RPC failure, rejected payload, …) |
-| `2` | Chain id missing / unusable at boot |
+| `2` | Chain id missing / unusable at boot (database: run `smartnet init`) |
 | `3` | Genesis signer list missing / unusable at boot |
-| `4` | Configured `CHAINID` does not match the node's `eth_chainId` |
-| `5` | Our address is not in the genesis signer set |
+| `4` | Node chain id and validator view disagree (both come from the single call fn today — the guard stays as a belt) |
+| `5` | Our address is not enabled in `validators.jsonl` (`status: true`) |
 
 Optional: `--dump-payload PATH` writes sealed block RLP for `smartnet-test-util`.
 
@@ -227,18 +234,17 @@ longer merged into the wallet HTTP/WS transports; `RPC_UNIFIED_VALIDATOR_JSONRPC
 
 ## Other subcommands
 
-- `import <PRIVATE_KEY_FILE>` — bring your own key. Reads a 64-hex-character private key (with or
-  without `0x`, either case), writes the encrypted keystore, rewrites `KEY_FILE` + `COINBASE` +
-  `SEED_TX_TO` in config to the derived address (all lowercase), and **only then** deletes the
-  source file. It never overwrites: if `KEY_FILE` is already set, or the target keystore file
-  exists, it refuses and changes nothing. The key is read from a file, never from a CLI argument.
-  Runs offline, so it skips the full config validation — this is the one command that runs
-  before `COINBASE` has a value, because the import is what sets it.
-- `seed-tx` — one native transfer into the txpool (uses config + keystore)
-- `ping` — diagnostic `engine_forkchoiceUpdated` (uses `NODE_URL` from config). **Read-only by
+- `seed-tx` — one native transfer into the txpool (uses the keystore identity + the
+  official params: chain id from `get_chain_id()`, endpoint from `HTTP_ADDR`/`HTTP_PORT`,
+  injected by the node CLI)
+- `ping` — diagnostic `engine_forkchoiceUpdated` (uses the node's own
+  `HTTP_ADDR`/`HTTP_PORT` endpoint, injected by the node CLI). **Read-only by
   default** (A6 · M6): sends `head = safe = finalized = current canonical head`. Explicit
   steering requires `--finalize --head <hash>` (plus optional `--safe` / `--finalized`);
   hashes without `--finalize` are refused.
+
+**Key import lives on the node binary**: `smartnet keystore --key <file>` (see "Create /
+replace keystore" above) — every node needs a keypair, so it is not a validator command.
 
 **Removed:** `run-once`, `--node-url`, `--coinbase`, `--secret-key`, `--secret-key-file`.
 

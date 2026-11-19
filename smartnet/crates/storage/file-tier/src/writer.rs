@@ -16,7 +16,7 @@
 
 use crate::{
     error::FileTierResult,
-    extract::{extract_empty_block, BlockRecords},
+    extract::BlockRecords,
     records::{BlockLogsRecord, BtRecord, Erc4626Record, TxRecord, TxStubRecord},
     seal::active_file_path,
     shard::{get_shard, ShardId},
@@ -242,7 +242,19 @@ pub fn write_genesis_block<H: BlockHeader>(
     header: &H,
     block_hash: B256,
 ) -> FileTierResult<()> {
-    let records = extract_empty_block(header, block_hash);
+    write_genesis_block_with_txs(base, header, block_hash, &[])
+}
+
+/// The genesis block write for a **calibri\* genesis carrying the pre-fund tx records**
+/// (GENESIS.md): the payload is one `b` record + one `txs` record per listing — the
+/// alloc stays the single source of truth for state; the records are listings only.
+pub fn write_genesis_block_with_txs<H: BlockHeader>(
+    base: impl AsRef<Path>,
+    header: &H,
+    block_hash: B256,
+    txs: &[crate::reader::TransactionSigned],
+) -> FileTierResult<()> {
+    let records = crate::extract::genesis_block_records(header, block_hash, txs);
     let mut writer = FileTierWriter::new(base.as_ref().to_path_buf());
     append_records_and_seal(&mut writer, &[records], Instant::now())?;
     writer.finish_active()?;

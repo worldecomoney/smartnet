@@ -4,6 +4,10 @@ Single source of truth for the mesh wire protocol. Replaces the older payload/ha
 docs. Layers 0–6, one page. Keepalive, identity, flags, and application dialogs are
 separate — they never share opcodes or frames.
 
+**Transport boundary (operator ruling, 2026-11-19): RPC = HTTP, nothing else.**
+JSON-RPC is served over HTTP only. WebSocket carries **only** this binary protocol —
+RLP frames, mesh-specific — and never RPC; there is no RPC via WebSocket on SmartNet.
+
 Namespace (why it is laid out this way): opcodes are grouped by role first, so a new
 handshake or control message can never collide with an application message:
 

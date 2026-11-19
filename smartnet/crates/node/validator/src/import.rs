@@ -1,21 +1,22 @@
 //! `keystore` subcommand — the only way a key enters the validator.
 //!
-//! `smartnet-validator keystore --key <PRIVATE_KEY_FILE> --password <PW_FILE>` turns an operator's
-//! plaintext key file into an encrypted keystore and rewrites the config to match. The protocol,
-//! in order:
+//! `smartnet keystore --key <PRIVATE_KEY_FILE> --password <PW_FILE>` turns an operator's
+//! plaintext key file into an encrypted keystore **in `KEY_PATH`**. The protocol, in order:
 //!
 //! 1. Derive the address from the key (optional `0x`, any case accepted). The key never appears as
 //!    a CLI argument value (shell-history/`ps` leak vector) — only the *file path* does.
-//! 2. Name the keystore `UTC--{timestamp}.{nanos}Z--{lowercase address, no 0x}` — always, ignoring
-//!    any `KEY_FILE` previously in the config.
-//! 3. Write the encrypted keystore, **replacing** an existing one at the same name (this is the
-//!    key-change flow: the same address implies the same key, so the overwrite is safe).
-//! 4. Rewrite the config: `KEY_FILE` and `PASSWORD_FILE` only - the coinbase and the seed recipient
-//!    are DERIVED from the private key and never live in config.toml.
-//! 5. **Only then** delete the plaintext source. If any earlier step failed, the source key is left
-//!    alone — it is the operator's only copy and a failed import must not eat it.
+//! 2. Name the keystore `UTC--{timestamp}.{nanos}Z--{lowercase address, no 0x}`. That name is this
+//!    command's own business: **nothing in the node ever names a key file** — boot GATHERS the
+//!    single file sitting in `KEY_PATH` (`keystore_util::get_encrypted_key`), so any name works.
+//! 3. Refuse to write when `KEY_PATH` already holds a file — **no overwrite, no
+//!    auto-deletion** (the same analogy as `smartnet init` refusing a non-empty data dir):
+//!    clearing the path is the operator's job, so a key change starts with an empty dir.
+//! 4. Write the encrypted keystore into the now-empty `KEY_PATH`.
+//! 5. **Only then** delete the plaintext source. If any earlier step failed, the source key is
+//!    left alone — it is the operator's only copy and a failed import must not eat it.
 //!
-//! The validator has no database, so `config.toml` *is* the state; editing it is the point.
+//! **`config.toml` is never edited** (user-in #2): `KEY_FILE` is gone from the schema, so there is
+//! nothing left here to keep in sync — the keystore is found by gathering `KEY_PATH` at boot.
 
 use std::path::Path;
 
@@ -25,7 +26,7 @@ use k256::ecdsa::SigningKey;
 use tracing::info;
 
 use crate::{
-    config::{load_import_config, set_config_values},
+    config::load_import_config,
     keystore_util::{init_keystore_at, resolve_password_for_init, utc_keystore_filename},
     outcome::{from_eyre, ValidatorStatus},
     run_once::signer_address,
@@ -98,8 +99,8 @@ pub(crate) fn keystore_import_cmd(
     let address = signer_address(&secret);
     let address_lower = lowercase_address(address);
 
-    // The target name is always the conventional `UTC--…--<address>` one — the key-change
-    // flow ignores whatever `KEY_FILE` held before (it is rewritten below).
+    // The target name is the conventional `UTC--…--<address>` one. It is written into
+    // `KEY_PATH` and never read back by name: boot gathers whatever single file is there.
     let key_file = utc_keystore_filename(address);
 
     let password = match resolve_password_for_init(Some(password_file)) {
@@ -107,35 +108,33 @@ pub(crate) fn keystore_import_cmd(
         Err(e) => return from_eyre(e),
     };
 
-    // Belt and braces on the file itself: `init_keystore_at` also refuses overwrites by
-    // default, but here the same address *is* the same key, so removing the stale target
-    // first is the key-change behavior the command exists for. Only reached once the
-    // password is resolved — a mid-flow failure must not disturb the old keystore.
-    let target = cfg.key_dir.join(&key_file);
-    if target.exists() &&
-        let Err(e) = std::fs::remove_file(&target)
-            .with_context(|| format!("remove replaced keystore {}", target.display()))
-    {
-        return from_eyre(e);
+    // `KEY_PATH` must be EMPTY (operator rule — same analogy as `smartnet init` refusing a
+    // non-empty data dir): this command **never overwrites and never deletes**. Clearing
+    // the path is the operator's job; a non-empty one is an error exit, never a warning.
+    if let Ok(entries) = std::fs::read_dir(&cfg.key_dir) {
+        let existing: Vec<String> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().display().to_string())
+            .collect();
+        if !existing.is_empty() {
+            return from_eyre(eyre::eyre!(
+                "keystore not empty — {} already holds {} file(s): delete them yourself \
+                 first (no overwriting, no auto-deletion)",
+                cfg.key_dir.display(),
+                existing.len()
+            ));
+        }
     }
+
 
     // Step 3 — the encrypted keystore.
     if let Err(e) = init_keystore_at(&cfg.key_dir, &key_file, &secret, &password) {
         return from_eyre(e);
     }
 
-    // Step 4 — config: KEY_FILE and PASSWORD_FILE only. The coinbase is DERIVED from the
-    // private key (never a config key anymore) and the seed recipient is derived too —
-    // the merged flow stores them in the database, not in config.toml.
-    if let Err(e) = set_config_values(
-        &cfg_path,
-        &[("KEY_FILE", key_file.as_str()), ("PASSWORD_FILE", &password_file.to_string_lossy())],
-    ) {
-        return from_eyre(e);
-    }
-
-    // Step 5 — only now is the plaintext key redundant. A failure here is reported loudly:
-    // the keystore and config are already correct, so the operator just deletes the file.
+    // Step 4 — only now is the plaintext key redundant. A failure here is reported loudly:
+    // the keystore is already correct (config.toml was never touched), so the operator just
+    // deletes the file.
     if let Err(e) = std::fs::remove_file(private_key_file).with_context(|| {
         format!(
             "imported, but could not delete the source key {} — delete it manually",
@@ -162,7 +161,7 @@ pub(crate) fn keystore_import_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::apply_config_updates, keystore_util::load_secret_from_keystore};
+    use crate::keystore_util::load_secret_from_keystore;
 
     /// A fixed key so the derived address is stable across runs.
     const KEY_HEX: &str = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -213,50 +212,10 @@ mod tests {
         assert_eq!(lowercase_address(back), KEY_ADDRESS);
     }
 
-    /// The config rewrite preserves everything it is not asked to touch, and appends
-    /// missing keys.
+    /// End-to-end: keystore written into `KEY_PATH`, **`config.toml` never edited**,
+    /// source deleted — and the key comes back by GATHERING (any filename, exactly one file).
     #[test]
-    fn config_rewrite_sets_the_four_keys_and_keeps_the_rest() {
-        let raw = "# comment\nKEY_PATH = \"/home/u/.smartnet/validator/secure\"\n\
-                   KEY_FILE = \"\"\nCOINBASE = \"0x0000000000000000000000000000000000000000\"\n\
-                   SEED_TX_TO = \"0x0000000000000000000000000000000000000000\"\n\
-                   PASSWORD_FILE = \"\"\nNODE_URL = \"http://127.0.0.1:8545\"\n";
-        let out = apply_config_updates(
-            raw,
-            &[
-                ("KEY_FILE", "UTC--1--aabb"),
-                ("PASSWORD_FILE", "~/.smartnet/validator/pw.txt"),
-                ("COINBASE", KEY_ADDRESS),
-                ("SEED_TX_TO", KEY_ADDRESS),
-            ],
-        );
-        assert!(
-            out.contains("KEY_PATH = \"/home/u/.smartnet/validator/secure\""),
-            "comment/key kept:\n{out}"
-        );
-        assert!(out.contains("# comment"), "comment kept");
-        assert!(out.contains("KEY_FILE = \"UTC--1--aabb\""));
-        assert!(
-            out.contains("PASSWORD_FILE = \"~/.smartnet/validator/pw.txt\""),
-            "PASSWORD_FILE written:\n{out}"
-        );
-        assert!(out.contains(&format!("COINBASE = \"{KEY_ADDRESS}\"")));
-        assert!(out.contains(&format!("SEED_TX_TO = \"{KEY_ADDRESS}\"")));
-        assert!(out.contains("NODE_URL = \"http://127.0.0.1:8545\""), "untouched key kept");
-        assert!(!out.contains("0x0000000000000000000000000000000000000000"), "replaced");
-    }
-
-    /// A key absent from the file is appended rather than silently skipped.
-    #[test]
-    fn config_rewrite_appends_missing_keys() {
-        let out = apply_config_updates("KEY_PATH = \"/abs\"\n", &[("COINBASE", KEY_ADDRESS)]);
-        assert!(out.starts_with("KEY_PATH = \"/abs\"\n"), "original kept:\n{out}");
-        assert!(out.contains(&format!("COINBASE = \"{KEY_ADDRESS}\"")), "appended:\n{out}");
-    }
-
-    /// End-to-end: keystore written, config rewritten, source deleted, and changed again.
-    #[test]
-    fn keystore_import_writes_keystore_rewrites_config_and_deletes_source() {
+    fn keystore_import_writes_keystore_never_edits_config_and_deletes_source() {
         use crate::config::load_validator_config;
 
         let dir =
@@ -267,14 +226,11 @@ mod tests {
         let cfg_path = dir.join("config.toml");
         let source = dir.join("private_key.txt");
         std::fs::write(&source, KEY_HEX).expect("write source key");
-        std::fs::write(
-            &cfg_path,
-            format!(
-                "KEY_PATH = \"{}\"\nKEY_FILE = \"\"\nPASSWORD_FILE = \"\"\nSEAL = true\n",
-                dir.join("keys").display()
-            ),
-        )
-        .expect("write config");
+        let config_before = format!(
+            "KEY_PATH = \"{}\"\nPASSWORD_FILE = \"\"\nSEAL = true\n",
+            dir.join("keys").display()
+        );
+        std::fs::write(&cfg_path, &config_before).expect("write config");
 
         // Run the real command once — password file already holds the password.
         let password_file = dir.join("password.txt");
@@ -283,34 +239,31 @@ mod tests {
         let status = keystore_import_cmd(&cli, &source, &password_file);
         assert!(matches!(status, ValidatorStatus::Ok), "keystore import must succeed: {status:?}");
 
-        // Source is gone, keystore exists, config points at the right address and password.
+        // Source is gone, the keystore is in KEY_PATH, and `config.toml` is untouched.
         assert!(!source.exists(), "source key must be deleted");
+        let config_after = std::fs::read_to_string(&cfg_path).expect("read config back");
+        assert_eq!(config_after, config_before, "config.toml must NEVER be edited");
+        assert!(!config_after.contains("KEY_FILE"), "KEY_FILE is gone from the schema");
+
         let cfg = load_validator_config(&cfg_path).expect("config reloads");
-        assert!(!cfg.key_file.trim().is_empty(), "KEY_FILE written");
+        // GATHERED, never named: the single file in KEY_PATH, whatever it is called.
+        let gathered =
+            crate::keystore_util::get_encrypted_key(&cfg.key_dir).expect("exactly one keystore");
         assert!(
-            cfg.key_file.starts_with("UTC--"),
-            "generated file must be UTC--…--<address>, got {:?}",
-            cfg.key_file
-        );
-        assert!(
-            cfg.key_dir.join(&cfg.key_file).is_file(),
-            "keystore exists at {:?}",
-            cfg.key_dir.join(&cfg.key_file)
-        );
-        assert_eq!(
-            cfg.password_file.expect("PASSWORD_FILE written"),
-            password_file,
-            "path to password updated"
+            gathered.file_name().is_some(),
+            "gathered path must name a file: {gathered:?}"
         );
         // The keystore really does hold this key, and is encrypted, not plaintext.
-        let loaded = load_secret_from_keystore(&cfg.key_dir.join(&cfg.key_file), "test-password")
+        let loaded = load_secret_from_keystore(&gathered, "test-password")
             .unwrap_or_else(|e| panic!("keystore reads back: {e:?}"));
         assert_eq!(lowercase_address(signer_address(&loaded)), KEY_ADDRESS);
-        let on_disk = std::fs::read_to_string(cfg.key_dir.join(&cfg.key_file)).expect("read json");
+        let on_disk = std::fs::read_to_string(&gathered).expect("read json");
         assert!(on_disk.contains("crypto"), "must be an encrypted keystore: {on_disk}");
 
-        // Key change: the same command again with a *different* key must replace the
-        // keystore and rewrite the config — this is the flow that never worked before.
+        // A key change is the OPERATOR's job: `KEY_PATH` must be cleared first — this
+        // command **never overwrites and never deletes** (same analogy as `smartnet init`
+        // refusing a non-empty data dir). The second run must therefore be refused, and
+        // it must leave everything exactly as it was.
         let source3 = dir.join("private_key_3.txt");
         std::fs::write(
             &source3,
@@ -318,24 +271,29 @@ mod tests {
         )
         .expect("write third key");
         let status = keystore_import_cmd(&cli, &source3, &password_file);
-        assert!(matches!(status, ValidatorStatus::Ok), "key change must succeed: {status:?}");
-        let address3 = lowercase_address(signer_address(
-            &parse_private_key("1111111111111111111111111111111111111111111111111111111111111111")
-                .expect("valid scalar"),
-        ));
-        // The config rewrites KEY_FILE (UTC--…--<new address>) — the derived identity follows.
-        let cfg = load_validator_config(&cfg_path).expect("config reloads after change");
+        let message = format!("{status:?}");
         assert!(
-            cfg.key_file.contains(&address3[2..]),
-            "KEY_FILE follows the new key: {:?}",
-            cfg.key_file
+            !matches!(status, ValidatorStatus::Ok),
+            "a non-empty KEY_PATH must be refused: {message}"
         );
-        assert!(cfg.key_dir.join(&cfg.key_file).is_file(), "new keystore exists after the change");
-        assert!(!source3.exists(), "source deleted after the change too");
-        // The new key's keystore decrypts with the same password file.
-        let loaded = load_secret_from_keystore(&cfg.key_dir.join(&cfg.key_file), "test-password")
-            .unwrap_or_else(|e| panic!("changed keystore reads back: {e:?}"));
-        assert_eq!(lowercase_address(signer_address(&loaded)), address3);
+        assert!(
+            message.contains("keystore not empty"),
+            "the refusal must name the reason: {message}"
+        );
+        // Nothing moved: the old keystore is still the only file, the new source key is
+        // NOT deleted (no auto-deletion), and `config.toml` is byte-identical.
+        assert!(source3.exists(), "a refused run must never eat the operator's source key");
+        let cfg = load_validator_config(&cfg_path).expect("config reloads");
+        assert_eq!(
+            std::fs::read_to_string(&cfg_path).expect("config back"),
+            config_before,
+            "config.toml must NEVER be edited, not even on a refused key change"
+        );
+        let gathered =
+            crate::keystore_util::get_encrypted_key(&cfg.key_dir).expect("exactly one keystore");
+        let loaded = load_secret_from_keystore(&gathered, "test-password")
+            .unwrap_or_else(|e| panic!("unchanged keystore reads back: {e:?}"));
+        assert_eq!(lowercase_address(signer_address(&loaded)), KEY_ADDRESS);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

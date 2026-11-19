@@ -21,29 +21,24 @@ fn main() {
     }
 
     let cli = SmartnetCli::parse();
-    // `smartnet import <file>`: boot the node, stream the chain file through the engine,
-    // then exit (the runner shuts the node down when the launcher future resolves).
-    // Without the subcommand the node runs until the exit signal, as before.
-    let import_file = match &cli.command {
-        Some(Commands::Import(command)) => Some(command.file.clone()),
-        _ => None,
-    };
+    // `smartnet import <file>`: the import itself runs in the CLI arm BEFORE the node
+    // boots (the chain file is the only writer, no engine/mesh/heartbeat exists yet), so
+    // by the time the launcher runs there is nothing left to do — resolving the future
+    // shuts the node down again. Without the subcommand the node runs until the exit
+    // signal, as before.
+    let import_file = matches!(cli.command, Some(Commands::Import(_)));
     if let Err(err) = cli.run(async move |builder, _| {
         let handle = builder.launch_node(EthereumNode::default()).await?;
 
-        match import_file {
-            Some(file) => {
-                smartnet_node_ethereum::import::run_import(
-                    &handle.node.add_ons_handle.beacon_engine_handle,
-                    &handle.node.provider,
-                    &file,
-                )
-                .await
-            }
+        if import_file {
+            // The import completed during launch; booting only ever existed to run on
+            // top of the imported chain. Exit (the runner performs the clean shutdown).
+            Ok(())
+        } else {
             // When the shared config carries `SEAL = true`, the node's heartbeat runs the
             // validator beat loop (see `EthereumAddOns::launch_add_ons`); a malformed
             // validator section still aborts boot. Mesh links keep themselves alive.
-            None => handle.wait_for_node_exit().await,
+            handle.wait_for_node_exit().await
         }
     }) {
         eprintln!("Error: {err:?}");

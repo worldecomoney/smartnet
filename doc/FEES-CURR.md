@@ -1,4 +1,4 @@
-# Consensus skip-flag semantics — document the intentional SmartNet differences in `smartnet/crates/consensus/ethereum/src/lib.rs`.
+# Consensus skip-flag semantics — document the intentional SmartNet differences in `smartnet/crates/consensus/seal/src/lib.rs`.
 
 > **STATUS: CURRENT — active design/reference**
 
@@ -27,7 +27,7 @@ Do not re-enable either Ethereum check. If additional validation is required lat
 
 **Date:** 2026-09-18  
 **Status:** Implemented, active on-chain  
-**Code:** `smartnet/crates/consensus/ethereum/src/lib.rs`, `calibri-lite/calibri-lite-consensus/src/pre_consensus/runtime_profile.rs`
+**Code:** `smartnet/crates/consensus/seal/src/lib.rs`, `calibri-lite/calibri-lite-consensus/src/pre_consensus/runtime_profile.rs`
 
 ---
 
@@ -114,7 +114,7 @@ SmartNet disables two Ethereum consensus checks because its fee model differs fr
 - SmartNet copies the parent gas limit unchanged (`child_header_from_parent` → `gas_limit: parent.gas_limit`).
 - The ramp check would reject blocks whose gas limit deviates from the parent by more than `GAS_LIMIT_BOUND_DIVISOR`; since SmartNet never changes gas limit, this check is unnecessary.
 
-**Code path:** `validate_against_parent_gas_limit` in `smartnet/crates/consensus/ethereum/src/validation/mod.rs:372`
+**Code path:** `validate_against_parent_gas_limit` in `smartnet/crates/consensus/seal/src/validation/mod.rs:372`
 
 ### `skip_eip1559_transition_checks` — Intentionally Dead
 
@@ -124,17 +124,17 @@ SmartNet disables two Ethereum consensus checks because its fee model differs fr
 - SmartNet's `child_base_fee_per_gas` returns a protocol constant (`SMARTNET_FIXED_GAS_PRICE_WEI`), identical on every block.
 - The parent-derived EIP-1559 formula would reject every SmartNet block whose base fee is the fixed constant.
 
-**Code path:** `validate_against_parent_eip1559_base_fee` in `smartnet/crates/consensus/ethereum/src/validation/mod.rs:320`
+**Code path:** `validate_against_parent_eip1559_base_fee` in `smartnet/crates/consensus/seal/src/validation/mod.rs:320`
 
 ### Future Replacement — partially implemented
 
 The SmartNet replacements for the skipped Ethereum checks (`beacon_pre_consensus.rs` in
-`smartnet/crates/consensus/ethereum`). They are **SmartNet validity checks**, not re-enabled
+`smartnet/crates/consensus/seal`). They are **SmartNet validity checks**, not re-enabled
 Ethereum checks:
 
 - ✅ A present `baseFeePerGas` must equal `SMARTNET_FIXED_GAS_PRICE_WEI` (absent stays legal for
   pre SmartNet-era headers) — `ConsensusError::SmartNetBaseFeeInvalid`
-- ❌ Gas limit continuity: **no check** — operator decision (XCURR D-1 stripped 2026-11-01).
+- ❌ Gas limit continuity: **no check** — operator decision (stripped 2026-11-01).
   Native fee is fixed by construction; ERC-20 keeps its own economy; neither needs an
   import-side gas-limit check. The SmartNet profile performs **no gas-limit validation**
   (the Ethereum ramp stays dead).
@@ -192,7 +192,7 @@ The node validates imported blocks with:
 - Skip gas-limit ramp check (SmartNet copies gas limit)
 - Skip EIP-1559 base-fee check (SmartNet uses fixed fees; replaced by the fixed-fee check above)
 
-**Code:** `smartnet/crates/consensus/ethereum/src/beacon_pre_consensus.rs:24,81` (+ skip flags in `.../src/lib.rs:40-94`)
+**Code:** `smartnet/crates/consensus/seal/src/beacon_pre_consensus.rs:24,81` (+ skip flags in `.../src/lib.rs:40-94`)
 
 ---
 
@@ -208,7 +208,7 @@ block that exceeds its own gas limit:
    limits of the selected body. A tx that would push Σ over the limit is skipped and **closes
    that sender's whole nonce chain for the block** (other senders keep packing), so the block
    never carries a nonce gap. Same conservative declared-limit rule the node's own builders use
-   (`smartnet/crates/payload/ethereum/src/lib.rs:246`,
+   (`smartnet/crates/payload/exec/src/lib.rs:246`,
    `smartnet/crates/rpc/rpc-eth-api/src/helpers/pending_block.rs:290`,
    `smartnet/crates/node/builder/src/engine_util/reorg.rs:283`). Because declared limits are used, a block may
    be *under-filled* — never over-filled.
@@ -223,7 +223,7 @@ block that exceeds its own gas limit:
    seal when `header.gas_used > header.gas_limit`
    (`SmartNetValidationError::GasUsedExceedsGasLimit`). That is exactly the check the node
    applies on import (`validate_header_gas`,
-   `smartnet/crates/consensus/ethereum/src/validation/mod.rs:21-33`), so a violation can never reach
+   `smartnet/crates/consensus/seal/src/validation/mod.rs:21-33`), so a violation can never reach
    the wire.
 
 `eth_simulateV1` does **not** enforce the block gas limit on the simulated body (unlike the
@@ -249,5 +249,5 @@ skipped consensus checks above (gas-limit ramp, EIP-1559 base fee) remain intent
 
 - `doc/fees.md` — Original design discussion on separating fee policy from EVM execution
 - `calibri-lite/calibri-lite-consensus/src/pre_consensus/runtime_profile.rs` — Runtime profile with fixed fee constants
-- `smartnet/crates/consensus/ethereum/src/lib.rs` — Consensus skip flags documentation
-- `smartnet/crates/consensus/ethereum/src/validation/mod.rs` — Ethereum validation functions (skipped in SmartNet)
+- `smartnet/crates/consensus/seal/src/lib.rs` — Consensus skip flags documentation
+- `smartnet/crates/consensus/seal/src/validation/mod.rs` — Ethereum validation functions (skipped in SmartNet)

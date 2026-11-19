@@ -528,7 +528,7 @@ impl<C: Send + Sync, N: NodePrimitives> StateProvider for NoopProvider<C, N> {
 }
 
 impl<C: Send + Sync, N: NodePrimitives> BytecodeReader for NoopProvider<C, N> {
-    fn bytecode_by_hash(&self, _code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
+    fn code_by_address(&self, _address: &Address) -> ProviderResult<Option<Bytecode>> {
         Ok(None)
     }
 }

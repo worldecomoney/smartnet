@@ -70,7 +70,7 @@ fn ensure_chain_datadir_empty_for_init(
 /// state.
 ///
 /// Use: `smartnet init <GENESIS_FILE_OR_JSON> [--config /path/to/smartnet.toml]` — config is
-/// optional and defaults to `~/.smartnet/node/config.toml`.
+/// optional and defaults to `~/.smartnet/config.toml`.
 #[derive(Debug, Parser)]
 pub struct InitCommand<C: ChainSpecParser> {
     /// Genesis / chainspec: path to a JSON file, or inline JSON. The operator's verbatim

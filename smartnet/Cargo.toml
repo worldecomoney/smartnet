@@ -20,7 +20,6 @@ members = [
     "testing/test-util/",
     "crates/engine/primitives/",
     "crates/engine/execution-cache/",
-    "crates/engine/rpc-sync/",
     "crates/engine/tree/",
     "crates/errors/",
     "crates/ethereum/hardforks/",
@@ -30,6 +29,7 @@ members = [
     "crates/node/ethereum",
     "crates/payload/ethereum/",
     "crates/node/validator/",
+    "crates/node/txsend/",
     "crates/primitives/ethereum/",
     "crates/evm/evm",
     "crates/evm/execution-errors",
@@ -39,7 +39,6 @@ members = [
     "crates/net/mesh/",
     "crates/net/network-api/",
     "crates/net/network-types/",
-    "crates/net/rpc-sync/",
     "crates/node/api/",
     "crates/node/builder/",
     "crates/node/core/",
@@ -262,7 +261,6 @@ smartnet-db-models = { path = "crates/storage/db-models", default-features = fal
 smartnet-file-tier = { path = "crates/storage/file-tier" }
 smartnet-execution-cache = { path = "crates/engine/execution-cache" }
 smartnet-engine-primitives = { path = "crates/engine/primitives", default-features = false }
-smartnet-engine-rpc-sync = { path = "crates/engine/rpc-sync" }
 smartnet-engine-tree = { path = "crates/engine/tree" }
 smartnet-errors = { path = "crates/errors" }
 smartnet-eth-wire-types = { path = "crates/net/eth-wire-types" }
@@ -305,7 +303,6 @@ smartnet-stages = { path = "crates/stages/stages" }
 smartnet-stages-api = { path = "crates/stages/api" }
 smartnet-stages-types = { path = "crates/stages/types", default-features = false }
 smartnet-storage-api = { path = "crates/storage/storage-api", default-features = false }
-smartnet-net-rpc-sync = { path = "crates/net/rpc-sync" }
 smartnet-storage-errors = { path = "crates/storage/errors", default-features = false }
 smartnet-tasks = { path = "crates/tasks" }
 smartnet-timing = { path = "crates/timing" }
@@ -487,7 +484,6 @@ rstest = "0.26.1"
 crossbeam-channel = "0.5.13"
 crossbeam-utils = "0.8"
 hash-db = "=0.15.2"
-hickory-resolver = "0.25.0"
 hmac = "0.12.1"
 indexmap = "2"
 lz4_flex = { version = "0.13", default-features = false }

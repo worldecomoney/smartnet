@@ -7,10 +7,12 @@ use crate::{
 };
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 use alloy_chains::Chain;
-use alloy_consensus::Header;
+use alloy_consensus::{Header, SignableTransaction, TxLegacy};
 use alloy_eips::{eip1559::INITIAL_BASE_FEE, eip7892::BlobScheduleBlobParams};
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, BlockNumber, B256, U256};
+use alloy_eips::eip2718::Encodable2718;
+use alloy_primitives::{Address, BlockNumber, B256, Bytes, TxKind, U256};
+use alloy_primitives::Signature;
 use alloy_trie::root::state_root_ref_unhashed;
 use core::fmt::Debug;
 use derive_more::From;
@@ -18,7 +20,10 @@ use smartnet_ethereum_forks::{
     ChainHardforks, DisplayHardforks, EthereumHardfork, EthereumHardforks, ForkCondition,
     ForkFilter, ForkFilterKey, ForkHash, ForkId, Hardfork, Hardforks, Head, DEV_HARDFORKS,
 };
-use smartnet_primitives_traits::{sync::LazyLock, BlockHeader, SealedHeader};
+use smartnet_ethereum_primitives::TransactionSigned;
+use smartnet_primitives_traits::{
+    proofs::ordered_trie_root_with_encoder, sync::LazyLock, BlockHeader, SealedHeader,
+};
 
 /// Helper method building a [`Header`] given [`Genesis`] and [`ChainHardforks`].
 pub fn make_genesis_header(genesis: &Genesis, hardforks: &ChainHardforks) -> Header {
@@ -27,6 +32,17 @@ pub fn make_genesis_header(genesis: &Genesis, hardforks: &ChainHardforks) -> Hea
         .fork(EthereumHardfork::London)
         .active_at_block(0)
         .then(|| genesis.base_fee_per_gas.map(|fee| fee as u64).unwrap_or(INITIAL_BASE_FEE));
+
+    // Calibri* pre-fund records (GENESIS.md): the alloc entries as REAL block-0
+    // transactions — `from = 0x0` (zero signature: the records are listings of the
+    // genesis allocation, never executed, never metered — the alloc is the single
+    // source of truth for opening balances, no doubles), nonce = index, deterministic
+    // by the alloc's address sort. Clique genesis: NO records (byte-perfect legacy).
+    let records = genesis_pre_fund_records(
+        genesis,
+        genesis.config.chain_id,
+        genesis.config.clique.is_none(),
+    );
 
     // WEM: no Shanghai/Cancun/Prague/Amsterdam, so the header never carries a withdrawals
     // root, blob gas fields, parent beacon block root, requests hash, or access list hash
@@ -43,8 +59,48 @@ pub fn make_genesis_header(genesis: &Genesis, hardforks: &ChainHardforks) -> Hea
         mix_hash: genesis.mix_hash,
         beneficiary: genesis.coinbase,
         base_fee_per_gas,
+        transactions_root: ordered_trie_root_with_encoder(&records, |tx, buf| {
+            tx.encode_2718(buf)
+        }),
         ..Default::default()
     }
+}
+
+/// The calibri\* genesis pre-fund records (GENESIS.md): one legacy tx per non-zero
+/// alloc entry — `from = 0x0` with the zero signature (EIP-155 encoding, `v` derived
+/// from the chain id, `r = s = 0`), `nonce = index`, `to/value` = the alloc entry.
+/// Deterministic (the alloc is address-sorted) so every node derives the identical
+/// block 0 and genesis hash. Empty for legacy clique genesis (byte-perfect legacy).
+fn genesis_pre_fund_records(
+    genesis: &Genesis,
+    chain_id: u64,
+    is_calibri: bool,
+) -> Vec<TransactionSigned> {
+    if !is_calibri {
+        return Vec::new();
+    }
+    genesis
+        .alloc
+        .iter()
+        .filter(|(_, account)| !account.balance.is_zero())
+        .enumerate()
+        .map(|(idx, (address, account))| {
+            let inner = TxLegacy {
+                chain_id: Some(chain_id),
+                nonce: idx as u64,
+                gas_price: 0,
+                gas_limit: 0,
+                to: TxKind::Call(*address),
+                value: account.balance,
+                input: Bytes::new(),
+            };
+            // The zero signature: the record is a genesis listing, never a pool tx —
+            // reconstruction trusts the stored hash and signature bytes (the file-tier
+            // path never recovers senders).
+            inner.into_signed(Signature::new(U256::ZERO, U256::ZERO, false))
+        })
+        .map(TransactionSigned::from)
+        .collect()
 }
 
 /// Default chain spec for this fork (not Ethereum L1 mainnet).
@@ -269,6 +325,18 @@ impl<H: BlockHeader> ChainSpec<H> {
     /// Get the hash of the genesis block.
     pub fn genesis_hash(&self) -> B256 {
         self.genesis_header.hash()
+    }
+
+    /// The calibri\* genesis pre-fund records (GENESIS.md): the alloc entries as real
+    /// block-0 tx listings (`from = 0x0`, zero signature, never executed, never
+    /// metered — the alloc is the single source of truth for opening balances).
+    /// Empty for legacy clique genesis.
+    pub fn genesis_tx_records(&self) -> Vec<TransactionSigned> {
+        genesis_pre_fund_records(
+            &self.genesis,
+            self.chain_id(),
+            self.genesis.config.clique.is_none(),
+        )
     }
 
     /// Get the timestamp of the genesis block.

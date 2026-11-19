@@ -1,67 +1,113 @@
-//! Streaming file import: read the operator's original chain RLP file in place and push
-//! every block through the node's engine seam (`execution_data_from_block_rlp` →
-//! `new_payload`, full validation — the exact path network blocks take), one block
-//! at a time (IMPORT-EXPORT.md).
+//! RLP import — direct to storage, in ranges (`doc/IMPORT.md` §1, operator 2026-11-18).
 //!
-//! The file is READ ONLY: it is streamed from its original location, never copied and
-//! never rewritten. The import layer holds no consensus rules of its own — seal checks,
-//! fork rules and execution all live inside the engine; this layer only decodes RLP,
-//! keeps chain order (genesis/already-stored blocks are skipped, the first block must
-//! extend the local tip, each next block must extend the previous one) and stops at the
-//! first block the engine does not accept as [`PayloadStatusEnum::Valid`] — except
-//! `Syncing`, the Engine API's "cannot answer yet" status: the parent is known Valid
-//! (classify proved continuity), so the same payload is re-sent a bounded number of
-//! times before the import gives up. On ctrl-c/SIGTERM the loop stops at the next block
-//! boundary, so the last block is always fully processed before shutdown records
-//! `SHUTDOWN_CLEAN`. No fork detection: every block follows the same decode → submit
-//! path, whatever its era.
+//! The import does **not** go through the engine: no `newPayload` round-trip, no engine
+//! queue, no cache-lock waits, no tree insert. Measured reason: an empty block spent
+//! 13–15 ms of engine machinery around ~0 ms of work.
+//!
+//! Per [`IMPORT_RANGE`] blocks the run:
+//!
+//! 1. **reads** the next items from the file in place (read-only, [`READ_CAPACITY`]
+//!    read-ahead) and decodes them;
+//! 2. **positions** each one with [`classify`] — genesis and anything at or below the
+//!    committed tip is skipped (resume), the number must be `prev + 1` and the parent
+//!    hash must equal the previous block's, anything else stops the run;
+//! 3. **checks and executes** the range against the state of the last committed block:
+//!    exactly **two checks** (operator) — the chain position (step 2) and the
+//!    validator gate: the seal's signer must be a `status: true` validator of the RAM
+//!    registry (`validate_static_signer` against `enabled_set()`, the set
+//!    `get_val_chair` picks from); execution is
+//!    one EVM pass per block with the node's own config and the rtbc create-admission
+//!    inspector, over a single `State` anchored at the committed block so an earlier
+//!    block of the range is visible to its successors;
+//! 4. **writes** the range through the storage engine's block-write protocol —
+//!    file-tier append, DB state/index, **one commit** — with the range's trie updates
+//!    computed once from the disk trie at the anchor (only the range's changed paths
+//!    walk) and attached before the commit;
+//! 5. **reports** `done N blocks` for the finished range and one `import progress` line
+//!    per [`smartnet_tracing::REPORT_INTERVAL`] — always the committed tip
+//!    (`last_block_number()`), never an intent.
+//!
+//! The file is READ ONLY. On ctrl-c/SIGTERM the run stops at the next range boundary —
+//! everything so far is already committed — writes `SHUTDOWN_CLEAN` and returns, so a
+//! re-run resumes from the durable tip. No fork detection: every block follows the same
+//! decode → check → execute → commit path, whatever its era.
 
 use alloy_primitives::B256;
 use alloy_rlp::Decodable;
-use alloy_rpc_types_engine::PayloadStatusEnum;
-use smartnet_engine_primitives::ConsensusEngineHandle;
-use smartnet_engine_primitives::ethereum::execution_data_from_block_rlp;
-use smartnet_payload_primitives::PayloadTypes;
-use smartnet_storage_api::{BlockNumReader, HeaderProvider};
+use smartnet_chain_state::{ComputedTrieData, ExecutedBlock, DeferredTrieData};
+use smartnet_evm::{
+    execute::{BlockExecutionOutput, BlockExecutor},
+    rtbc_inspector::rtbc,
+    ConfigureEvm, Evm as _,
+};
+use smartnet_file_tier::SignatureAccess;
+use smartnet_primitives_traits::{NodePrimitives, RecoveredBlock, SealedBlock};
+use smartnet_provider::{
+    providers::{BlockchainProvider, ProviderNodeTypes},
+    ProviderFactory, StateProviderFactory, StorageEngine,
+};
+use smartnet_revm::{
+    database::StateProviderDatabase,
+    db::{states::bundle_state::BundleRetention, State},
+};
+use smartnet_storage_api::{BlockNumReader, HeaderProvider, StateProviderBox};
+use smartnet_trie_common::{updates::TrieUpdatesSorted, HashedPostState};
 use smartnet_timing::fmt_wall;
 use std::{
     io::{self, BufRead},
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tracing::{debug, info, warn};
 
-/// Read-ahead buffer for the chain file (the file is streamed, never mmap'd).
-const READ_CAPACITY: usize = 1024 * 1024;
+/// Read-ahead buffer for the chain file — **100 MB** (operator, 2026-11-18: was 1 MB).
+/// The file is streamed from its original location, never mmap'd, never copied.
+const READ_CAPACITY: usize = 100 * 1024 * 1024;
 
 /// Upper bound for a single block RLP item: a corrupt or hostile length prefix must not
 /// make the importer allocate an arbitrary amount (real blocks are far below this).
 const MAX_BLOCK_RLP_BYTES: usize = 64 * 1024 * 1024;
 
-/// Progress log cadence: one line per 10k scanned items.
-const PROGRESS_EVERY: u64 = 10_000;
+/// Blocks per range: decoded, checked and executed together, then written with **one**
+/// commit. The range is the durability unit, and `done N blocks` is its report — the
+/// number on that line is the range's last block, so the tip is always visible.
+/// 1000 (operator, 2026-11-19: "extend from 100 to `1_000`, it may be even faster").
+const IMPORT_RANGE: usize = 1000;
 
-/// How often a `Syncing` response is re-sent before the import stops. `Syncing` is not
-/// a verdict (the Engine API says: re-send later) — the chain checks above already
-/// proved the parent is the last accepted block, so a bounded retry cannot skip
-/// validation; it only rides out engine-side transient states (e.g. a persistence
-/// window between commits).
-const SYNCING_RETRIES: u32 = 5;
+/// A single range write above which it is logged as slow (diagnostics only — the report
+/// stays the two fields below).
+const SLOW_RANGE_WARN: Duration = Duration::from_secs(10);
 
-/// Delay between `Syncing` re-sends.
-const SYNCING_BACKOFF: Duration = Duration::from_millis(300);
+/// The state database one range executes against: the committed anchor, with the
+/// range's own earlier blocks visible through the accumulating `State`.
+type RangeState = State<StateProviderDatabase<StateProviderBox>>;
 
-/// Single-block engine latency above which the block is logged as slow (the aggregate
-/// per-progress-line numbers stay the primary signal).
-const SLOW_BLOCK_WARN: Duration = Duration::from_secs(5);
+/// Set while `run_import` is streaming: the heartbeat's status line yields to the
+/// import's own line, so a run shows exactly one line per interval.
+static IMPORTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether an import is streaming right now (read by the node heartbeat).
+pub fn import_active() -> bool {
+    IMPORTING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Clears [`IMPORTING`] on every exit path — success, error or early return.
+struct ImportingGuard;
+
+impl Drop for ImportingGuard {
+    fn drop(&mut self) {
+        IMPORTING.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// Where a decoded file block goes: skipped (already on the local chain / genesis),
-/// submitted to the engine, or a hard stop (wrong chain or out of order).
+/// taken into the range, or a hard stop (wrong chain or out of order).
 #[derive(Debug, PartialEq, Eq)]
 enum Flow {
     /// Already on the local chain (or the genesis block) — nothing to import.
     Skip(&'static str),
-    /// Next in line — submit it to the engine.
+    /// Next in line — import it.
     Proceed,
     /// The file does not continue the local chain — stop the whole import.
     Stop(String),
@@ -106,8 +152,8 @@ fn classify(number: u64, parent: B256, start: (u64, B256), accepted: Option<(u64
 /// stream.
 ///
 /// Returns `Ok(None)` only when the stream ends cleanly on an item boundary. An EOF in
-/// the middle of an item, a length prefix larger than [`MAX_BLOCK_RLP_BYTES`], or an
-/// unreadable stream is an error: a truncated chain must never import as complete.
+/// the middle of an item, a length prefix larger than [`MAX_BLOCK_RLP_BYTES`], or a
+/// truncated item is an error: a truncated chain must never import as complete.
 fn read_rlp_item<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
     let mut prefix = [0u8; 1];
     match reader.read_exact(&mut prefix) {
@@ -155,220 +201,390 @@ fn read_rlp_item<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(item))
 }
 
-/// Streams `file` (concatenated block RLP items) into the engine until EOF or the first
-/// block the engine does not accept. The file is opened read-only in place.
+/// Imports `file` into the stores, in [`IMPORT_RANGE`]-block ranges — `doc/IMPORT.md` §1.
 ///
-/// Resume: the local tip is read once at start; file blocks at or below it are skipped,
-/// so a re-run of the same command continues where the previous run stopped.
-pub async fn run_import<P, Pr>(
-    engine: &ConsensusEngineHandle<P>,
-    provider: &Pr,
+/// Returns `Ok(true)` when the file was imported to its end, `Ok(false)` when a stop
+/// signal ended the run at a range boundary (everything committed so far is on disk and
+/// `SHUTDOWN_CLEAN` is written either way). An error means nothing further was written:
+/// the last commit stands and the next run resumes from it.
+pub fn run_import<P, Evm>(
+    factory: &ProviderFactory<P>,
+    evm: &Evm,
+    file_tier_base: std::path::PathBuf,
+    changeset_window: u64,
     file: &Path,
-) -> eyre::Result<()>
+) -> eyre::Result<bool>
 where
-    P: PayloadTypes<ExecutionData = alloy_rpc_types_engine::ExecutionData>,
-    Pr: BlockNumReader + HeaderProvider,
+    P: ProviderNodeTypes,
+    // The Ethereum shapes this file decodes and writes: the RLP is a
+    // `smartnet_ethereum_primitives::Block`, its header/tx/receipt types are the ones
+    // the node's EVM and the storage write protocol are built around.
+    P::Primitives: NodePrimitives<
+        Block = smartnet_ethereum_primitives::Block,
+        BlockHeader = smartnet_primitives_traits::Header,
+        SignedTx = smartnet_ethereum_primitives::TransactionSigned,
+    >,
+    <P::Primitives as NodePrimitives>::SignedTx: SignatureAccess,
+    Evm: ConfigureEvm<Primitives = P::Primitives>,
 {
-    // Registered drainable: on ctrl-c/SIGTERM the runner flips the exit flag and waits
-    // (bounded) for this future instead of dropping it mid-block, so the last block is
-    // fully processed before the clean-shutdown marker is written.
-    let _drain_guard = smartnet_tasks::drain::register();
+    let _drain = smartnet_tasks::drain::register();
+    let _importing = ImportingGuard;
+    IMPORTING.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // The authority for check 2 is the RAM registry, loaded once here: an import run
+    // never boots the validator, so nothing else would load it. Fail closed — without a
+    // readable `validators.jsonl` holding a `status: true` validator no block can be
+    // accepted, and the file's signer list is legacy (never consulted).
+    let registry_path = smartnet_validator::validators::default_validators_file();
+    smartnet_validator::validators::load_validators(&registry_path).map_err(|err| {
+        eyre::eyre!(
+            "validators.jsonl unreadable ({}) : {err} — no block can be accepted (fail closed)",
+            registry_path.display()
+        )
+    })?;
+    let enabled = smartnet_validator::validators::enabled_set();
+    if enabled.is_empty() {
+        return Err(eyre::eyre!(
+            "validators.jsonl holds no `status: true` validator — no block can be accepted \
+             (fail closed); the genesis signer list is legacy and is not used"
+        ));
+    }
 
     let started = Instant::now();
-    let best = provider.best_block_number()?;
-    let start_hash = provider
-        .sealed_header(best)?
-        .ok_or_else(|| {
-            eyre::eyre!(
-                "local tip header at block {best} is missing — the database was not \
-                 initialised; run `smartnet init <genesis>` first"
-            )
-        })?
-        .hash();
-    info!(
-        target: "smartnet::import",
-        file = %file.display(),
-        local_tip = best,
-        %start_hash,
-        "import starting (file read in place, read-only)"
-    );
-
     let handle = std::fs::File::open(file)
         .map_err(|err| eyre::eyre!("cannot open chain file `{}`: {err}", file.display()))?;
     let mut reader = io::BufReader::with_capacity(READ_CAPACITY, handle);
 
+    // The durable anchor: the last block that is actually on disk. Everything reported
+    // by this run is measured from it, and a re-run resumes from it.
+    let (mut anchor_number, mut anchor_hash) = {
+        let provider = factory.provider()?;
+        let number = provider.last_block_number()?;
+        let header = provider.sealed_header(number)?.ok_or_else(|| {
+            eyre::eyre!(
+                "local tip header at block {number} is missing — the database was not \
+                 initialised; run `smartnet init <genesis>` first"
+            )
+        })?;
+        (number, header.hash())
+    };
+    info!(
+        target: "smartnet::import",
+        file = %file.display(),
+        local_tip = anchor_number,
+        %anchor_hash,
+        "import starting (file read in place, read-only)"
+    );
+
+    let base = file_tier_base.clone();
+    let mut engine = StorageEngine::new(factory.clone(), Some(file_tier_base), changeset_window);
+
     let mut offset: u64 = 0;
     let mut scanned: u64 = 0;
-    let mut imported: u64 = 0;
     let mut skipped: u64 = 0;
+    let mut committed: u64 = 0;
     let mut accepted: Option<(u64, B256)> = None;
-
-    // Per-window timing aggregates (reset at every progress line): wall time between
-    // accepted blocks vs the engine's own latency/queue/persistence waits, so a stall
-    // (fsync, queue, execution) is attributed instead of guessed.
     let mut stopped_by_signal = false;
-    let mut syncing_retries: u64 = 0;
-    let mut window = Instant::now();
-    let mut w_accepted: u64 = 0;
-    let mut w_engine_us: u64 = 0;
-    let mut w_queue_us: u64 = 0;
-    let mut w_persist_us: u64 = 0;
-    let mut w_max_engine_us: u64 = 0;
+
+    // Progress bookkeeping: one line per REPORT_INTERVAL, over the blocks this window
+    // actually put on disk.
+    let mut line_at = Instant::now();
+    let mut line_base: u64 = 0;
+
+    let mut pending: Vec<smartnet_ethereum_primitives::Block> = Vec::with_capacity(IMPORT_RANGE);
 
     loop {
-        // Stop signal: only at block boundaries — never abandon an engine call in
-        // flight, so the last submitted block is always recorded (or reported) first.
         if smartnet_tasks::drain::exit_requested() {
             stopped_by_signal = true;
             break;
         }
-        let Some(item) = read_rlp_item(&mut reader)? else {
-            break;
-        };
-        let item_start = offset;
-        offset += item.len() as u64;
-        scanned += 1;
 
-        let mut bytes = item.as_ref();
-        let block: smartnet_ethereum_primitives::Block =
-            Decodable::decode(&mut bytes).map_err(|err| {
-                eyre::eyre!("item {scanned} (offset {item_start}): block RLP decode failed: {err}")
-            })?;
-        if !bytes.is_empty() {
-            return Err(eyre::eyre!(
-                "item {scanned} (offset {item_start}): {} trailing bytes after the block RLP",
-                bytes.len()
-            ));
-        }
-
-        let number = block.header.number;
-        let parent = block.header.parent_hash;
-        let hash = block.header.hash_slow();
-        match classify(number, parent, (best, start_hash), accepted) {
-            Flow::Skip(reason) => {
-                skipped += 1;
-                if skipped == 1 {
-                    info!(
-                        target: "smartnet::import",
-                        number, reason, "skipping file blocks already on the local chain"
-                    );
-                } else {
-                    debug!(target: "smartnet::import", number, reason, offset = item_start, "skipped");
-                }
-                continue;
+        // Fill one range. Skipped items (genesis, resume) do not count towards it —
+        // they are not imported, so there is nothing to commit for them.
+        while pending.len() < IMPORT_RANGE {
+            if smartnet_tasks::drain::exit_requested() {
+                stopped_by_signal = true;
+                break;
             }
-            Flow::Stop(reason) => {
+            let Some(item) = read_rlp_item(&mut reader)? else {
+                break; // clean EOF on an item boundary
+            };
+            let item_start = offset;
+            offset += item.len() as u64;
+            scanned += 1;
+
+            let mut bytes = item.as_ref();
+            let block: smartnet_ethereum_primitives::Block =
+                Decodable::decode(&mut bytes).map_err(|err| {
+                    eyre::eyre!("item {scanned} (offset {item_start}): block RLP decode failed: {err}")
+                })?;
+            if !bytes.is_empty() {
                 return Err(eyre::eyre!(
-                    "import stopped at item {scanned} (offset {item_start}, block {number}): {reason}"
+                    "item {scanned} (offset {item_start}): {} trailing bytes after the block RLP",
+                    bytes.len()
                 ));
             }
-            Flow::Proceed => {}
+
+            let number = block.header.number;
+            let parent = block.header.parent_hash;
+            let hash = block.header.hash_slow();
+            match classify(number, parent, (anchor_number, anchor_hash), accepted) {
+                Flow::Skip(reason) => {
+                    skipped += 1;
+                    if skipped == 1 {
+                        info!(
+                            target: "smartnet::import",
+                            number, reason, "skipping file blocks already on the local chain"
+                        );
+                    } else {
+                        debug!(target: "smartnet::import", number, reason, offset = item_start, "skipped");
+                    }
+                    continue;
+                }
+                Flow::Stop(reason) => {
+                    return Err(eyre::eyre!(
+                        "import stopped at item {scanned} (offset {item_start}, block {number}): {reason}"
+                    ));
+                }
+                Flow::Proceed => {}
+            }
+            // The file's logical chain tip: the next item must extend this one, whether
+            // or not this range has been written yet (an error below ends the run, so
+            // the two can never disagree in the output).
+            accepted = Some((number, hash));
+            pending.push(block);
         }
 
-        // One engine call = the full validated import path: seal check + execution +
-        // canonical insert, exactly as for a block arriving from the network.
-        // `Syncing` is re-sent (bounded); every other answer is taken at face value.
-        let payload = execution_data_from_block_rlp(block);
-        let mut attempt = 0u32;
-        let (status, timings) = loop {
-            match engine.new_payload(payload.clone(), true, true).await {
-                Ok((status, _timings))
-                    if status.status == PayloadStatusEnum::Syncing &&
-                        attempt < SYNCING_RETRIES =>
-                {
-                    attempt += 1;
-                    syncing_retries += 1;
-                    warn!(
-                        target: "smartnet::import",
-                        number, attempt, retries = SYNCING_RETRIES,
-                        "engine returned Syncing (not a verdict) — re-sending after backoff"
-                    );
-                    tokio::time::sleep(SYNCING_BACKOFF).await;
-                }
-                Ok(pair) => break pair,
-                Err(err) => {
-                    return Err(eyre::eyre!("block {number}: engine newPayload failed: {err}"))
-                }
-            }
-        };
-        // Exactly the sync sink's contract (`EngineBlockSink::import_blocks`): the
-        // engine confirms VALID or the run stops — no skipping validation, no mayonnaise.
-        match status.status {
-            PayloadStatusEnum::Valid => {}
-            other => {
-                return Err(eyre::eyre!(
-                    "import stopped at block {number} (parent {parent}, item {scanned}, offset \
-                    {item_start}): rejected by engine: {other:?} — {}",
-                    other.validation_error().unwrap_or_default()
+        if pending.is_empty() {
+            break; // EOF — nothing left to execute
+        }
+
+        // Checks + execution for the whole range, against the committed anchor. The
+        // provider is built per range: it caches the chain tip, and this run moves it.
+        let state = BlockchainProvider::new(factory.clone())?;
+        let (blocks, hashed_state) =
+            execute_range(&state, evm, anchor_hash, std::mem::take(&mut pending))?;
+        let range_len = blocks.len() as u64;
+        // The fill loop classified exactly these blocks in order, so the chain tip it
+        // tracked IS this range's last block.
+        let (last_number, last_hash) = accepted.expect("a range is never empty here");
+
+        // The range's trie updates, computed ONCE from the disk trie at the anchor over
+        // the range's net hashed state — only the changed paths walk — and attached to
+        // the last block, which is where the write merges them from.
+        let range_root;
+        let mut blocks = blocks;
+        {
+            // The anchor state (the DB tip before this range) — nothing has been
+            // committed yet, so the provider built for execution is still exact.
+            let (root, updates) = state.state_by_block_hash(anchor_hash)?
+                .state_root_with_updates(hashed_state)?;
+            range_root = root;
+            if let Some(last) = blocks.last_mut() {
+                last.trie_data = DeferredTrieData::ready(ComputedTrieData::without_trie_input(
+                    last.trie_data().hashed_state,
+                    Arc::new(updates.into_sorted()),
                 ));
             }
         }
 
-        accepted = Some((number, hash));
-        imported += 1;
-        w_accepted += 1;
-        let engine_us = timings.latency.as_micros() as u64;
-        w_engine_us += engine_us;
-        w_queue_us += timings.queue_wait.as_micros() as u64;
-        w_persist_us += timings.persistence_wait.as_micros() as u64;
-        w_max_engine_us = w_max_engine_us.max(engine_us);
-        if timings.latency > SLOW_BLOCK_WARN {
+        // The write: file-tier append → DB state/index → ONE commit. The commit is the
+        // range's only durability point, so nothing is reported before this returns.
+        let save_start = Instant::now();
+        engine.save_blocks(blocks, None, None)?;
+        // Seals only ever complete after their commit (this call joins what the append
+        // spawned), so a compressed shard can never hold blocks the DB does not have.
+        engine.join_seal_tasks();
+        let save_wall = save_start.elapsed();
+        if save_wall > SLOW_RANGE_WARN {
             warn!(
                 target: "smartnet::import",
-                number,
-                engine_ms = timings.latency.as_millis() as u64,
-                queue_ms = timings.queue_wait.as_millis() as u64,
-                persist_wait_ms = timings.persistence_wait.as_millis() as u64,
-                "slow block"
+                blocks = range_len,
+                block = last_number,
+                save_ms = save_wall.as_millis() as u64,
+                "slow range save"
             );
         }
-        if imported == 1 {
+        debug!(
+            target: "smartnet::import",
+            blocks = range_len,
+            block = last_number,
+            %range_root,
+            save_ms = save_wall.as_millis() as u64,
+            "range committed"
+        );
+
+        committed += range_len;
+        anchor_number = last_number;
+        anchor_hash = last_hash;
+
+        // DONE: one line per finished range — the count AND the block it reached
+        // (operator: "add blocknr it imports instead of double 100").
+        info!(
+            target: "smartnet::import",
+            block = last_number,
+            "done {range_len} blocks"
+        );
+
+        // One progress line per REPORT_INTERVAL: the committed tip + this window's
+        // import speed. Nothing else — a wall of counters says nothing while running.
+        if line_at.elapsed() >= smartnet_tracing::REPORT_INTERVAL {
+            let secs = line_at.elapsed().as_secs_f64();
+            let saved = committed - line_base;
+            let blocks_s = if secs > 0.0 { saved as f64 / secs } else { 0.0 };
+            let tip = factory.provider()?.last_block_number()?;
             info!(
                 target: "smartnet::import",
-                number, %hash, "first file block accepted — streaming"
-            );
-        }
-        if scanned.is_multiple_of(PROGRESS_EVERY) {
-            let secs = window.elapsed().as_secs_f64();
-            let blocks_s = if secs > 0.0 { w_accepted as f64 / secs } else { 0.0 };
-            let avg = |us: u64| if w_accepted > 0 { us as f64 / 1_000.0 / w_accepted as f64 } else { 0.0 };
-            info!(
-                target: "smartnet::import",
-                scanned, imported, skipped, block = number,
+                block = tip,
                 blocks_s = format!("{blocks_s:.1}"),
-                engine_ms = format!("{:.1}", avg(w_engine_us)),
-                queue_ms = format!("{:.1}", avg(w_queue_us)),
-                persist_ms = format!("{:.1}", avg(w_persist_us)),
-                max_engine_ms = w_max_engine_us / 1_000,
-                syncing_retries,
                 "import progress"
             );
-            window = Instant::now();
-            w_accepted = 0;
-            w_engine_us = 0;
-            w_queue_us = 0;
-            w_persist_us = 0;
-            w_max_engine_us = 0;
+            line_at = Instant::now();
+            line_base = committed;
         }
     }
 
-    let tip = accepted.map(|(n, _)| n).unwrap_or(best);
+    // Flush the seals spawned along the way, then record the clean stop: both exit paths
+    // (finished and signal) leave every committed range durable in DB *and* FS, so the
+    // boot that follows takes the clean path and nothing is trimmed.
+    engine.join_seal_tasks();
+    engine.shutdown_clean(&base)?;
+
+    let tip = factory.provider()?.last_block_number()?;
     if stopped_by_signal {
         info!(
             target: "smartnet::import",
-            scanned, imported, skipped, tip, syncing_retries,
+            block = tip,
             import_wall = %fmt_wall(started.elapsed()),
-            "import stopped by signal — the last block was fully processed"
+            "import stopped by signal — the committed ranges are on disk"
         );
     } else {
         info!(
             target: "smartnet::import",
-            scanned, imported, skipped, tip, syncing_retries,
+            block = tip,
+            scanned, skipped,
             import_wall = %fmt_wall(started.elapsed()),
             "import finished"
         );
     }
-    Ok(())
+    Ok(!stopped_by_signal)
+}
+
+/// Checks and executes one range against the state of `anchor_hash`, returning the
+/// blocks ready to write and the range's net hashed state.
+///
+/// One `State` is built for the whole range, so block N+1 reads block N's changes; each
+/// block's bundle is taken after it executes, which is what the write needs per block
+/// (receipts for the file tier, changesets for the DB).
+fn execute_range<P, Evm>(
+    state: &BlockchainProvider<P>,
+    evm: &Evm,
+    anchor_hash: B256,
+    blocks: Vec<smartnet_ethereum_primitives::Block>,
+) -> eyre::Result<(Vec<ExecutedBlock<P::Primitives>>, HashedPostState)>
+where
+    P: ProviderNodeTypes,
+    P::Primitives: NodePrimitives<
+        Block = smartnet_ethereum_primitives::Block,
+        BlockHeader = smartnet_primitives_traits::Header,
+        SignedTx = smartnet_ethereum_primitives::TransactionSigned,
+    >,
+    Evm: ConfigureEvm<Primitives = P::Primitives>,
+{
+    let anchor_provider = state.state_by_block_hash(anchor_hash)?;
+    let mut db: RangeState = State::builder()
+        .with_database(StateProviderDatabase::new(anchor_provider))
+        .with_bundle_update()
+        .build();
+
+    let mut executed: Vec<ExecutedBlock<P::Primitives>> = Vec::with_capacity(blocks.len());
+    let mut net_state = HashedPostState::default();
+    // Contracts whose token metadata was already probed this range (the sidecar is
+    // keyed by deployed address and write-once, so one probe per address is enough).
+    let mut probed = std::collections::HashSet::new();
+
+    for block in blocks {
+        let number = block.header.number;
+        let sealed = SealedBlock::seal_slow(block);
+        let recovered = RecoveredBlock::try_recover_sealed(sealed.clone())
+            .map_err(|err| eyre::eyre!("block {number}: sender recovery failed: {err}"))?;
+
+        // Check 2 — THE validator gate, through the ONE entrance both ingest paths use
+        // (operator: "make sure all import and mesh sync both go through this same single
+        // entrance"): `check_seal` — the seal's signer must be the SELECT chair for this
+        // slot, and `get_val_chair` only ever answers with a `status: true` validator of
+        // `validators.jsonl`. Check 1 (previous block hash + number) already happened in
+        // `classify`; nothing else gates acceptance — no fee rule, no genesis branch, no
+        // body check.
+        calibri_lite_consensus::check_seal(sealed.header())
+            .map_err(|err| eyre::eyre!("block {number}: validator check failed: {err}"))?;
+
+        // One EVM pass: the node's own config, the rtbc create-admission inspector —
+        // the same execution a live block gets, with no engine in between. This is
+        // `execute_block`'s exact body, except the EVM is kept at the end so the rtbc
+        // inspector's create log (creator → created contract) can be read out — the
+        // creator is not derivable from state.
+        let (result, creations) = {
+            let evm_env = evm
+                .evm_env(sealed.header())
+                .map_err(|err| eyre::eyre!("block {number}: evm env failed: {err}"))?;
+            let inspected = evm.evm_with_env_and_inspector(&mut db, evm_env, rtbc());
+            let ctx = evm
+                .context_for_block(&sealed)
+                .map_err(|err| eyre::eyre!("block {number}: execution ctx failed: {err}"))?;
+            let mut executor = evm.create_executor(inspected, ctx);
+            executor
+                .apply_pre_execution_changes()
+                .map_err(|err| eyre::eyre!("block {number}: pre-execution failed: {err}"))?;
+            for tx in recovered.transactions_recovered() {
+                executor
+                    .execute_transaction(tx)
+                    .map_err(|err| eyre::eyre!("block {number}: execution failed: {err}"))?;
+            }
+            let (mut done, result) = executor
+                .finish()
+                .map_err(|err| eyre::eyre!("block {number}: execution finish failed: {err}"))?;
+            let creations = done.components_mut().1.take_creations();
+            (result, creations)
+            // the executor and the inspected EVM drop here, releasing `&mut db`
+        };
+        db.merge_transitions(BundleRetention::Reverts);
+        let bundle = db.take_bundle();
+
+        // Contract metadata — through the ONE entrance both ingest paths use
+        // (`capture_block_meta`, operator: "make sure all import and mesh sync both go
+        // through this same single entrance"); the records ride the block to the commit.
+        // Probe state is discarded — this cannot change what the block commits.
+        let probe_env = evm
+            .evm_env(sealed.header())
+            .map_err(|err| eyre::eyre!("block {number}: evm env failed: {err}"))?;
+        let token_meta = smartnet_evm::token_meta::capture_block_meta(
+            evm,
+            &mut db,
+            &probe_env,
+            &bundle,
+            creations,
+            |address| probed.insert(address),
+        );
+
+        let hashed_state = db.database.0.hashed_post_state(&bundle);
+        net_state.extend_ref(&hashed_state);
+
+        let trie_data = ComputedTrieData::without_trie_input(
+            Arc::new(hashed_state.into_sorted()),
+            Arc::new(TrieUpdatesSorted::default()),
+        );
+        executed.push(
+            ExecutedBlock::new(
+                Arc::new(recovered),
+                Arc::new(BlockExecutionOutput { result, state: bundle }),
+                trie_data,
+            )
+            .with_token_meta(token_meta),
+        );
+    }
+
+    Ok((executed, net_state))
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use alloy_signer_local::PrivateKeySigner;
 use eyre::{Context, Result};
 use k256::ecdsa::SigningKey;
 use rand_08::rngs::OsRng;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{outcome::ValidatorStatus, run_once::signer_address};
 
@@ -107,15 +107,18 @@ pub(crate) fn init_keystore_at(
     password: &str,
 ) -> Result<Address> {
     if key_file.trim().is_empty() {
-        eyre::bail!("KEY_FILE must not be empty when writing keystore");
+        eyre::bail!("keystore filename must not be empty when writing");
     }
     if key_file.contains('/') || key_file.contains('\\') {
-        eyre::bail!("KEY_FILE must be a filename only, not a path: {key_file}");
+        eyre::bail!("keystore name must be a bare filename, not a path: {key_file}");
     }
 
     std::fs::create_dir_all(key_dir)
         .with_context(|| format!("create KEY_PATH directory {}", key_dir.display()))?;
 
+    // The WRITER names its own file — `key_file` here is this function's parameter, not
+    // a config key. Reading is the other half of user-in #2: every *reader* GATHERS the
+    // single file in `key_dir` instead of naming one.
     let keystore_path = key_dir.join(key_file);
     if keystore_path.exists() {
         eyre::bail!(
@@ -159,16 +162,7 @@ pub(crate) fn init_keystore_at(
 /// Returns `eyre::Result` (not the validator-internal `ValidatorStatus`) so this can be
 /// called from outside the validator crate. The decrypted key is memory-only and never
 /// re-persisted.
-pub fn load_identity_from_config(
-    key_dir: &Path,
-    key_file: &str,
-    password_file: &Path,
-) -> Result<SigningKey> {
-    if key_file.trim().is_empty() {
-        eyre::bail!(
-            "KEY_FILE is empty (keystore not created); run `smartnet-validator keystore` first"
-        );
-    }
+pub fn load_identity_from_config(key_dir: &Path, password_file: &Path) -> Result<SigningKey> {
     let password_bytes = std::fs::read(password_file).with_context(|| {
         format!(
             "read PASSWORD_FILE {} failed — headless bootstrap requires a password file, no interactive prompt",
@@ -183,11 +177,48 @@ pub fn load_identity_from_config(
             password_file.display()
         );
     }
-    let keystore_path = key_dir.join(key_file);
+    // Gathered, never named (user-in #2).
+    let keystore_path = get_encrypted_key(key_dir)?;
     load_secret_from_keystore(&keystore_path, &password).map_err(|status| match status {
         ValidatorStatus::Failed { message } => eyre::eyre!(message),
         other => eyre::eyre!("keystore load failed: {other:?}"),
     })
+}
+
+/// Gather the ONE encrypted keystore inside `key_dir` — **any filename**.
+///
+/// Nothing in `SmartNet` points at a literal key filename (operator, `user-in.md` #2): the
+/// key is always *gathered* from the path the operator chose, so `smartnet keystore` may
+/// write whatever name it likes. Exactly one file is required — **error exit** on anything
+/// else: zero files means the keystore was never created, and more than one is ambiguous
+/// (a stray plaintext key or a second keystore), so a boot can never pick by convention,
+/// by order, or by luck.
+pub fn get_encrypted_key(key_dir: &Path) -> Result<PathBuf> {
+    let entries = std::fs::read_dir(key_dir).with_context(|| {
+        format!("KEY_PATH {} cannot be read — run `smartnet keystore` first", key_dir.display())
+    })?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("read entry in {}", key_dir.display()))?;
+        if entry.path().is_file() {
+            files.push(entry.path());
+        }
+    }
+    if files.len() == 1 {
+        return Ok(files.pop().expect("exactly one file"));
+    }
+    if files.is_empty() {
+        return Err(eyre::eyre!(
+            "no keystore in {} — run `smartnet keystore` first",
+            key_dir.display()
+        ));
+    }
+    Err(eyre::eyre!(
+        "{} files in {} — expected exactly 1 keystore: remove the others (the key is \
+         gathered, never named)",
+        files.len(),
+        key_dir.display()
+    ))
 }
 
 pub(crate) fn load_secret_from_keystore(
@@ -197,7 +228,7 @@ pub(crate) fn load_secret_from_keystore(
     if !keystore_path.is_file() {
         return Err(ValidatorStatus::Failed {
             message: format!(
-                "keystore {} is missing — run `smartnet-validator keystore` first",
+                "keystore {} is missing — run `smartnet keystore` first",
                 keystore_path.display()
             ),
         });
@@ -288,7 +319,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `KEY_FILE` must be a bare filename — empty or any path separator is refused.
+    /// The keystore name must be a bare filename — empty or any path separator is refused.
     #[test]
     fn init_keystore_rejects_empty_and_path_key_file() {
         let dir = temp_dir("reject-name");
@@ -359,23 +390,28 @@ mod tests {
         );
     }
 
-    /// Headless loader: password file only (no prompt), fatal on missing file, empty
-    /// password, empty `KEY_FILE`, or missing keystore. Decrypt round-trips to the right address.
+    /// Headless loader: password file only (no prompt), fatal on a missing/empty
+    /// password, on a `KEY_PATH` that does not hold **exactly one** file, or on a
+    /// missing keystore. The key is GATHERED — the loader never takes a filename.
     #[test]
-    fn load_identity_from_config_is_headless_and_fatal() {
+    fn load_identity_from_config_is_headless_and_gathers_the_key() {
         let dir = temp_dir("identity");
-        let key = test_key();
-        let key_file = "key.json";
-        init_keystore_at(&dir, key_file, &key, "pw").expect("init keystore");
+        // The keystore lives in its own directory: the gather rule is "exactly one file
+        // in KEY_PATH", so the password files stay OUTSIDE it.
+        let key_dir = dir.join("keys");
+        std::fs::create_dir(&key_dir).expect("key dir");
+        // ANY filename is accepted — nothing points at a literal one.
+        init_keystore_at(&key_dir, "operator-chose-this-name.json", &test_key(), "pw")
+            .expect("init keystore");
 
         // Happy path: password file present and non-empty → same address, no prompt.
         let pw = dir.join("pw.txt");
         std::fs::write(&pw, "pw\n").expect("write pw");
-        let loaded = load_identity_from_config(&dir, key_file, &pw).expect("load");
+        let loaded = load_identity_from_config(&key_dir, &pw).expect("load");
         assert_eq!(format!("{:#x}", signer_address(&loaded)), KEY_ADDRESS);
 
         // Missing password file → fatal, mentions "no interactive prompt".
-        let err = load_identity_from_config(&dir, key_file, &dir.join("nope.txt"))
+        let err = load_identity_from_config(&key_dir, &dir.join("nope.txt"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("no interactive prompt"), "got: {err}");
@@ -383,20 +419,20 @@ mod tests {
         // Empty password file → fatal (never boot with a blank password).
         let empty = dir.join("empty.txt");
         std::fs::write(&empty, "").expect("write empty");
-        let err = load_identity_from_config(&dir, key_file, &empty)
-            .unwrap_err()
-            .to_string();
+        let err = load_identity_from_config(&key_dir, &empty).unwrap_err().to_string();
         assert!(err.contains("blank"), "got: {err}");
 
-        // Empty KEY_FILE → fatal (keystore not created).
-        let err = load_identity_from_config(&dir, "", &pw).unwrap_err().to_string();
-        assert!(err.contains("KEY_FILE is empty"), "got: {err}");
+        // Zero files → error exit, named (the keystore was never created).
+        let none = dir.join("none");
+        std::fs::create_dir(&none).expect("empty dir");
+        let err = load_identity_from_config(&none, &pw).unwrap_err().to_string();
+        assert!(err.contains("no keystore"), "got: {err}");
 
-        // Missing keystore with a valid password file → fatal.
-        let err = load_identity_from_config(&dir, "nope.json", &pw)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("missing"), "got: {err}");
+        // More than one file → error exit: ambiguous, never guessed by order or luck.
+        std::fs::write(key_dir.join("stray.txt"), "x").expect("stray");
+        let err = load_identity_from_config(&key_dir, &pw).unwrap_err().to_string();
+        assert!(err.contains("expected exactly 1"), "got: {err}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

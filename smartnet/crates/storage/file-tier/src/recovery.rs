@@ -101,6 +101,30 @@ pub fn remove_last_lines(base: impl AsRef<Path>) -> FileTierResult<u64> {
     Ok(bx)
 }
 
+/// Trims every ACTIVE file back to `bx` — the tip the committed DB actually holds.
+///
+/// A range save appends its lines first and commits once at the end, so after a crash
+/// the file can lead the committed DB by up to one range. Recovery must never take the
+/// file's word for a block the DB never committed (the drop-2 anchor assumes one block
+/// per save): the caller anchors on `min(file tip, DB tip)` and calls this to pull the
+/// active files back to that anchor, so a re-sync can never start past a hole.
+///
+/// Sealed `.gz` shards are never touched — they only exist for blocks whose commit has
+/// already landed (a save joins its seals after committing), which is what makes this
+/// trim exact.
+pub fn align_active_to_block(base: impl AsRef<Path>, bx: u64) -> FileTierResult<()> {
+    let base = base.as_ref();
+    let (Some(shard), _) = scan_shards(base) else {
+        // Nothing active: everything is sealed (or the tier is empty) — there is no
+        // uncommitted line to remove.
+        return Ok(());
+    };
+    for name in FILE_NAMES {
+        rm_above_block(&active_file_path(base, shard, name), bx)?;
+    }
+    Ok(())
+}
+
 /// Reconciles a half-finished seal across all sub-shards (A3). Only two persistent states
 /// exist per file — `{name}.jsonl` (source) and `{name}.gz` (sealed) — plus the transient
 /// `{name}.gz.tmp`. Per file:

@@ -12,20 +12,6 @@
 - Not Ethereum.
 - SmartNet will fail on real Ethereum testnet/mainnet, we not support p2p/kad, forks, we use fixed fees for coins, etc,
 - We do not follow any Ethereum path, legacy, or convention. We are 100% separated.
-- We bind only to the 2 Ethereum wallets we choose to support, and to the basic DeFi rules we choose to support.
-- We compile with solc. That does not make us Ethereum.
-
-# MUST KEEP AS IS — NEVER TOUCH
-
-- EVM functionality
-- Smart-contract core
-- ERC-20 token EVM behavior
-- ERC-20 token fees
-- DeFi V2 compatibility
-- **Never**: touch `eth_*` RPC names , tx types 0x0/0x2, MetaMask behavior.
-- Fixed fees for native ETH like coin transfers and validator queue for natives
-- Keep as is ERC-20 market economy, validator EVM normal way.
-- keep all calibri-lite as is unless explicit permission is given to work with consensus protocol.
 
 # WHAT IS REMOVED BY DESIGN AND MUST NEVER BE RESTORED OR ASSUMED AS AN ISSUE:
 
@@ -38,7 +24,19 @@
 - there's more
 - All Cities like Istanbul, London, etc.. is gone, now it's all Mars! Support is mixed.
 
-# DO NOT
+# 1 - MUST KEEP AS IS — NEVER TOUCH !!!
+
+- EVM and executor functionality !
+- Smart-contract core !
+- ERC-20 token EVM behavior !
+- ERC-20 token fees !
+- DeFi V2 compatibility !
+- **Never**: touch `eth_*` RPC names , tx types 0x0/0x2, MetaMask behavior.
+- Fixed fees for native ETH like coin transfers and validator queue for natives
+- Keep as is ERC-20 market economy, validator EVM normal way.
+- keep all calibri-lite as is unless explicit permission is given to work with consensus protocol.
+
+# 2 - DO NOT
 
 - do not over-engineer
 - do not fix what is not broken

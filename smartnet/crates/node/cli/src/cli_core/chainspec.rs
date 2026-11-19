@@ -56,8 +56,31 @@ impl<C: ChainSpecParser> TypedValueParser for RawKeepingParser<C> {
             let msg = format!("Invalid value '{val}' for {arg}: {err}.");
             clap::Error::raw(clap::error::ErrorKind::InvalidValue, msg)
         })?;
-        // Inline JSON → the typed bytes themselves; a file path → the file's bytes.
-        let raw = fs::read(PathBuf::from(val)).unwrap_or_else(|_| val.as_bytes().to_vec());
+        // The DB row carries the NORMALIZED genesis (calibri* defaults replaced in
+        // the DB at init — GENESIS.md); a clique file is stored byte-for-byte.
+        let raw = fs::read_to_string(PathBuf::from(val))
+            .unwrap_or_else(|_| val.to_string());
+        let mut value: serde_json::Value = serde_json::from_str(&raw).map_err(|err| {
+            let arg = arg.map(|a| a.to_string()).unwrap_or_else(|| "...".to_owned());
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidValue,
+                format!("Invalid value '{val}' for {arg}: {err}."),
+            )
+        })?;
+        smartnet_chainspec::normalize_calibri_genesis_raw(&mut value).map_err(|err| {
+            let arg = arg.map(|a| a.to_string()).unwrap_or_else(|| "...".to_owned());
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidValue,
+                format!("Invalid value '{val}' for {arg}: {err}."),
+            )
+        })?;
+        let raw = serde_json::to_vec(&value).map_err(|err| {
+            let arg = arg.map(|a| a.to_string()).unwrap_or_else(|| "...".to_owned());
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidValue,
+                format!("Invalid value '{val}' for {arg}: {err}."),
+            )
+        })?;
         Ok(Arc::new(GenesisWithRaw { spec, raw }))
     }
 }
@@ -105,12 +128,16 @@ pub trait ChainSpecParser: Clone + Send + Sync + 'static {
 /// Inline JSON is detected immediately (no filesystem probe); otherwise `s` is treated as a path to
 /// a genesis JSON file. This makes the embedded canonical genesis resolve instantly at startup.
 pub fn parse_genesis(s: &str) -> eyre::Result<alloy_genesis::Genesis> {
-    if s.trim_start().starts_with('{') {
-        let genesis: alloy_genesis::Genesis = serde_json::from_str(s)?;
-        return Ok(genesis);
-    }
-
-    let raw = fs::read_to_string(PathBuf::from(s))?;
-    let genesis: alloy_genesis::Genesis = serde_json::from_str(&raw)?;
+    let raw = if s.trim_start().starts_with('{') {
+        s.to_string()
+    } else {
+        fs::read_to_string(PathBuf::from(s))?
+    };
+    // Calibri* defaults (GENESIS.md): absent keys are filled here — the same
+    // normalization the DB row gets at init, so every parse path agrees.
+    let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+    smartnet_chainspec::normalize_calibri_genesis_raw(&mut value)
+        .map_err(|err| eyre::eyre!("invalid genesis: {err}"))?;
+    let genesis: alloy_genesis::Genesis = serde_json::from_value(value)?;
     Ok(genesis)
 }

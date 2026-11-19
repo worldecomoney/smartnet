@@ -2,7 +2,8 @@
 
 > **STATUS: CURRENT — reference documentation (implemented, active)**
 > The RTBC gate is live in the node: policy, inspector, and wiring shipped2026-11-03;
-> all gates green (clippy 0/0, workspace tests, CI-equivalent full suite).
+> gates green for clippy (0 warnings) and workspace tests — repo-wide `cargo fmt` is
+> **not** green (pending a separate fmt pass; not part of this document).
 > This is the design + implementation reference. The original todo-format plan this
 > document replaces is retired.
 
@@ -14,6 +15,8 @@ the deliberately narrow policy, it is refused. No warnings, no review queue, no 
 to prove malicious intent, no classification of contract purpose.
 
 Binding principles:
+
+a revm Inspector hooked into the create / create_end frame events, sitting outside the EVM core.
 
 - **Check-refuse, not EVM policy.** The EVM executes normally; our layer only checks and
   refuses. Zero modifications to revm or any EVM core; no custom opcode semantics; no
@@ -200,7 +203,7 @@ pins `pragma =0.6.6`).
 | Policy + scanner (`RtbcPolicy`, `RtbcReject`, `check_initcode`, `check_runtime`, `strip_solc_metadata`) | `crates/evm/evm/src/rtbc.rs` |
 | Inspector (`RtbcInspector`, `rtbc()` shorthand, LIFO stack, reject logging) | `crates/evm/evm/src/rtbc_inspector.rs` |
 | Protocol constants (`MAX_INITCODE_SIZE = 49_152`, `MAX_RUNTIME_SIZE = 24_576`, authoritative) | `crates/chainspec/src/constants.rs` |
-| Drift guard (`rtbc_policy_mirrors_chainspec_constants`) | `crates/evm/ethereum/src/lib.rs` (tests) |
+| Drift guard (`rtbc_policy_mirrors_chainspec_constants`) | `crates/evm/config/src/lib.rs` (tests) |
 | Acceptance/execution tests | `crates/evm/evm/src/rtbc_prototype.rs` (15 tests) |
 | Scanner unit + real-artifact tests | `crates/evm/evm/src/rtbc.rs` (tests), fixtures in `crates/evm/evm/tests/fixtures/` |
 | Wiring | every state-changing EVM construction site calls `evm_with_env_and_inspector(…, rtbc())` (13 sites): payload validation/execution + prewarm (`engine/tree`), reorg build (`node/builder`), `eth_estimateGas`, `eth_call` (plain + inspector), `debug_trace*`, `eth_callBundle`/`sim_bundle` (`rpc*`). Tuple form `(rtbc(), inspector)` where a site already passes its own inspector. |

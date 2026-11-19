@@ -6,8 +6,11 @@
 > this client has been extensively modified and does not feature any Ethereum legacy, P2P or "Swiss-knife" tools. 
 > Its primary objective is to facilitate the rapid deployment of fast, secure private EVM/DeFi compatible network.
 > The validator is **merged into the node** — one process, one config, one heartbeat
-> (`HEARTBEAT_MS`), sealing switched on/off with `SEAL` in the config. No `smartnet-validator`
-> binary exists anymore.
+> (`NODE_HEARTBEAT`, ms; 500 advised), sealing switched on/off with `SEAL` in the config. No
+> `smartnet-validator` binary exists anymore.
+
+## ENV
+Debian 13
 
 | Path | Role |
 |------|------|
@@ -20,20 +23,24 @@
 ## Build
 
 ```bash
-make build              # → bin/smartnet (calibri-lite + smartnet, caches deps)
-make install            # config as invoking user + binary → /usr/local/sbin/smartnet (needs sudo)
+make build              # → bin/smartnet (calibri-lite + smartnet, offline — cached deps)
+make online             # first build / after adding or updating deps (fetches into the offline cache)
+make install            # config as invoking user + binary → /usr/local/bin/smartnet (needs sudo)
 make clean              # bin/ binaries + heavy debug artifacts (keeps release cache for offline rebuild)
 make clear              # full clean: binaries + ALL target dirs (drops the offline cache)
-make offline            # build offline from the cached release deps
-make check              # cargo check across all workspaces
+make offline            # alias of make build (offline is the default)
+make check              # cargo check across all workspaces (offline)
 cargo build --release   # same as make build (root hook crate)
 ```
 
-Per-app (only touches that app's target + its bin file):
+Per-app (unified semantics — `clean` keeps the release/offline cache, `clear` drops it):
 
 ```bash
-make -C smartnet build    # → bin/smartnet
-make -C smartnet clean
+make -C smartnet build      # → bin/smartnet
+make -C smartnet clean      # bin/smartnet + smartnet/target/debug
+make -C smartnet clear      # bin/smartnet + all of smartnet/target
+make -C calibri-lite clean  # calibri-lite/target/debug only
+make -C calibri-lite clear  # all of calibri-lite/target
 ```
 
 `smartnet-test-util` (optional): `make -C smartnet build-test-util` — stays under `smartnet/target/`, not `bin/`.
@@ -55,7 +62,7 @@ smartnet --config /path/to/config.toml
 ```
 
 Key switches inside the config (see `smartnet/example.config.toml` for the full annotated
-template): `SEAL = true` runs the validator in-process; `HEARTBEAT_MS` sets the seal cadence;
+template): `SEAL = true` runs the validator in-process; `NODE_HEARTBEAT` (ms) is the one heartbeat every service re-uses;
 mesh links come from the closed-list peers file (`mainnet.jsonl` style) and keep themselves
 alive (PING/PONG + bounded reconnect).
 

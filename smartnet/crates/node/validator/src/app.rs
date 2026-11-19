@@ -215,8 +215,8 @@ fn forkchoice_state_for_ping(
     })
 }
 
-/// Load the signing key from the config's keystore (`KEY_PATH`/`KEY_FILE` +
-/// `PASSWORD_FILE`); `cfg` = `None` means: load the widowed config from `--config`/default.
+/// Load the signing key from the config's keystore (`KEY_PATH`, the key GATHERED — any
+/// filename, exactly one file — + `PASSWORD_FILE`); `cfg` = `None` means: load the widowed config from `--config`/default.
 async fn load_signing_key(cfg: Option<&ValidatorConfig>) -> Result<SigningKey, ValidatorStatus> {
     let cfg = match cfg {
         Some(c) => c.clone(),

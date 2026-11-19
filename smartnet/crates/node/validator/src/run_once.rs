@@ -64,7 +64,7 @@ use alloy_rpc_types_eth::{
 };
 use alloy_rpc_types_txpool::TxpoolContent;
 use calibri_lite_consensus::pre_consensus::{
-    build_vanity_with_meta, calibri_lite_seal_hash, parse_extra_data_validators,
+    build_vanity_with_meta, calibri_lite_seal_hash,
     validate_smartnet_proposal, CalibriLiteSealError, SmartNetProposalMeta, SmartNetRuntimeProfile,
 };
 use eyre::{Context, Result};
@@ -503,21 +503,28 @@ async fn val_seq_10_prepare<I: ValidatorIo>(
         .wrap_err("latest head")?
         .ok_or_else(|| eyre::eyre!("no latest block from node"))?;
 
-    let genesis = io
-        .block_by_number(BlockNumberOrTag::Earliest)
-        .await
-        .wrap_err("genesis block")?
-        .ok_or_else(|| eyre::eyre!("no genesis block from node"))?;
-
-    let signers = parse_extra_data_validators(genesis.header.extra_data.as_ref())
-        .map_err(|e| eyre::eyre!("parse genesis signers: {e}"))?;
+    // The authorized set comes from `validators.jsonl` — the RAM array filled at
+    // bootstrap by `load_validators` — NEVER from the genesis `extraData` signer list.
+    // That list is LEGACY and is not consulted at all (user-in.md #3: "skip genesis
+    // validator entirely"). Fail closed: an empty/unreadable registry means no validator,
+    // so nothing may be sealed. For the chair question itself see
+    // `validators::get_val_chair(B256::ZERO, 0, "")` — with one validator the detour
+    // returns it (sync: the caller passes the block hash that seeds the entropy).
+    let signers: Vec<Address> = crate::validators::get_val_all()
+        .iter()
+        .filter(|record| record.is_enabled())
+        .map(|record| record.address)
+        .collect();
     if signers.is_empty() {
-        eyre::bail!("genesis signer list is empty");
+        eyre::bail!(
+            "validators.jsonl holds no `status: true` validator (fail closed) — the \
+             genesis signer list is legacy and is not used"
+        );
     }
 
     let signer_addr = signer_address(&args.secret_key);
     if !signers.contains(&signer_addr) {
-        eyre::bail!("secret key address {signer_addr} is not in the genesis signer set");
+        eyre::bail!("secret key address {signer_addr} is not `status: true` in validators.jsonl");
     }
 
     Ok((latest, signers, signer_addr))
@@ -565,7 +572,7 @@ async fn val_seq_20_fetch_txpool<I: ValidatorIo>(
     // Fold the pool's `queued` bucket into the seal candidates. The subpool label is a hint,
     // not a verdict: a tx can be parked `Queued` because the pool cached a state nonce one
     // behind the true head at insert time, and only a committed block promotes it — so a
-    // sealer that reads only `pending` can deadlock on a mis-classified contiguous run
+    // sealer that reads only `pending` can deadlock on a misclassified contiguous run
     // (`MPP-ISSUE.md`). Every queued reason is re-checked downstream against canonical state
     // by the nonce gate, the balance gate, and `eth_simulateV1`, so folding is safe.
     let folded_queued = fold_queued_into_candidates(&mut txpool);
@@ -1690,6 +1697,30 @@ mod tests {
         (h, hash)
     }
 
+    /// Fill the RAM registry (user-in.md #3) with every signer these tests seal as.
+    ///
+    /// Content is IDENTICAL for every caller, and the path is per-thread, so concurrent
+    /// loads can never disagree — the genesis `extraData` list is not consulted at all.
+    fn load_test_registry() {
+        let path = std::env::temp_dir().join(format!(
+            "smartnet-test-validators-{}-{:?}.jsonl",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let lines: Vec<String> = [secret(7), secret(3)]
+            .iter()
+            .map(|k| {
+                format!(
+                    "{{\"address\":\"{:#x}\",\"status\":true}}",
+                    signer_address(k)
+                )
+            })
+            .collect();
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write registry");
+        crate::validators::load_validators(&path).expect("load registry");
+        let _ = std::fs::remove_file(&path);
+    }
+
     fn run_once_args(secret_key: SigningKey, allow_empty: bool) -> RunOnceArgs {
         RunOnceArgs {
             coinbase: Address::repeat_byte(0x01),
@@ -1737,6 +1768,8 @@ mod tests {
         });
         let io = MockIo::new(315, pool);
         let args = run_once_args(key, false);
+        // The seal path reads the RAM registry (user-in.md #3) — fill it first.
+        load_test_registry();
         let out = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1771,6 +1804,8 @@ mod tests {
         let _ = smartnet_tls_provider::install_default();
         let io = MockIo::new(315, alloy_rpc_types_txpool::TxpoolContent::default());
         let args = run_once_args(secret(7), false);
+        // The seal path reads the RAM registry (user-in.md #3) — fill it first.
+        load_test_registry();
         let out = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

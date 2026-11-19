@@ -194,10 +194,10 @@ impl StateProvider for StateProviderTraitObjWrapper {
 }
 
 impl BytecodeReader for StateProviderTraitObjWrapper {
-    fn bytecode_by_hash(
+    fn code_by_address(
         &self,
-        code_hash: &B256,
+        address: &alloy_primitives::Address,
     ) -> smartnet_errors::ProviderResult<Option<smartnet_primitives_traits::Bytecode>> {
-        self.0.bytecode_by_hash(code_hash)
+        self.0.code_by_address(address)
     }
 }

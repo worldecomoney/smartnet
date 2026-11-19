@@ -113,6 +113,12 @@ impl Spreader {
         &self.config.peers_file
     }
 
+    /// How many mesh links hold a live connection right now — the node status
+    /// line's "X nodes connected".
+    pub fn connected_count(&self) -> usize {
+        self.links.connected_count()
+    }
+
     /// The current target set: file entries with `active && valid`, excluding our own
     /// port.
     ///

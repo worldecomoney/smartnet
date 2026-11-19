@@ -15,7 +15,9 @@ use crate::{
 use clap::{Parser, Subcommand};
 use smartnet_chainspec::{ChainSpec, EthChainSpec, Hardforks};
 use smartnet_db::DatabaseEnv;
-use smartnet_node_api::NodePrimitives;
+use smartnet_evm::eth::spec::{DisableBlockRewards, EthExecutorSpec};
+use smartnet_ethereum_primitives::EthPrimitives;
+use smartnet_node_api::{NodePrimitives, NodeTypes};
 use smartnet_node_builder::{NodeBuilder, WithLaunchContext};
 use smartnet_node_core::{args::LogArgs, version::version_metadata};
 use smartnet_rpc_server_types::{DefaultRpcModuleValidator, RpcModuleValidator};
@@ -51,7 +53,7 @@ pub struct Cli<
     /// Operator configuration file. Datadir, chain identity (database), ports and RPC are all
     /// read from it; place this flag before subcommands, e.g.
     /// `smartnet --config /path/config.toml init ...`.
-    /// Defaults to `~/.smartnet/node/config.toml` if not specified.
+    /// Defaults to `~/.smartnet/config.toml` if not specified.
     #[arg(long = "config", value_name = "FILE")]
     pub config_path: Option<PathBuf>,
 
@@ -125,8 +127,13 @@ where
         ) -> eyre::Result<()>,
     ) -> eyre::Result<()>
     where
-        N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>,
+        N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>
+
+        // The RLP import (see `run_commands_with`) decodes and writes the Ethereum
+        // shapes this CLI ships with; the EVM config is built from the chain spec.
+        + NodeTypes<Primitives = EthPrimitives>,
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
+        C::ChainSpec: DisableBlockRewards + EthExecutorSpec,
     {
         self.configure().run_with_components(components, launcher)
     }
@@ -155,8 +162,12 @@ where
         ) -> eyre::Result<()>,
     ) -> eyre::Result<()>
     where
-        N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>,
+        N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>
+
+        // Same bounds as `run_with_components` — the import runs inside that path.
+        + NodeTypes<Primitives = EthPrimitives>,
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
+        C::ChainSpec: DisableBlockRewards + EthExecutorSpec,
     {
         let mut app = self.configure();
         app.set_runner(runner);

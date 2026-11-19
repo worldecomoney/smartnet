@@ -54,8 +54,11 @@ pub trait LoadReceipt:
                     next_log_index,
                     meta,
                 }])?
+                // One input in → one receipt out; an empty result is an internal
+                // converter failure. Answer the wallet with an error — a panic here
+                // would take down the RPC serving task for every caller.
                 .pop()
-                .unwrap())
+                .ok_or(EthApiError::InternalEthError)?)
         }
     }
 }

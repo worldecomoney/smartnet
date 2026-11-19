@@ -173,9 +173,9 @@ impl<S: StateProvider> StateProvider for InstrumentedStateProvider<S> {
 }
 
 impl<S: BytecodeReader> BytecodeReader for InstrumentedStateProvider<S> {
-    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
+    fn code_by_address(&self, address: &Address) -> ProviderResult<Option<Bytecode>> {
         let start = Instant::now();
-        let res = self.state_provider.bytecode_by_hash(code_hash);
+        let res = self.state_provider.code_by_address(address);
         let elapsed = start.elapsed();
         self.metrics.code_fetch_latency.record(elapsed);
         self.stats.total_code_fetches.fetch_add(1, Ordering::Relaxed);

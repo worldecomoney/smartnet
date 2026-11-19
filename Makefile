@@ -5,8 +5,17 @@
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BIN_DIR := $(ROOT)/bin
 PROFILE ?= release
-SMARTNET_DIR := $(HOME)/.smartnet
-SBIN_DIR := /usr/local/sbin
+# Config/keystore home of the *invoking* user. Under sudo, HOME is root's by default,
+# which would park the config in /root/.smartnet — a path the real user's node never
+# reads. Resolve the sudo caller's home via getent; fall back to $HOME when not sudo.
+INSTALL_USER := $(if $(SUDO_USER),$(SUDO_USER),$(USER))
+INSTALL_HOME := $(shell getent passwd "$(INSTALL_USER)" 2>/dev/null | cut -d: -f6)
+ifeq ($(INSTALL_HOME),)
+INSTALL_HOME := $(HOME)
+endif
+SMARTNET_DIR := $(INSTALL_HOME)/.smartnet
+# User-invocable binary → /usr/local/bin (in every user's PATH; /usr/local/sbin is not).
+SBIN_DIR := /usr/local/bin
 
 ##@ Help
 
@@ -27,7 +36,7 @@ offline: ## Build libs + app offline (uses cached deps).
 	$(MAKE) -C smartnet build PROFILE="$(PROFILE)" CARGO_OFFLINE="--offline"
 	@echo "→ $(BIN_DIR)/smartnet (offline)"
 
-install: ## Install config (as invoking user) + binary into /usr/local/sbin (needs root).
+install: ## Install config (as invoking user) + binary into /usr/local/bin (needs root).
 	# Build first as your own user, then install under sudo, so root's PATH never needs cargo:
 	#   make build && sudo make install
 	# No datadir is created or assumed here: the data directory comes solely from
@@ -36,9 +45,12 @@ install: ## Install config (as invoking user) + binary into /usr/local/sbin (nee
 		{ echo "error: binary missing in $(BIN_DIR) — run 'make build' first"; exit 1; }
 	mkdir -p "$(SMARTNET_DIR)"
 	mkdir -p "$(SBIN_DIR)"
-	# One config for both roles: the node reads $HOME/.smartnet/config.toml, and the merged
-	# validator section lives in that same file. Installed only when missing — never
-	# overwrite an edited config.
+	# The config home must be writable by the invoking user (keystore import rewrites
+	# config.toml there) — a root-owned dir from a sudo run would block every later write.
+	@if [ -n "$(SUDO_USER)" ]; then chown "$(SUDO_USER)" "$(SMARTNET_DIR)"; fi
+	# One config for both roles: the node reads ~/.smartnet/config.toml of the invoking
+	# user, and the merged validator section lives in that same file. Installed only when
+	# missing — never overwrite an edited config.
 	@if [ -e "$(SMARTNET_DIR)/config.toml" ]; then \
 		echo "  keep existing $(SMARTNET_DIR)/config.toml"; \
 	else \

@@ -5,7 +5,7 @@
   that keyfile contain raw unencrypted key with or without 0x prefix
   Processing key:
   Raw key is used only once, at the time when smartnode keystroke command is given
-  this commad encrypts raw key and stores encrypted file under config path
+  this command encrypts raw key and stores encrypted file under config path
   filename format is time-address
   on successful encrypted file storage raw unencrypted file must be deleted
   encrypted key filename must be written back to config
@@ -17,7 +17,7 @@
   There should be just one main function that does key file decryption.
   Decryption process must take time on bottstrap only, and only once, never re-occur.
   Tests must use very same function and not write any different functions or re-implement this function.
-  No test can inplement decrytion of encrypted key file using different functions.
+  No test can implement decryption of encrypted key file using different functions.
   
   
   Decryted/raw private key must never be stored anywhere! not in files not in DB!

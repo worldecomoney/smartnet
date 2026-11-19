@@ -14,6 +14,7 @@ use crate::{
 };
 use alloy_eips::BlockNumHash;
 use smartnet_chain_state::ExecutedBlock;
+use smartnet_ethereum_primitives::TransactionSigned;
 use smartnet_file_tier::{
     extract_block, seal_shard, BlockRecords, FileTierError, FileTierWriter, FileWriteTimes,
     SignatureAccess,
@@ -339,32 +340,36 @@ pub enum BytecodeDestination {
 /// Writes the genesis payload to the file tier if not already present (idempotent),
 /// then flushes. The DB index rows (`CanonicalChain`, `HeaderNumbers`) stay in the
 /// caller's open transaction — this function owns only the FS half of the dual write.
+/// `txs` = the calibri\* pre-fund records (GENESIS.md — real tx listings in block 0,
+/// state still comes from the alloc); empty for legacy clique genesis.
 pub fn save_genesis_payload<H: alloy_consensus::BlockHeader>(
     base: &std::path::Path,
     header: &H,
     block_hash: alloy_primitives::B256,
+    txs: &[TransactionSigned],
 ) -> ProviderResult<()> {
     let existing = smartnet_file_tier::read_block_at(base, header.number())
         .map_err(ProviderError::other)?;
     if existing.is_none() {
-        smartnet_file_tier::write_genesis_block(base, header, block_hash)
+        smartnet_file_tier::write_genesis_block_with_txs(base, header, block_hash, txs)
             .map_err(ProviderError::other)?;
         smartnet_file_tier::flush(base).map_err(ProviderError::other)?;
     }
     Ok(())
 }
 
-/// Writes a genesis bytecode to its tier home: the file tier when enabled (the
+/// Writes a contract's bytecode to its tier home: the file tier when enabled (the
 /// `Bytecodes` table is never written then), otherwise reports
-/// [`BytecodeDestination::DatabaseTable`] so the caller writes the table.
+/// [`BytecodeDestination::DatabaseTable`] so the caller writes the table. The file is
+/// keyed by the deployed address (operator layout).
 pub fn write_bytecode(
     base: Option<&std::path::Path>,
-    hash: &alloy_primitives::B256,
+    address: &alloy_primitives::Address,
     bytes: &[u8],
 ) -> ProviderResult<BytecodeDestination> {
     match base {
         Some(base) => {
-            smartnet_file_tier::write_bytecode(base, hash, bytes)
+            smartnet_file_tier::write_bytecode(base, address, bytes)
                 .map_err(ProviderError::other)?;
             Ok(BytecodeDestination::FileTier)
         }
@@ -428,9 +433,24 @@ impl<N: ProviderNodeTypes> StorageEngine<N> {
     /// Hard-wired to −2 — there is no general `restore_unwind(n)`. No other unwind
     /// path exists or may exist (sync failures drop and retry; they never unwind).
     pub fn restore_unwind(&self, base: &std::path::Path) -> Result<u64, StorageError> {
-        let bx = smartnet_file_tier::remove_last_lines(base)?;
+        let file_tip = smartnet_file_tier::remove_last_lines(base)?;
         let provider_rw = self.provider.database_provider_rw()?;
         let head = provider_rw.last_block_number()?;
+        // The DB commit is the durability point: a range save appends its lines first
+        // and commits once, so the file may legitimately lead the committed DB after a
+        // crash. Anchor on whichever is BEHIND and pull the file back to it — never
+        // re-sync from a block that was never committed (that would leave a permanent
+        // hole), and never keep file lines the DB does not have (a later import would
+        // append the same blocks twice into a shard a seal has already closed).
+        let bx = file_tip.min(head);
+        if file_tip > bx {
+            smartnet_file_tier::align_active_to_block(base, bx)?;
+            tracing::info!(
+                target: "storage::engine",
+                file_tip, head, bx,
+                "file tier led the committed DB — trimmed the active files back to the committed tip"
+            );
+        }
         if head > bx {
             provider_rw.remove_block_and_execution_above(bx)?;
             provider_rw.commit()?;

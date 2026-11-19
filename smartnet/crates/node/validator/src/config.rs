@@ -15,8 +15,6 @@ const DEFAULT_TXPOOL_VAL_MAX_TXS: usize = 512;
 pub struct ValidatorConfig {
     /// Directory holding the encrypted keystore (`KEY_PATH`).
     pub key_dir: PathBuf,
-    /// Keystore filename under `key_dir` (`KEY_FILE`). Empty = not initialized.
-    pub key_file: String,
     /// Keystore password file (`PASSWORD_FILE`). Empty in config = prompt interactively;
     /// never a built-in path in the code.
     pub password_file: Option<PathBuf>,
@@ -35,7 +33,8 @@ pub struct ValidatorConfig {
     /// Seal a block when the txpool is empty (`ALLOW_EMPTY`, true/false). Optional; absent =
     /// false (an empty txpool is an idle beat, not an empty block).
     pub allow_empty: bool,
-    /// Validator seal-beat cadence (`HEARTBEAT_MS`, ms between txpool/seal beats).
+    /// Validator seal-beat cadence (`NODE_HEARTBEAT`, ms between txpool/seal beats) —
+    /// the SAME key and value the node reads; there is one cadence per node.
     /// Optional; absent = 2000, 0 is rejected.
     pub heartbeat_ms: u64,
     /// Is the validator section present in the config at all? THE SECTION IS OPTIONAL:
@@ -46,17 +45,11 @@ pub struct ValidatorConfig {
 }
 
 impl ValidatorConfig {
-    pub(crate) fn is_key_initialized(&self) -> bool {
-        !self.key_file.trim().is_empty()
-    }
-
+    /// The ONE encrypted keystore inside `KEY_PATH` — **gathered, never named**
+    /// (user-in #2). `smartnet keystore` may write any filename; anything other than
+    /// exactly one file in `key_dir` is an error exit.
     pub(crate) fn keystore_path(&self) -> Result<PathBuf> {
-        if !self.is_key_initialized() {
-            eyre::bail!(
-                "KEY_FILE is empty (keystore not created); run `smartnet-validator keystore` first"
-            );
-        }
-        Ok(self.key_dir.join(self.key_file.trim()))
+        crate::keystore_util::get_encrypted_key(&self.key_dir)
     }
 }
 
@@ -140,7 +133,7 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// Load the operator config: `KEY_PATH`, `KEY_FILE`, `PASSWORD_FILE`, `NODE_URL`, `COINBASE`,
+/// Load the operator config: `KEY_PATH`, `PASSWORD_FILE`, `NODE_URL`, `COINBASE`,
 /// `CHAINID`,
 /// `INTERVAL`, `ALLOW_EMPTY`, `CANONICAL_PROBE_TIMEOUT_MS`, `CANONICAL_PROBE_INTERVAL_MS`,
 /// `CANONICAL_PROBE_MAX_INTERVAL_MS`, `RPC_TIMEOUT_MS`, `SEED_TX_TO`, `SEED_TX_VALUE_WEI`,
@@ -154,13 +147,13 @@ fn strip_comment(line: &str) -> &str {
 /// the template-drift test keeps the two in step.
 ///
 /// Public so the node's mesh service can load the same keystore identity (same
-/// `KEY_PATH`/`KEY_FILE`/`PASSWORD_FILE` triple) at boot — one identity, one config.
+/// `KEY_PATH`/`PASSWORD_FILE` pair) at boot — one identity, one config, with the
+/// keystore GATHERED from `KEY_PATH` (any filename, exactly one file).
 pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
 
     let mut key_dir: Option<PathBuf> = None;
-    let mut key_file: Option<String> = None;
     let mut heartbeat_ms: Option<u64> = None;
     let mut allow_empty: Option<bool> = None;
     let mut seal: Option<bool> = None;
@@ -191,7 +184,6 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
 
         let name = match key {
             "KEY_PATH" => "KEY_PATH",
-            "KEY_FILE" => "KEY_FILE",
             "PASSWORD_FILE" => "PASSWORD_FILE",
             "VERB" => "VERB",
             "MAX_NATIVE_PER_BLOCK" => "MAX_NATIVE_PER_BLOCK",
@@ -201,7 +193,7 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
             "TXPOOL_VAL_MAX_TXS" => "TXPOOL_VAL_MAX_TXS",
             "SEAL" => "SEAL",
             "ALLOW_EMPTY" => "ALLOW_EMPTY",
-            "HEARTBEAT_MS" => "HEARTBEAT_MS",
+            "NODE_HEARTBEAT" => "NODE_HEARTBEAT",
             // The config file is now the shared NODE config (the old validator config is
             // gone): other keys on it belong to the node CLI and are parsed (fail-closed for
             // their own keys) by the node's overlay — anonymous keys here belong to the node
@@ -211,14 +203,13 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
         seen.push(name);
 
         // A key that is present but blank is a problem in its own right — there is no
-        // built-in default to fall back to. Three keys legitimately accept an empty value:
-        // `KEY_FILE` (keystore not created yet), `PASSWORD_FILE` (prompt for the password
-        // instead of reading a file), `VERB` (optional — blank means the default, 1), the
+        // built-in default to fall back to. A few keys legitimately accept an empty value:
+        // `PASSWORD_FILE` (prompt for the password instead of reading a file), `VERB`
+        // (optional — blank means the default, 1), the
         // four class caps (optional — blank means the built-in default) and
         // `TXPOOL_VAL_MAX_TXS` (optional — blank means the built-in default, 512).
         if strip_quotes(value).trim().is_empty() &&
             name != "SEAL" &&
-            name != "KEY_FILE" &&
             name != "PASSWORD_FILE" &&
             name != "VERB" &&
             name != "ALLOW_EMPTY" &&
@@ -240,7 +231,6 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
         let parsed: Result<()> = (|| {
             match name {
                 "KEY_PATH" => key_dir = Some(expand_home(strip_quotes(value))?),
-                "KEY_FILE" => key_file = Some(strip_quotes(value).to_string()),
                 "SEAL" => {
                     seal = Some(
                         parse_bool(strip_quotes(value))
@@ -256,10 +246,10 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
                         );
                     }
                 }
-                "HEARTBEAT_MS" => {
+                "NODE_HEARTBEAT" => {
                     let n = strip_quotes(value)
                         .parse::<u64>()
-                        .with_context(|| format!("parse HEARTBEAT_MS {value}"))?;
+                        .with_context(|| format!("parse NODE_HEARTBEAT {value}"))?;
                     heartbeat_ms = Some(n);
                 }
                 "PASSWORD_FILE" => {
@@ -336,7 +326,7 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
     // RPC_TIMEOUT_MS are REMOVED: the merged validator addresses its own node in-proc (no
     // HTTP), the chain id comes from the database (single source), the coinbase is derived
     // from the private key, and the old RPC-era timings are folded into HEARTBEAT_MS.
-    const REQUIRED: &[&str] = &["KEY_PATH", "KEY_FILE", "PASSWORD_FILE"];
+    const REQUIRED: &[&str] = &["KEY_PATH", "PASSWORD_FILE"];
     // The validator section is OPTIONAL and the switch is SEAL: absent or false = the
     // merged validator is simply off (a disabled config with placeholder values — every
     // consumer must consult `enabled` before using any field). With SEAL = true the
@@ -374,7 +364,7 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
             ));
         }
     if heartbeat_ms == Some(0) {
-        problems.push("HEARTBEAT_MS is 0 — must be at least 1".to_string());
+        problems.push("NODE_HEARTBEAT is 0 — must be at least 1".to_string());
     }
 
     if !problems.is_empty() {
@@ -390,11 +380,10 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
 
     if !enabled {
         // Disabled = no sealing, but the keystore triple is still returned when present:
-        // the mesh identity (same KEY_PATH/KEY_FILE/PASSWORD_FILE) loads even on a
+        // the mesh identity (same KEY_PATH/PASSWORD_FILE) loads even on a
         // non-sealing node. Seal-path consumers still gate on `enabled` before using it.
         return Ok(ValidatorConfig {
             key_dir: key_dir.unwrap_or_default(),
-            key_file: key_file.unwrap_or_default(),
             password_file,
             verb,
             selection_caps: SelectionCaps {
@@ -417,11 +406,9 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
     // Every problem above implies the matching key was missing or blank, so these are all
     // `Some` by now.
     let key_dir = key_dir.expect("checked above");
-    let key_file = key_file.expect("checked above");
 
     Ok(ValidatorConfig {
         key_dir,
-        key_file,
         password_file,
         verb,
         selection_caps: SelectionCaps {
@@ -459,7 +446,7 @@ fn parse_bool(s: &str) -> Result<bool> {
 /// It makes no RPC call and touches no chain, and it is the one command an operator runs
 /// *before* `COINBASE`/`SEED_TX_TO` have any value — the command is what writes them. So it
 /// reads only what it needs (`KEY_PATH`) and deliberately does not run the full validation
-/// pass; the full pass runs normally at seal time. `KEY_FILE` and `PASSWORD_FILE` are never
+/// pass; the full pass runs normally at seal time. `PASSWORD_FILE` is never
 /// read here: the command always names the keystore `UTC--…--<address>` itself and the
 /// password path comes from `--password`.
 pub(crate) struct ImportConfig {
@@ -500,82 +487,6 @@ pub(crate) fn load_import_config(path: &Path) -> Result<ImportConfig> {
     Ok(ImportConfig { key_dir })
 }
 
-/// Rewrite (or append) the given `key = "value"` pairs in the operator config, in place,
-/// preserving every other line — comments, ordering and blank lines all survive.
-pub(crate) fn set_config_values(config_path: &Path, updates: &[(&str, &str)]) -> Result<()> {
-    let raw = std::fs::read_to_string(config_path)
-        .with_context(|| format!("read config {}", config_path.display()))?;
-    let out = apply_config_updates(&raw, updates);
-    write_config_atomically(config_path, &out)
-        .with_context(|| format!("write config {}", config_path.display()))
-}
-
-/// Write `contents` to `path` atomically: a sibling temp file is written (and fsynced) first,
-/// then renamed over the target. A truncate-then-write crash would otherwise leave a
-/// half-written config the validator cannot boot from.
-fn write_config_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    // Best-effort: fsync the parent so the rename itself survives a crash. A failure here
-    // does not invalidate the already-renamed file, so it is not fatal.
-    if let Some(dir) = path.parent() &&
-        let Ok(d) = std::fs::File::open(dir)
-    {
-        let _ = d.sync_all();
-    }
-    Ok(())
-}
-
-/// Pure core of [`set_config_values`], split out so it can be tested on a string without
-/// writing a config file.
-pub(crate) fn apply_config_updates(raw: &str, updates: &[(&str, &str)]) -> String {
-    let mut written: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    let mut out = String::new();
-
-    for line in raw.lines() {
-        // Only an assignment can be an update target; a comment mentioning KEY_FILE is not.
-        let trimmed = strip_comment(line).trim();
-        let replaced = if let Some((key, _)) = trimmed.split_once('=') {
-            let key = key.trim();
-            updates.iter().find(|(k, _)| *k == key).map(|(_, value)| (key, *value))
-        } else {
-            None
-        };
-        match replaced {
-            Some((key, value)) => {
-                out.push_str(&format!("{key} = \"{value}\"\n"));
-                written.insert(key);
-            }
-            None => {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-    }
-
-    // A key that is absent from the file is appended, so an import can complete even if the
-    // template never shipped `COINBASE`/`SEED_TX_TO` as assignments.
-    for (key, value) in updates {
-        if written.contains(key) {
-            continue;
-        }
-        if !out.ends_with('\n') && !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&format!("{key} = \"{value}\"\n"));
-        written.insert(key);
-    }
-    out
-}
-
 /// Tests touch **only** the shipped template `validator/example.config.toml`, and only by
 /// reading it. A config file is never written by a test: the template is the single config
 /// source, `make install` copies it to `~/.smartnet/validator/config.toml`, and that
@@ -609,7 +520,6 @@ mod tests {
             "SEAL",
             "ALLOW_EMPTY",
             "KEY_PATH",
-            "KEY_FILE",
             "PASSWORD_FILE",
             "VERB",
             "MAX_NATIVE_PER_BLOCK",
@@ -622,8 +532,8 @@ mod tests {
         }
         // The heartbeat ships a working default value, uncommented.
         assert!(
-            raw.lines().any(|l| l.starts_with("HEARTBEAT_MS =")),
-            "template must ship HEARTBEAT_MS uncommented: {}",
+            raw.lines().any(|l| l.starts_with("NODE_HEARTBEAT =")),
+            "template must ship NODE_HEARTBEAT uncommented: {}",
             template.display()
         );
     }
@@ -642,28 +552,28 @@ mod tests {
     }
 
     /// The shipped template carries working validator values (its own header states so): an
-    /// unedited copy loads with the validator ON — keystore paths present, the 2000 ms
+    /// unedited copy loads with the validator ON — keystore paths present, the 500 ms
     /// heartbeat, the 512-tx budget, and the default per-class caps.
     #[test]
     fn unedited_template_loads_with_validator_enabled_defaults() {
         let cfg = load_validator_config(&template()).expect("the shipped template must load as-is");
         assert!(cfg.enabled, "template ships SEAL = true");
-        assert_eq!(cfg.heartbeat_ms, 2000);
+        assert_eq!(cfg.heartbeat_ms, 500);
         assert_eq!(cfg.txpool_val_max_txs, 512);
         assert_eq!(cfg.selection_caps, SelectionCaps::default());
     }
 
-    /// `HEARTBEAT_MS` is honored, not decorative: a non-default value reaches the config and
+    /// `NODE_HEARTBEAT` is honored, not decorative: a non-default value reaches the config and
     /// 0 is rejected (no silent fallback).
     #[test]
     fn heartbeat_ms_is_parsed_not_ignored() {
-        let text = format!("{}\nHEARTBEAT_MS = 900", filled_template("VERB = 1"));
+        let text = format!("{}\nNODE_HEARTBEAT = 900", filled_template("VERB = 1"));
         let cfg = load_from_str(&text, "hb-900").expect("heartbeat 900 must load");
         assert_eq!(cfg.heartbeat_ms, 900);
 
-        let zero = format!("{}\nHEARTBEAT_MS = 0", filled_template("VERB = 1"));
+        let zero = format!("{}\nNODE_HEARTBEAT = 0", filled_template("VERB = 1"));
         let err = load_from_str(&zero, "hb-0").expect_err("heartbeat 0 must be rejected");
-        assert!(err.to_string().contains("HEARTBEAT_MS"), "got: {err}");
+        assert!(err.to_string().contains("NODE_HEARTBEAT"), "got: {err}");
     }
 
     /// `TXPOOL_VAL_MAX_TXS` reaches the config: the template ships its 512 default, a
@@ -729,7 +639,6 @@ mod tests {
             .lines()
             .filter(|l| {
                 !l.starts_with("KEY_PATH") &&
-                    !l.starts_with("KEY_FILE") &&
                     !l.starts_with("PASSWORD_FILE")
             })
             .collect::<Vec<_>>()
@@ -738,7 +647,7 @@ mod tests {
         let err = load_from_str(&enabled, "enabled-no-keys")
             .expect_err("SEAL = true without the keystore keys must fail");
         let msg = err.to_string();
-        for key in ["KEY_PATH", "KEY_FILE", "PASSWORD_FILE"] {
+        for key in ["KEY_PATH", "PASSWORD_FILE"] {
             assert!(msg.contains(key), "expected {key} in: {msg}");
         }
     }
@@ -782,7 +691,6 @@ mod tests {
                     "SEAL",
                     "ALLOW_EMPTY",
                     "KEY_PATH",
-                    "KEY_FILE",
                     "PASSWORD_FILE",
                     "VERB",
                     "MAX_NATIVE_PER_BLOCK",

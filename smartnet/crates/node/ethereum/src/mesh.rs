@@ -71,7 +71,6 @@ use std::{
     net::{IpAddr, Ipv4Addr},
     path::Path,
     sync::Arc,
-    time::Duration,
 };
 use tokio::net::TcpListener;
 use tracing::{debug, error};
@@ -204,7 +203,7 @@ where
 }
 
 /// Loads the mesh identity from the operator's validator config — the same keystore the
-/// validator uses (`KEY_PATH`/`KEY_FILE`/`PASSWORD_FILE`), decrypted once at boot,
+/// validator uses (`KEY_PATH` + the GATHERED keystore + `PASSWORD_FILE`), decrypted once at boot,
 /// memory-only. Any failure is fatal: the mesh must never boot with a missing or guessed
 /// identity (peers could not authenticate us).
 fn load_mesh_identity(config_path: Option<&Path>, chain_id: u64) -> Result<Identity, String> {
@@ -216,7 +215,8 @@ fn load_mesh_identity(config_path: Option<&Path>, chain_id: u64) -> Result<Ident
         .password_file
         .as_deref()
         .ok_or_else(|| "PASSWORD_FILE is not set — mesh identity keystore cannot be loaded".to_string())?;
-    let key = load_identity_from_config(&config.key_dir, &config.key_file, password_file)
+    // The key is GATHERED from `key_dir` — never named (user-in #2).
+    let key = load_identity_from_config(&config.key_dir, password_file)
         .map_err(|err| format!("mesh identity keystore: {err:#}"))?;
     Ok(Identity::new(key, chain_id))
 }
@@ -231,6 +231,9 @@ pub(crate) struct MeshStart {
     /// tip has reached the highest reported peer tip, and no ordered pull is armed —
     /// or stays false (the caller's boot timeout then proceeds with a warning).
     pub(crate) ready: tokio::sync::watch::Receiver<bool>,
+    /// The spreader owns the link pool, so this is how the node's status line reads
+    /// "X nodes connected" without the mesh reaching back into the node.
+    pub(crate) spreader: Arc<Spreader>,
 }
 
 /// Spawn the mesh service from the node launch path (next to the gated call into
@@ -284,15 +287,12 @@ where
 
     let tasks = ctx.node.task_executor().clone();
 
-    // Operator mesh limits + timings. `MESH_HEARTBEAT` (ms) sets the keepalive ping
-    // cadence; the shared silence bound (both ends) derives as heartbeat + SILENCE_MARGIN
-    // so a live connection always survives at least one full ping period before either
-    // side declares the peer dead. Unset → protocol defaults (500 ms / 800 ms).
-    let mut limits = Limits::with_max_msg_mb(ctx.config.rpc.mesh_max_msg_mb);
-    if let Some(heartbeat_ms) = ctx.config.rpc.mesh_heartbeat_ms {
-        limits.keepalive = Duration::from_millis(heartbeat_ms);
-        limits.silence = limits.keepalive + smartnet_mesh::protocol::SILENCE_MARGIN;
-    }
+    // The mesh keepalive is HARDCODED and deliberately independent of `NODE_HEARTBEAT`:
+    // it exists only to keep the connection alive — ping after half of the protocol
+    // constant, silence = that constant + the shared margin, so a live connection always
+    // survives at least one full ping period before either side declares the peer dead.
+    // It is not a cadence anyone tunes; the node cadence drives the node's own services.
+    let limits = Limits::with_max_msg_mb(ctx.config.rpc.mesh_max_msg_mb);
 
     // Mesh identity: the validator's keystore, decrypted once — fatal if missing/broken
     // (peers could not authenticate us; the mesh must never boot without an identity).
@@ -366,9 +366,11 @@ where
     );
 
     // 3. Outbound txs: pool events → EIP-2718 bytes → mark/store → spread (detached).
+    // Keep a handle for the node's status line: `spreader` moves into the relay below.
+    let status_spreader = spreader.clone();
     spawn_tx_relay::<N>(ctx.node.clone(), spreader, seen, objects, tasks);
 
-    MeshStart { enabled: true, ready: gate.subscribe() }
+    MeshStart { enabled: true, ready: gate.subscribe(), spreader: status_spreader }
 }
 
 /// Canon-state → mesh block rumors (see module docs). Awaited per block for ordering.

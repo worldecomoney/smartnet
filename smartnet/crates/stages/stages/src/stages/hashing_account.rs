@@ -20,6 +20,7 @@ use smartnet_storage_errors::provider::ProviderResult;
 use std::{
     collections::BTreeSet,
     fmt::Debug,
+    io,
     ops::{Range, RangeInclusive},
     sync::mpsc::{self, Receiver},
 };
@@ -30,6 +31,11 @@ const MAXIMUM_CHANNELS: usize = 10_000;
 
 /// Maximum number of accounts to hash per rayon worker job.
 const WORKER_CHUNK_SIZE: usize = 100;
+
+/// One worker's result stream: fallible entries (raw-key decode) plus the expected
+/// entry count, so a worker that dies without sending its error is detected instead
+/// of silently truncating the collector.
+type HashChannel = Receiver<Result<(RawKey<B256>, RawValue<Account>), StageError>>;
 
 /// Account hashing stage hashes plain account.
 /// This is preparation before generating intermediate hashes and calculating Merkle tree root.
@@ -171,19 +177,35 @@ where
             let mut accounts_cursor = tx.cursor_read::<RawTable<tables::PlainAccountState>>()?;
             let mut collector =
                 Collector::new(self.etl_config.file_size, self.etl_config.dir.clone());
-            let mut channels = Vec::with_capacity(MAXIMUM_CHANNELS);
+            let mut channels: Vec<(HashChannel, usize)> = Vec::with_capacity(MAXIMUM_CHANNELS);
 
             // channels used to return result of account hashing
             for chunk in &accounts_cursor.walk(None)?.chunks(WORKER_CHUNK_SIZE) {
                 // An _unordered_ channel to receive results from a rayon job
                 let chunk = chunk.collect::<Result<Vec<_>, _>>()?;
                 let (tx, rx) = mpsc::sync_channel(chunk.len());
-                channels.push(rx);
+                let expected = chunk.len();
+                channels.push((rx, expected));
                 // Spawn the hashing task onto the global rayon pool
                 rayon::spawn(move || {
                     for (address, account) in chunk {
-                        let address = address.key().unwrap();
-                        let _ = tx.send((RawKey::new(keccak256(address)), account));
+                        // A malformed key is an error on the channel, never a panic:
+                        // a panicking worker would drop the sender and `collect` would
+                        // otherwise treat the disconnect as successful completion.
+                        match address.key() {
+                            Ok(address) => {
+                                if tx
+                                    .send(Ok((RawKey::new(keccak256(address)), account)))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                let _ = tx.send(Err(err.into()));
+                                break;
+                            }
+                        }
                     }
                 });
 
@@ -268,13 +290,35 @@ where
 }
 
 /// Flushes channels hashes to ETL collector.
+///
+/// Iterates each channel to its natural end (a cleanly finished worker drops its
+/// sender after the last entry) and fails loudly when a worker died early: an entry
+/// error propagates, and a short count means the worker panicked mid-chunk — either
+/// way the stage must not report success over a partially collected set.
 fn collect(
-    channels: &mut Vec<Receiver<(RawKey<B256>, RawValue<Account>)>>,
+    channels: &mut Vec<(HashChannel, usize)>,
     collector: &mut Collector<RawKey<B256>, RawValue<Account>>,
 ) -> Result<(), StageError> {
-    for channel in channels.iter_mut() {
-        while let Ok((key, v)) = channel.recv() {
-            collector.insert(key, v)?;
+    for (channel, expected) in channels.iter_mut() {
+        let mut received = 0usize;
+        loop {
+            match channel.recv() {
+                Ok(Ok((key, v))) => {
+                    collector.insert(key, v)?;
+                    received += 1;
+                }
+                // The worker reported a failure (e.g. malformed key) — propagate it.
+                Ok(Err(err)) => return Err(err),
+                // Sender dropped: either the worker finished every entry or it died
+                // mid-chunk; the count check below tells the two apart.
+                Err(_) => break,
+            }
+        }
+        if received != *expected {
+            return Err(io::Error::other(format!(
+                "account hashing worker channel closed after {received}/{expected} entries"
+            ))
+            .into());
         }
     }
     info!(target: "sync::stages::hashing_account", "Hashed {} entries", collector.len());

@@ -506,10 +506,10 @@ impl<S: StateProvider, const PREWARM: bool> StateProvider for CachedStateProvide
 }
 
 impl<S: BytecodeReader, const PREWARM: bool> BytecodeReader for CachedStateProvider<S, PREWARM> {
-    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
+    fn code_by_address(&self, address: &Address) -> ProviderResult<Option<Bytecode>> {
         if PREWARM {
-            match self.caches.get_or_try_insert_code_with(*code_hash, || {
-                self.state_provider.bytecode_by_hash(code_hash)
+            match self.caches.get_or_try_insert_code_with(*address, || {
+                self.state_provider.code_by_address(address)
             })? {
                 // During prewarm we only record stats (not exported metrics)
                 CachedStatus::NotCached(code) => {
@@ -525,7 +525,7 @@ impl<S: BytecodeReader, const PREWARM: bool> BytecodeReader for CachedStateProvi
                     Ok(code)
                 }
             }
-        } else if let Some(code) = self.caches.0.code_cache.get(code_hash) {
+        } else if let Some(code) = self.caches.0.code_cache.get(address) {
             self.metrics.code_cache_hits.increment(1);
             if let Some(stats) = &self.cache_stats {
                 stats.record_code_hit();
@@ -536,7 +536,7 @@ impl<S: BytecodeReader, const PREWARM: bool> BytecodeReader for CachedStateProvi
             if let Some(stats) = &self.cache_stats {
                 stats.record_code_miss();
             }
-            self.state_provider.bytecode_by_hash(code_hash)
+            self.state_provider.code_by_address(address)
         }
     }
 }
@@ -665,8 +665,9 @@ pub struct ExecutionCache(Arc<ExecutionCacheInner>);
 /// Inner state of the [`ExecutionCache`], wrapped in a single [`Arc`].
 #[derive(Debug)]
 struct ExecutionCacheInner {
-    /// Cache for contract bytecode, keyed by code hash.
-    code_cache: FixedCache<B256, Option<Bytecode>, FbBuildHasher<32>>,
+    /// Cache for contract bytecode, keyed by the deployed address (the bytecode store
+    /// is address-keyed per the operator layout).
+    code_cache: FixedCache<Address, Option<Bytecode>, FbBuildHasher<20>>,
 
     /// Flat storage cache: maps `(Address, StorageKey)` to storage value.
     storage_cache: FixedCache<(Address, StorageKey), StorageValue>,
@@ -723,7 +724,7 @@ impl ExecutionCache {
         let account_stats = Arc::new(CacheStatsHandler::new(account_capacity));
 
         Self(Arc::new(ExecutionCacheInner {
-            code_cache: FixedCache::new(code_capacity, FbBuildHasher::<32>::default())
+            code_cache: FixedCache::new(code_capacity, FbBuildHasher::<20>::default())
                 .with_stats(Some(Stats::new(code_stats.clone()))),
             storage_cache: FixedCache::new(storage_capacity, DefaultHashBuilder::default())
                 .with_stats(Some(Stats::new(storage_stats.clone()))),
@@ -739,11 +740,11 @@ impl ExecutionCache {
     /// Gets code from cache, or inserts using the provided function.
     pub fn get_or_try_insert_code_with<E>(
         &self,
-        hash: B256,
+        address: Address,
         f: impl FnOnce() -> Result<Option<Bytecode>, E>,
     ) -> Result<CachedStatus<Option<Bytecode>>, E> {
         let mut miss = false;
-        let result = self.0.code_cache.get_or_try_insert_with(hash, |_| {
+        let result = self.0.code_cache.get_or_try_insert_with(address, |_| {
             miss = true;
             f()
         })?;
@@ -799,9 +800,9 @@ impl ExecutionCache {
         self.0.storage_cache.insert((address, key), value.unwrap_or_default());
     }
 
-    /// Insert code into cache.
-    pub fn insert_code(&self, hash: B256, code: Option<Bytecode>) {
-        self.0.code_cache.insert(hash, code);
+    /// Insert code into cache (keyed by the deployed address).
+    pub fn insert_code(&self, address: Address, code: Option<Bytecode>) {
+        self.0.code_cache.insert(address, code);
     }
 
     /// Insert account into cache.
@@ -833,9 +834,14 @@ impl ExecutionCache {
         let _enter =
             debug_span!(target: "engine::tree", "contracts", len = state_updates.contracts.len())
                 .entered();
-        // Insert bytecodes
-        for (code_hash, bytecode) in &state_updates.contracts {
-            self.insert_code(*code_hash, Some(Bytecode(bytecode.clone())));
+        // Insert bytecodes — keyed by the deployed address (the bytecode store is
+        // address-keyed), so each code is reached through its account.
+        for (address, account) in &state_updates.state {
+            if let Some(info) = account.info.as_ref() &&
+                let Some(bytecode) = state_updates.contracts.get(&info.code_hash)
+            {
+                self.insert_code(*address, Some(Bytecode(bytecode.clone())));
+            }
         }
         drop(_enter);
 

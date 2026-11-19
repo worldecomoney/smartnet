@@ -57,6 +57,12 @@ impl LinkState {
         self.connected.load(Ordering::Acquire)
             || self.started.elapsed() < ws::RECONNECT_MAX
     }
+
+    /// A **live** connection — no grace window. What the status line reports as a
+    /// connected node.
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Debug)]
@@ -135,6 +141,18 @@ impl LinkPool {
 
     /// Drop links to peers no longer in `keep` — their tasks exit when the last sender
     /// (this map entry) goes away.
+    /// How many links hold a **live** connection right now — the status line's
+    /// "X nodes connected". A link still inside its first-connect grace does not
+    /// count: it has not proven a connection yet.
+    pub(crate) fn connected_count(&self) -> usize {
+        self.links
+            .lock()
+            .expect("link pool poisoned")
+            .values()
+            .filter(|link| link.state.is_connected())
+            .count()
+    }
+
     pub(crate) fn retain(&self, keep: &HashSet<(String, u16)>) {
         self.links.lock().expect("link pool poisoned").retain(|key, _| keep.contains(key));
     }

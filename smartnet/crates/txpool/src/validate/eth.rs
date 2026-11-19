@@ -604,7 +604,8 @@ where
         };
 
         // check for bytecode
-        match self.validate_sender_bytecode(&transaction, &account, &state) {
+        match self.validate_sender_bytecode(&transaction, transaction.sender_ref(), &account, &state)
+        {
             Err(outcome) => return outcome,
             Ok(Err(err)) => return TransactionValidationOutcome::Invalid(transaction, err),
             _ => {}
@@ -658,6 +659,7 @@ where
     pub fn validate_sender_bytecode(
         &self,
         transaction: &Tx,
+        sender_address: &Address,
         sender: &Account,
         state: impl BytecodeReader,
     ) -> Result<Result<(), InvalidPoolTransactionError>, TransactionValidationOutcome<Tx>> {
@@ -667,9 +669,9 @@ where
         //
         // Any other case means that the account is not an EOA, and should not be able to send
         // transactions.
-        if let Some(code_hash) = &sender.bytecode_hash {
+        if sender.bytecode_hash.is_some() {
             let is_eip7702 = if self.fork_tracker.is_prague_activated() {
-                match state.bytecode_by_hash(code_hash) {
+                match state.code_by_address(sender_address) {
                     Ok(bytecode) => bytecode.unwrap_or_default().is_eip7702(),
                     Err(err) => {
                         return Err(TransactionValidationOutcome::Error(

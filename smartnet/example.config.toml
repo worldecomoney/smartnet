@@ -1,22 +1,26 @@
 # SmartNet node operator config.
-# Canonical runtime location: ~/.smartnet/node/config.toml
+# Canonical runtime location: ~/.smartnet/config.toml
 # Override with: smartnet --config /path/to/config.toml
 #
-# Every key needed to boot is REQUIRED. This file ships with working values for the current
-# chain, so it starts as-is. The Rust code has NO built-in defaults: every value comes from
-# this file, and a missing key, an empty value, an unparseable value, or a failed sanity
-# check aborts startup with an error that lists all problems at once and names the key.
-# Review every value below for your deployment before running.
+# Required keys (a missing/empty/unparseable value aborts startup with an error that lists
+# all problems at once and names the key): DATADIR_PATH, HTTP_PORT, HTTP_ADDR,
+# CROSS_BLOCK_CACHE_SIZE, MESH_PORT, MESH_ADDR,
+# GPO_DEFAULT_SUGGESTED_FEE — plus the validator-section keys listed below when SEAL = true.
+# Everything else is optional and carries its documented default. This file ships complete
+# values for the current chain, so it boots as-is once the keystore exists: run
+# `smartnet keystore --key <keyfile> --password <pwfile>` once before the first boot
+# (it writes the encrypted keystore into `KEY_PATH` — ANY filename. Boot GATHERS the
+# single file sitting there: exactly one file, or the node refuses to start. The mesh
+# identity loads from that same keystore). Review every value for your deployment.
 # The MESH_* keys are REQUIRED — the mesh is always on, so MESH_PORT (>= 1024) and
 # MESH_ADDR must be set and a bind failure aborts the boot. The RPC is the optional half
-# of the pair: it can be off while the mesh stays up. HEARTBEAT_MS below drives validator
+# of the pair: it can be off while the mesh stays up. NODE_HEARTBEAT below drives every
 # seal beats (production: keep it in the hundreds of ms — the mesh never waits on it).
-# DB_ENGINE is also optional
-# (absent = fjall); VERBOSITY is optional and ships commented.
+# DB_ENGINE is optional (absent = fjall); VERB is optional (absent = 1 = info).
 #
 # Nothing operator-specific lives in the Rust code: if it is a value, it is a key here.
 
-# Optional log verbosity rank (0-4): 0=off, 1=info, 2=debug, 3=warning, 4=errors.
+# Optional log verbosity rank (VERB, 0-3): 0=errors only, 1=info, 2=debug, 3=trace.
 # Emits the given level and everything more severe. Optional — leave blank for the default
 VERB = 1
 
@@ -24,62 +28,32 @@ VERB = 1
 # Absolute path to the chain data and runtime files. No default, no current-working-
 # directory resolution. `~` (and `~/…`) expand to $HOME when HOME is set; otherwise an
 # absolute path is required. Example uses the conventional ~/.smartnet location.
-# !!! Satys in here !!!
 DATADIR_PATH = "~/.smartnet/data"
 
-# Storage engine selector — the only engine knob, validated at startup:
-#   DB_ENGINE = "sqlite"   // engines: "sqlite", "redb", "fjall" (default)
-# Optional key — absent = "fjall". All engines are compiled into the shipped binary —
-# this key only selects at runtime. The config dictates the engine at every start: all
+# Storage engine selector — the only engine knob, validated at startup.
+# Optional key — absent = "fjall", and fjall is the ONLY engine: the historical
+# `sqlite`/`redb` names are rejected with a dedicated error (the shipped binary
+# compiles no other backend). The config dictates the engine at every start: all
 # chain data lives at `DATADIR_PATH/DB_ENGINE` (the engine directory is a child of
 # whatever DATADIR_PATH names), so switching this key on a restart starts the node
 # on the new engine's independent tree (fresh, if it has not been initialised yet) and
 # never touches the other engine's files. The SMARTNET_DB_BACKEND environment variable
 # overrides this key where it is honoured (test tiers).
-# REMOVAL candidate !!!
 # DB_ENGINE = "fjall"
 
 # --- engine -----------------------------------------------------------------
 # REQUIRED — cross-block execution cache size in MB. The allocation is pre-built by a
 # background thread at startup, so the first block after boot never waits on it; 0 is
 # rejected (there is no built-in default).
-# !!! Satys in here MB !!!
 CROSS_BLOCK_CACHE_SIZE = 128
 
-# OPTIONAL — master switch for the in-node RPC catch-up service (true/false), default
-# false. The service starts only when RPC_SYNC = true AND SYNC_PEERS is non-empty AND
-# SYNC_BATCH >= 1 AND SYNC_POLL_INTERVAL > 0; otherwise the catch-up loop is never
-# started. Everything else — mesh gossip, `smartnet import` (RLP), and all RPC
-# functionality — behaves identically either way (the sync code lives in its own crate
-# and runs as its own task).
-# !!! TMP, stays until mesh is fully functional, then removed, mesh uses it's own list of peers to sync
-RPC_SYNC = false
-
-# REQUIRED — JSON-RPC endpoints this node syncs from (temporary transport: RPC allow-list
-# sync, not a permanent design; there is no p2p sync yet). No built-in peer list exists.
-# `[]` means "sync from nobody": the node will not fetch anything and will only advance
-# from blocks submitted by validators via engine_newPayload. Only consulted when
-# RPC_SYNC = true.
-# !!! TMP, stays until mesh is fully functional, then removed, mesh uses it's own list of peers to sync
-SYNC_PEERS = [
-"https://rpc2.wemblockchain.com"
-]
-
-# REQUIRED — blocks fetched per batch round trip. `SYNC_BATCH = 0` means "no sync": the
-# catch-up service is not started at all, no peer is contacted, and the node only advances
-# from blocks validators submit via engine_newPayload. Must be >= 1 to sync.
-# !!! TMP, stays until mesh is fully functional, then removed, mesh uses it's own list of peers to sync
-SYNC_BATCH = 0
-
-# REQUIRED — seconds between catch-up passes. Only used when SYNC_BATCH >= 1; 0 is rejected
-# in that case (it would busy-loop). With SYNC_BATCH = 0 it is unused, so 0 is accepted here.
-# !!! TMP, stays until mesh is fully functional, then removed, mesh uses it's own list of peers to sync
-SYNC_POLL_INTERVAL = 3
+# REMOVED keys (now rejected at parse): RPC_SYNC, SYNC_PEERS, SYNC_BATCH and
+# SYNC_POLL_INTERVAL — node-to-node sync is MESH-ONLY. There is no catch-up loop to
+# switch on: the mesh carries blocks, `smartnet import` carries a whole chain.
 
 # --- RPC --------------------------------------------------------------------
 
 # Bind addresses and ports — no silent fallback to 127.0.0.1 / 0.0.0.0 / 8545
-# !!! Satys in here !!! but can be replaced with RPC_ADDR and RPC_PORT
 # RPC on/off switch (true|false). Absent = legacy behavior (HTTP_PORT/HTTP_ADDR enable RPC);
 # present = explicit, overrides the implicit port-derived switch.
 RPC_SERVER = true
@@ -111,12 +85,10 @@ GPO_DEFAULT_SUGGESTED_FEE = 238095238095
 # `port_range` in every peer's mainnet.jsonl — mesh self-identity is the listen port, so
 # every node needs its own distinct port. Mesh band is 41700-41999 (several nodes per box
 # = several ports, e.g. 41777/41811/41888).
-# !!! Satys in here !!!
 MESH_PORT = 41700
 
 # Mesh listen address — where the MESH_PORT listener binds. Required. "0.0.0.0" = all
 # interfaces; set a specific interface address to restrict the listener.
-# !!! Satys in here !!!
 MESH_ADDR = "0.0.0.0"
 
 # Mesh peer file — one JSON object per line, re-read on every spread (membership changes
@@ -130,27 +102,20 @@ MESH_PEERS_FILE = "~/.smartnet/mainnet.jsonl"
 # = 32 MB. 0 is rejected. It is a per-frame cap, not a total memory budget: the mesh holds
 # at most a bounded number of in-flight frames per connection (see the concurrency limits in
 # the code), so keep this in the tens of MB unless a single block truly needs more.
-# !!! Satys in here !!!
 #MESH_MAX_MSG_MB = 32
 
-# Mesh keepalive ping cadence, in ms: each idle link pings after ~half of this passes with
-# no outbound traffic. The shared silence bound (both ends declare a silent peer dead and
-# reconnect) derives as this + 300 ms, so a live connection always survives at least one
-# full ping period before either side gives up — no accidental drops on a healthy link.
-# Optional: unset = 500. 0 is rejected. Raise it on slow WAN links; keep it in the hundreds
-# of ms for block gossip (~1 block/s now, up to 10 blocks/s later).
-#MESH_HEARTBEAT = 500
+# THE node heartbeat — the ONE trigger hook: 1 HB to bind them all. Every service
+# attaches to it (validator seal beat when SEAL = true, bridge when BRIDGE = true, node
+# duties); there is no second HB and no per-service cadence key. Units are MILLISECONDS:
+# 500 is advised for a node and a validator alike (ships here at 500); a bridge may run
+# 2000; everything is adjustable. 0 is rejected. The mesh keepalive is separate — a
+# hardcoded liveness constant that only aims to keep the link alive.
+NODE_HEARTBEAT = 500
 
-# Validator heartbeat: on each beat the validator seals/checks its txpool first (only when
-# SEAL = true). Mesh links keep themselves alive (PING/PONG + reconnect) — no sweep here.
-# The mesh never waits on this value. Units are milliseconds, always: keep it in the low
-# hundreds of ms in production (this ships at 2000 only as a comfortable debug cadence).
-# Anything in the seconds/minutes range is too slow for production. 0 is rejected.
-# !!! Satys in here !!!
-HEARTBEAT_MS = 2000
-
-# REMOVED keys (now rejected at parse): MESH_HEARTBEAT_MS and VALIDATOR_HEARTBEAT_MS are gone.
-# The validator cadence is HEARTBEAT_MS above; the mesh keepalive is MESH_HEARTBEAT above.
+# REMOVED keys (now rejected at parse): MESH_HEARTBEAT_MS, VALIDATOR_HEARTBEAT_MS and
+# MESH_HEARTBEAT are gone — NODE_HEARTBEAT above is the single cadence key: the validator
+# reads that same value. The mesh keepalive is its own HARDCODED liveness constant — it is
+# not connected to `NODE_HEARTBEAT`; it only exists to keep the link alive.
 
 # --- VALIDATOR -------------------------------------------------------
 
@@ -178,22 +143,19 @@ MAX_NFT_PER_BLOCK = 2
 # `~/.smartnet/`, e.g. ~/.smartnet/validator/secure
 KEY_PATH = "~/.smartnet/keystore"
 
-# Keystore filename under KEY_PATH. Written by `smartnet-validator keystore`; `""` means
-# "not initialized yet" (explicitly allowed — the seal path refuses to start while empty
-# and never generates a key for you).
-KEY_FILE = "UTC--2026-10-17T09-54-17.158609342Z--55155936e45eaa889ec5acfd0e895622e803afcb"
-
+# Keystore filename under KEY_PATH. Written by `smartnet keystore --key … --password …`;
+# The keystore lives in `KEY_PATH` under ANY filename — nothing here names it: boot
+# gathers the single file in that directory and refuses to start unless there is exactly
+# one (never generates a key for you). Create it before the first boot:
+#   smartnet keystore --key <private-key-file> --password <password-file>
 # File read for the keystore password. `""` means "prompt on the terminal" (no built-in
 # password path exists in the code). When set, use a path under `~/.smartnet/`,
-# e.g. ~/.smartnet/validator/secure/password.txt (`~` expands to $HOME).
+# e.g. ~/.smartnet/pw.txt (`~` expands to $HOME). The headless mesh-identity load
+# requires a password file — an interactive prompt is not available at boot.
 PASSWORD_FILE = "~/.smartnet/pw.txt"
 
-# REQUIRED — the node RPC endpoint this validator seals against. No built-in endpoint
-# exists: left empty, startup fails with a clear error.
-#NODE_URL = "http://127.0.0.1:8545"
-
 # Fee receiver for sealed blocks. Replace with your own address; zero address is rejected.
-#COINBASE = "0x55155936e45eaa889ec5acfd0e895622e803afcb"
+#COINBASE = "0x<your-validator-address>"
 
 # --- txpool tx lifetimes (TTL-POOL.md) --------------------------------------
 # QUEUED (future-nonce) txs expire after this many seconds: the pool maintenance sweep
@@ -222,13 +184,9 @@ RPC_BATCH_HEAVY_TX_MAX = 16
 RPC_BATCH_HEAVY_MAX = 1
 RPC_BATCH_READ_MAX = 1024
 
-# Timeout applied to every JSON-RPC request this validator sends (milliseconds). 0 is
-# rejected. Guidance for a healthy local node: 30000.
-#RPC_TIMEOUT_MS = 30000
-
-# --- seed-tx (`smartnet-validator seed-tx`) ----------------------------------
+# --- seed-tx (`smartnet seed-tx`) --------------------------------------------
 # Recipient of the seed transfer. Zero address is rejected.
-#SEED_TX_TO = "0x55155936e45eaa889ec5acfd0e895622e803afcb"
+#SEED_TX_TO = "0x<recipient-address>"
 # Amount in wei. 0 is rejected. Guidance for a test transfer: 1000000000000000 (0.001 ETH).
 #SEED_TX_VALUE_WEI = 1000000000000000
 # Gas limit of the seed transfer. 0 is rejected. A plain transfer needs 21000.

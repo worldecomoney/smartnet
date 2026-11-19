@@ -110,6 +110,10 @@ pub use quanta::Instant as FastInstant;
 pub mod constants;
 pub use constants::gas_units::{format_gas, format_gas_throughput};
 
+/// ERC-20 token metadata captured at ingest, written beside the runtime bytecode.
+pub mod token_meta;
+pub use token_meta::TokenMeta;
+
 /// Minimal account
 pub mod account;
 pub use account::{Account, Bytecode};
@@ -151,6 +155,10 @@ mod log;
 pub use alloy_primitives::{logs_bloom, Log, LogData};
 
 pub mod proofs;
+/// One place for hex strings: `0x…` added **once**, removed **once** (std-only —
+/// it returns `String`).
+#[cfg(feature = "std")]
+pub mod hexfmt;
 
 mod storage;
 pub use storage::{StorageEntry, ValueWithSubKey};

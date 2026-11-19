@@ -520,6 +520,20 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
                     write_storage_changesets: true,
                 },
             )?;
+
+            // Token metadata beside the runtime bytecodes it belongs to: probed at
+            // execution (import/sync) and carried on the block, written here the same way
+            // the `{hash}` file is — `{hash}.meta`, write-once.
+            if let Some(base) = self.file_tier_base {
+                for (address, meta) in block.token_meta() {
+                    smartnet_file_tier::write_bytecode_meta(base, address, meta)
+                        .map_err(ProviderError::other)?;
+                    // The holders stub beside it — seeded with the owner, no amounts;
+                    // an external hourly cron script owns the file afterwards.
+                    smartnet_file_tier::write_holders_stub(base, address, meta.owner)
+                        .map_err(ProviderError::other)?;
+                }
+            }
         }
 
         let merged_hashed_state = HashedPostStateSorted::merge_batch(
@@ -582,28 +596,32 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
         Ok(())
     }
 
-    /// Writes bytecodes to their 6C home: content-addressed files when the file tier is
+    /// Writes bytecodes to their 6C home: per-address files when the file tier is
     /// enabled, the `Bytecodes` table otherwise (tier-disabled test mode only).
     ///
     /// With the file tier enabled this is a *move* (spec §7: Fjall does not hold runtime
-    /// bytecode): each code is written once to `bytecodes/{aa}/{bb}/{hash}` — raw bytes,
-    /// no transcoding — ahead of the caller's transaction commit, so a crash leaves at
-    /// most an orphan file, never a committed account whose code exists nowhere. There is
-    /// **no fallback and no dupe**: when the tier is enabled the table is never written,
-    /// and the readers never consult it (operator rule: bytecode is FS-only).
+    /// bytecode): each contract's code is written once to
+    /// `bytecodes/{a[0..3]}/{a[3..6]}/{a[6..9]}/{a[9..]}` — raw bytes, no transcoding,
+    /// keyed by the **deployed address** (operator layout) — ahead of the caller's
+    /// transaction commit, so a crash leaves at most an orphan file, never a committed
+    /// account whose code exists nowhere. There is **no fallback**: when the tier is
+    /// enabled the table is never written, and the readers never consult it (operator
+    /// rule: bytecode is FS-only).
     fn write_bytecodes(
         &self,
-        bytecodes: impl IntoIterator<Item = (B256, Bytecode)>,
+        bytecodes: impl IntoIterator<Item = (Address, Bytecode)>,
     ) -> ProviderResult<()> {
         if let Some(base) = self.file_tier_base {
-            for (hash, bytecode) in bytecodes {
-                smartnet_file_tier::write_bytecode(base, &hash, bytecode.0.original_byte_slice())
+            for (address, bytecode) in bytecodes {
+                smartnet_file_tier::write_bytecode(base, &address, bytecode.0.original_byte_slice())
                     .map_err(ProviderError::other)?;
             }
             return Ok(());
         }
+        // Tier-disabled test mode: the table is hash-keyed and the only bytecode store.
         let mut bytecodes_cursor = self.tx_ref().cursor_write::<tables::Bytecodes>()?;
-        for (hash, bytecode) in bytecodes {
+        for (_address, bytecode) in bytecodes {
+            let hash = bytecode.hash_slow();
             bytecodes_cursor.upsert(hash, &bytecode)?;
         }
         Ok(())
@@ -2278,6 +2296,23 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
     }
 
     fn write_state_changes(&self, mut changes: StateChangeset) -> ProviderResult<()> {
+        // New code is keyed by the DEPLOYED ADDRESS (operator layout): join the changed
+        // accounts against the batch's code map before anything is consumed below.
+        let code_by_hash: B256Map<Bytecode> = changes
+            .contracts
+            .iter()
+            .map(|(hash, code)| (*hash, Bytecode(code.clone())))
+            .collect();
+        let new_bytecodes: Vec<(Address, Bytecode)> = changes
+            .accounts
+            .iter()
+            .filter_map(|(address, account)| {
+                let info = account.as_ref()?;
+                let code = code_by_hash.get(&info.code_hash)?;
+                Some((*address, code.clone()))
+            })
+            .collect();
+
         // sort all entries so they can be written to database in more performant way.
         // and take smaller memory footprint.
         changes.accounts.par_sort_by_key(|a| a.0);
@@ -2328,11 +2363,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             }
         }
 
-        // Write bytecode
-        tracing::trace!(len = changes.contracts.len(), "Writing bytecodes");
-        self.write_bytecodes(
-            changes.contracts.into_iter().map(|(hash, bytecode)| (hash, Bytecode(bytecode))),
-        )?;
+        // Write bytecode — one file per deployed address.
+        tracing::trace!(len = new_bytecodes.len(), "Writing bytecodes");
+        self.write_bytecodes(new_bytecodes)?;
 
         Ok(())
     }

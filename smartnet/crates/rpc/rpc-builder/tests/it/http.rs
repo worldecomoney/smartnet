@@ -1,7 +1,7 @@
 #![allow(unreachable_pub)]
 //! Standalone http tests
 
-use crate::utils::{launch_http, launch_http_ws, launch_ws};
+use crate::utils::launch_http;
 use alloy_primitives::{Address, Bytes, U256, U64};
 use alloy_rpc_types_eth::{
     Block, FeeHistory, Filter, Log, PendingTransactionFilterKind, SyncStatus, Transaction,
@@ -145,23 +145,6 @@ async fn test_call_net_functions_http() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_call_net_functions_ws() {
-    smartnet_tracing::init_test_tracing();
-
-    let handle = launch_ws(vec![SmartnetRpcModule::Net]).await;
-    let client = handle.ws_client().await.unwrap();
-    test_basic_net_calls(&client).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_call_net_functions_http_and_ws() {
-    smartnet_tracing::init_test_tracing();
-
-    let handle = launch_http_ws(vec![SmartnetRpcModule::Net]).await;
-    let client = handle.http_client().unwrap();
-    test_basic_net_calls(&client).await;
-}
-#[tokio::test(flavor = "multi_thread")]
 async fn test_call_web3_functions_http() {
     smartnet_tracing::init_test_tracing();
 
@@ -170,29 +153,12 @@ async fn test_call_web3_functions_http() {
     test_basic_web3_calls(&client).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_call_web3_functions_ws() {
-    smartnet_tracing::init_test_tracing();
-
-    let handle = launch_ws(vec![SmartnetRpcModule::Web3]).await;
-    let client = handle.ws_client().await.unwrap();
-    test_basic_web3_calls(&client).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_call_web3_functions_http_and_ws() {
-    smartnet_tracing::init_test_tracing();
-
-    let handle = launch_http_ws(vec![SmartnetRpcModule::Web3]).await;
-    let client = handle.http_client().unwrap();
-    test_basic_web3_calls(&client).await;
-}
 // <https://github.com/worldecomoney/smartnet/issues/5830>
 #[tokio::test(flavor = "multi_thread")]
 async fn test_eth_logs_args() {
     smartnet_tracing::init_test_tracing();
 
-    let handle = launch_http_ws(vec![SmartnetRpcModule::Eth]).await;
+    let handle = launch_http(vec![SmartnetRpcModule::Eth]).await;
     let client = handle.http_client().unwrap();
 
     let mut params = ArrayParams::default();

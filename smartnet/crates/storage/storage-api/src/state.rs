@@ -3,7 +3,6 @@ use super::{
     StorageRootProvider,
 };
 use alloc::boxed::Box;
-use alloy_consensus::constants::KECCAK_EMPTY;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{Address, BlockHash, BlockNumber, StorageKey, StorageValue, B256, U256};
 use auto_impl::auto_impl;
@@ -51,23 +50,9 @@ pub trait StateProvider:
     ///
     /// Returns `None` if the account doesn't exist or account is not a contract
     fn account_code(&self, addr: &Address) -> ProviderResult<Option<Bytecode>> {
-        // Get basic account information
-        // Returns None if acc doesn't exist
-        let acc = match self.basic_account(addr)? {
-            Some(acc) => acc,
-            None => return Ok(None),
-        };
-
-        if let Some(code_hash) = acc.bytecode_hash {
-            if code_hash == KECCAK_EMPTY {
-                return Ok(None);
-            }
-            // Get the code from the code hash
-            return self.bytecode_by_hash(&code_hash);
-        }
-
-        // Return `None` if no code hash is set
-        Ok(None)
+        // The bytecode store is keyed by the deployed address (operator layout), so the
+        // address is all the lookup needs.
+        self.code_by_address(addr)
     }
 
     /// Get account balance by its address.
@@ -101,11 +86,12 @@ pub trait HashedPostStateProvider {
     fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState;
 }
 
-/// Trait for reading bytecode associated with a given code hash.
+/// Trait for reading a contract's bytecode by its deployed address.
 #[auto_impl(&, Arc, Box)]
 pub trait BytecodeReader {
-    /// Get account code by its hash
-    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>>;
+    /// Get the contract's code by its deployed address — the bytecode store is keyed by
+    /// address (operator layout), so this is the one lookup it serves.
+    fn code_by_address(&self, address: &Address) -> ProviderResult<Option<Bytecode>>;
 }
 
 /// Trait implemented for database providers that can be converted into a historical state provider.

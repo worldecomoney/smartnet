@@ -18,7 +18,7 @@ use smartnet_config::config::PruneConfig;
 use smartnet_storage_api::{
     BlockHashReader, DatabaseProviderFactory, HeaderProvider, StageCheckpointReader,
 };
-use smartnet_storage_errors::provider::ProviderResult;
+use smartnet_storage_errors::provider::{ProviderError, ProviderResult};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -308,13 +308,17 @@ impl<ChainSpec> NodeConfig<ChainSpec> {
 
         let head = provider.get_stage_checkpoint(StageId::Finish)?.unwrap_or_default().block_number;
 
+        // A missing head row is corruption, not an option: surface it as the boot error
+        // the caller already wraps ("the head block is missing") instead of panicking.
         let header = provider
             .header_by_number(head)?
-            .expect("the header for the latest block is missing, database is corrupt");
+            .ok_or_else(|| ProviderError::HeaderNotFound(head.into()))?;
 
-        let hash = provider
-            .block_hash(head)?
-            .expect("the hash for the latest block is missing, database is corrupt");
+        let hash = provider.block_hash(head)?.ok_or_else(|| {
+            ProviderError::other(std::io::Error::other(format!(
+                "the hash for block #{head} is missing, database is corrupt"
+            )))
+        })?;
 
         Ok(Head {
             number: head,

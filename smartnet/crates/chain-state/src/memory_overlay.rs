@@ -231,14 +231,23 @@ impl<N: NodePrimitives> StateProvider for MemoryOverlayStateProviderRef<'_, N> {
 }
 
 impl<N: NodePrimitives> BytecodeReader for MemoryOverlayStateProviderRef<'_, N> {
-    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
+    fn code_by_address(&self, address: &Address) -> ProviderResult<Option<Bytecode>> {
         for block in self.in_memory.iter() {
-            if let Some(contract) = block.execution_output.bytecode(code_hash) {
+            // The in-memory bundle is hash-keyed internally — reach the code through the
+            // account's code hash, which the bundle also holds.
+            let state = &block.execution_output.state;
+            if let Some(code_hash) = state
+                .state
+                .get(address)
+                .and_then(|account| account.info.as_ref())
+                .map(|info| info.code_hash)
+                && let Some(contract) = block.execution_output.bytecode(&code_hash)
+            {
                 return Ok(Some(contract));
             }
         }
 
-        self.historical.bytecode_by_hash(code_hash)
+        self.historical.code_by_address(address)
     }
 }
 

@@ -1,0 +1,18 @@
+# Hardware limits for this repo — enforced for every workspace under this root
+# (root hook, smartnet/, calibri-lite/, tools/): cargo merges this file with the
+# per-workspace configs below it in the directory chain.
+#
+# This box has 56 cores / 31 GB RAM. cargo's default `jobs` = all cores, which
+# spawns up to 56 rustc processes at 1-4 GB each — far past physical RAM, so the
+# machine thrashes. Builds are capped at 2 parallel cores, and libtest's thread
+# pool (default = all cores) never exceeds 32 threads.
+#
+# Per-run override if ever needed: `cargo build -j <n>` (the ceiling is a policy,
+# not a technical lock).
+
+[build]
+jobs = 2
+
+[env]
+# libtest reads RUST_TEST_THREADS; `force = false` keeps an explicit export winning.
+RUST_TEST_THREADS = { value = "32", force = false }

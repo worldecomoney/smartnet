@@ -29,7 +29,7 @@ getrandom.workspace = true
 
 # Node identity keystore: encrypted Ethereum JSON v3 decrypt (the one shared loader).
 # `alloy-signer-local` provides `PrivateKeySigner::decrypt_keystore` (scrypt/AES-128-CTR),
-# same format geth and the validator's `smartnet-validator keystore` writer produce.
+# same format geth and the validator's `smartnet keystore` writer produce.
 alloy-signer-local = { workspace = true, features = ["keystore"] }
 eyre.workspace = true
 

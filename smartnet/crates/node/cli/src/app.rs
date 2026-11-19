@@ -15,8 +15,11 @@ use clap::Subcommand;
 use eyre::{eyre, Result};
 use smartnet_chainspec::{Chain, ChainSpec, EthChainSpec, EthereumHardforks, Hardforks};
 use smartnet_db::{open_db, DatabaseBackend, DatabaseEnv};
-use smartnet_node_api::NodePrimitives;
+use smartnet_provider::ProviderFactory;
+use smartnet_evm::eth::spec::{DisableBlockRewards, EthExecutorSpec};
+use smartnet_node_api::{NodePrimitives, NodeTypes, NodeTypesWithDBAdapter};
 use smartnet_node_builder::{NodeBuilder, WithLaunchContext};
+use smartnet_config::config::PruneConfig;
 use smartnet_node_core::args::DatabaseArgs;
 use smartnet_node_ethereum::{consensus::EthBeaconConsensus, EthEvmConfig, EthereumNode};
 use smartnet_rpc_server_types::RpcModuleValidator;
@@ -105,18 +108,6 @@ pub(crate) struct OperatorConfigOverlay {
     /// value at inclusion; signed-block import performs no checks. `0` disables the gate.
     min_to_txpool_entry: Option<u128>,
     default_suggested_fee: Option<U256>,
-    /// Master switch for the in-node RPC catch-up service (`RPC_SYNC`, optional key,
-    /// **default off**): the service starts only when this is `true` AND `SYNC_PEERS` is
-    /// non-empty AND `SYNC_BATCH >= 1` AND `SYNC_POLL_INTERVAL` is non-zero. Absent or
-    /// `false` = the catch-up loop is never started — mesh, RLP import, and the rest of
-    /// the RPC are completely unaffected either way.
-    rpc_sync: Option<bool>,
-    /// Raw endpoint strings; parsed into `Url`s when applied to the node command.
-    sync_peers: Option<Vec<String>>,
-    /// Number of blocks fetched per batch round trip (`SYNC_BATCH`, required key).
-    sync_batch: Option<u64>,
-    /// Seconds between sync poll cycles (`SYNC_POLL_INTERVAL`, required key).
-    sync_poll_interval: Option<u64>,
     /// Mesh gossip listen port (`MESH_PORT`, optional key): `0`/unset = mesh off.
     mesh_port: Option<u16>,
     /// Mesh listen address (`MESH_ADDR`, optional key): absent = `0.0.0.0` (all interfaces).
@@ -126,11 +117,10 @@ pub(crate) struct OperatorConfigOverlay {
     /// Max mesh `WebSocket` message size in MB (`MESH_MAX_MSG_MB`, optional key).
     /// Unset = 32 MB; `0` is rejected.
     mesh_max_msg_mb: Option<usize>,
-    /// Mesh keepalive ping cadence in ms (`MESH_HEARTBEAT`, optional key).
-    /// Unset = 500 ms; `0` is rejected. Silence bound = this + 300 ms.
-    mesh_heartbeat_ms: Option<u64>,
-    /// Validator heartbeat (`HEARTBEAT_MS`, optional key): seal beats run at this cadence.
-    /// Unset = 2000 ms; `0` is rejected.
+    /// THE node heartbeat (`NODE_HEARTBEAT`, optional key): the ONE trigger hook every
+    /// service attaches to — validator seal beat, node duties (1 HB to bind them all).
+    /// Unset = 500 ms; `0` is rejected. The mesh keepalive is NOT this: it is its own
+    /// hardcoded liveness constant.
     heartbeat_ms: Option<u64>,
     /// Cross-block execution cache size in MB (`CROSS_BLOCK_CACHE_SIZE`, required key).
     cross_block_cache_size: Option<usize>,
@@ -181,20 +171,11 @@ where
         .map_err(|e| eyre::eyre!("config {key} has an invalid value {value:?}: {e}"))
 }
 
-fn parse_csv_list(input: &str) -> Vec<String> {
-    let trimmed = input.trim();
-    let body = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(trimmed);
-    body.split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| strip_quotes(s).to_string())
-        .collect()
-}
 
 /// Strip a trailing `#` comment from a raw config line.
 ///
 /// A `#` starts a comment only at the start of the line or preceded by whitespace, and only
-/// outside quotes — so `SYNC_PEERS = ["http://host/rpc#v1"]` and `KEY = "a#b"` survive while
+/// outside quotes — so `KEY = "http://host/rpc#v1"` and `KEY = "a#b"` survive while
 /// `KEY = value # comment` and whole-line `# comment` are cut. (The previous
 /// `line.split('#')` mangled any value containing `#`.)
 fn strip_comment(line: &str) -> &str {
@@ -271,7 +252,6 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
             "SEAL" |
                 "ALLOW_EMPTY" |
                 "KEY_PATH" |
-                "KEY_FILE" |
                 "PASSWORD_FILE" |
                 "VERB" |
                 "MAX_NATIVE_PER_BLOCK" |
@@ -300,16 +280,11 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
             "TXPOOL_QUEUED_TTL_SECS" => "TXPOOL_QUEUED_TTL_SECS",
             "TXPOOL_PENDING_TTL_SECS" => "TXPOOL_PENDING_TTL_SECS",
             "GPO_DEFAULT_SUGGESTED_FEE" => "GPO_DEFAULT_SUGGESTED_FEE",
-            "RPC_SYNC" => "RPC_SYNC",
-            "SYNC_PEERS" => "SYNC_PEERS",
-            "SYNC_BATCH" => "SYNC_BATCH",
-            "SYNC_POLL_INTERVAL" => "SYNC_POLL_INTERVAL",
             "MESH_PORT" => "MESH_PORT",
             "MESH_ADDR" => "MESH_ADDR",
             "MESH_PEERS_FILE" => "MESH_PEERS_FILE",
             "MESH_MAX_MSG_MB" => "MESH_MAX_MSG_MB",
-            "MESH_HEARTBEAT" => "MESH_HEARTBEAT",
-            "HEARTBEAT_MS" => "HEARTBEAT_MS",
+            "NODE_HEARTBEAT" => "NODE_HEARTBEAT",
             "CROSS_BLOCK_CACHE_SIZE" => "CROSS_BLOCK_CACHE_SIZE",
             "VERBOSITY" => "VERBOSITY",
             "DB_ENGINE" => "DB_ENGINE",
@@ -326,8 +301,7 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
         seen.push(name);
 
         // A key that is present but blank is a problem in its own right — there is no
-        // built-in default to fall back to. (`SYNC_PEERS = []` is not blank: `[]` is an
-        // explicit "nobody" and is accepted as-is.)
+        // built-in default to fall back to.
         if strip_quotes(value).trim().is_empty() {
             problems.push(format!(
                 "config `{name}` is empty — set a value (SmartNet ships no built-in default)"
@@ -367,23 +341,12 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
                 cfg.default_suggested_fee = Some(parse_key(name, value)?)
             }
             // Optional (default off): master switch for the in-node RPC catch-up service.
-            // Absent keeps every existing config booting with sync disabled — fail-closed,
-            // same pattern as RPC_MEMPOOL/RPC_NODEINFO.
-            "RPC_SYNC" => cfg.rpc_sync = Some(parse_key(name, value)?),
-            // Fixed allow-list of JSON-RPC sync peers (`SYNC_PEERS = ["http://host:8545", …]`).
-            // Admission by operator config only; block authenticity comes from seal
-            // validation at import, not from the peer. An explicit `[]` means "sync from
-            // nobody" — presence is what matters, there is no built-in peer list.
-            "SYNC_PEERS" => cfg.sync_peers = Some(parse_csv_list(value)),
-            "SYNC_BATCH" => cfg.sync_batch = Some(parse_key(name, value)?),
-            "SYNC_POLL_INTERVAL" => cfg.sync_poll_interval = Some(parse_key(name, value)?),
             // Optional mesh keys (absent = mesh off / protocol default). `MESH_PORT = 0`
             // is the explicit "no mesh listener" value and is deliberately not rejected.
             "MESH_PORT" => cfg.mesh_port = Some(parse_key(name, value)?),
             "MESH_ADDR" => cfg.mesh_addr = Some(parse_key(name, value)?),
             "MESH_MAX_MSG_MB" => cfg.mesh_max_msg_mb = Some(parse_key(name, value)?),
-            "MESH_HEARTBEAT" => cfg.mesh_heartbeat_ms = Some(parse_key(name, value)?),
-            "HEARTBEAT_MS" => cfg.heartbeat_ms = Some(parse_key(name, value)?),
+            "NODE_HEARTBEAT" => cfg.heartbeat_ms = Some(parse_key(name, value)?),
             "MESH_PEERS_FILE" => match expand_home(strip_quotes(value)) {
                 Ok(path) => cfg.mesh_peers_file = Some(path),
                 // Collected (not `?`): a `~` with HOME unset must join the full problem
@@ -427,9 +390,6 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
         "HTTP_PORT",
         "HTTP_ADDR",
         "GPO_DEFAULT_SUGGESTED_FEE",
-        "SYNC_PEERS",
-        "SYNC_BATCH",
-        "SYNC_POLL_INTERVAL",
         "CROSS_BLOCK_CACHE_SIZE",
         "MESH_PORT",
         "MESH_ADDR",
@@ -467,24 +427,6 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
                     .to_string(),
             );
         }
-    // `RPC_SYNC` (default off) is the master switch: without it the catch-up service can
-    // never start, so the busy-loop check below only applies when sync can actually run.
-    // `SYNC_BATCH = 0` is the operator's explicit "do not sync" switch on top of that
-    // (same idea as `SYNC_PEERS = []`): it is accepted, and `spawn_rpc_sync_service` never
-    // starts the catch-up loop. The node then advances only from blocks validators submit
-    // via `engine_newPayload`. `RPC_SYNC` itself is optional (absent = off); `SYNC_BATCH`
-    // and `SYNC_POLL_INTERVAL` remain required — 0 is a value, not an absence.
-    // The poll interval only matters while sync is enabled; a 0 there would busy-loop.
-    if cfg.rpc_sync.unwrap_or(false) &&
-        cfg.sync_batch != Some(0) &&
-        cfg.sync_poll_interval == Some(0)
-    {
-        problems.push(
-            "SYNC_POLL_INTERVAL is 0 — would busy-loop (set SYNC_BATCH = 0 or RPC_SYNC = false \
-             to switch sync off)"
-                .to_string(),
-        );
-    }
     // The mesh is always on: `MESH_PORT` and `MESH_ADDR` are required and the port must be
     // a reachable one (>= 1024). The RPC is the optional half of the pair — it can be off
     // while the mesh stays up (injection is in-process, no socket). The listener port must
@@ -492,20 +434,14 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
     // cwd-relative path would silently change meaning with the launch directory.
     if cfg.heartbeat_ms == Some(0) {
         problems.push(
-            "HEARTBEAT_MS is 0 — must be at least 1 (it drives the validator seal beats)"
+            "NODE_HEARTBEAT is 0 — must be at least 1 (it is the ONE node cadence: \
+             validator seal beat and every other hooked service)"
                 .to_string(),
         );
     }
     if cfg.mesh_max_msg_mb == Some(0) {
         problems.push(
             "MESH_MAX_MSG_MB is 0 — must be at least 1 (it is the per-frame size cap in MB)"
-                .to_string(),
-        );
-    }
-    if cfg.mesh_heartbeat_ms == Some(0) {
-        problems.push(
-            "MESH_HEARTBEAT is 0 — must be at least 1 (it is the mesh keepalive ping \
-             cadence in ms; the silence bound derives as it + 300 ms)"
                 .to_string(),
         );
     }
@@ -685,9 +621,13 @@ where
         ) -> Result<()>,
     ) -> Result<()>
     where
-        N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>,
+        N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>
+
+        // The RLP import decodes and writes the Ethereum shapes this CLI ships with —
+        // the chain file holds `smartnet_ethereum_primitives::Block` and nothing else.
+        + NodeTypes<Primitives = smartnet_ethereum_primitives::EthPrimitives>,
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
-        C::ChainSpec: EthChainSpec,
+        C::ChainSpec: EthChainSpec + DisableBlockRewards + EthExecutorSpec,
     {
         let runner = match self.runner.take() {
             Some(runner) => runner,
@@ -736,9 +676,13 @@ where
     C: ChainSpecParser<ChainSpec = N::ChainSpec>,
     Ext: clap::Args + fmt::Debug + Default,
     Rpc: RpcModuleValidator,
-    N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>,
+    N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>
+
+    // The RLP import decodes and writes the Ethereum shapes this CLI ships with — the
+    // chain file holds `smartnet_ethereum_primitives::Block` and nothing else.
+    + NodeTypes<Primitives = smartnet_ethereum_primitives::EthPrimitives>,
     SubCmd: ExtendedCommand + Subcommand + fmt::Debug,
-    N::ChainSpec: EthChainSpec + EthereumHardforks,
+    N::ChainSpec: EthChainSpec + EthereumHardforks + DisableBlockRewards + EthExecutorSpec,
 {
     match cli.command {
         Some(Commands::Init(command)) => {
@@ -795,8 +739,8 @@ where
                 std::process::exit(6);
             };
             let chain = C::smartnet_chain_spec_from_db(db_genesis)?;
-            let datadir_args = operator_datadir_args(datadir);
-            let mut node_cmd = operator_default_node_command::<C, Ext>(cfg_path, chain);
+            let datadir_args = operator_datadir_args(datadir.clone());
+            let mut node_cmd = operator_default_node_command::<C, Ext>(cfg_path, chain.clone());
             node_cmd.db.engine = overlay.db_engine.unwrap_or_default();
             // NO VALIDATOR in import: clear the launch flag — the heartbeat task is
             // never spawned and the config's validator section is not read at all.
@@ -804,9 +748,8 @@ where
             // The mesh is always on: `mesh_gate` refuses to boot without `MESH_PORT` and
             // its identity reads the operator config file, so the mesh keys are stamped
             // exactly like a node run and `node_cmd.config` stays as the constructor set
-            // it (`Some(cfg_path)`). The sync service stays off — `SYNC_PEERS` is never
-            // stamped, so `sync_gate` logs "not started" and no peer traffic competes
-            // with the file stream. HTTP and every RPC quoting/gating knob stay off too:
+            // it (`Some(cfg_path)`). There is no catch-up loop at all any more (RPC
+            // sync is gone), and HTTP plus every RPC quoting/gating knob stays off too:
             // nothing submits transactions while importing; the launcher runs the import
             // loop after boot and the runner shuts the node down when it returns.
             if let Some(v) = overlay.mesh_port {
@@ -821,25 +764,71 @@ where
             if let Some(v) = overlay.mesh_max_msg_mb {
                 node_cmd.rpc.mesh_max_msg_mb = Some(v);
             }
-            if let Some(v) = overlay.mesh_heartbeat_ms {
-                node_cmd.rpc.mesh_heartbeat_ms = Some(v);
-            }
             if let Some(v) = overlay.cross_block_cache_size {
                 node_cmd.engine.cross_block_cache_size = v;
             }
-            // Batched persistence for import. The network default persists every
-            // canonical block (threshold 0): one Fjall commit per block on the import
-            // hot path (the fsync-dominated cost that made import ~10x slower than
-            // geth's batched commits) and the in-memory copy of the parent is pruned
-            // the moment it lands — the transient window behind the `Syncing` stop.
-            // Import loses nothing by batching: the chain file is the source of truth
-            // and a re-run resumes from the DB tip, so up to `persistence_threshold`
-            // accepted blocks may safely ride in memory. `memory_block_buffer_target`
-            // 0 persists up to the head when triggered, i.e. batch = threshold.
-            node_cmd.engine.persistence_threshold = 4096;
+            // NO persistence batching for import (operator order): the engine default
+            // `persistence_threshold = 0` saves every accepted block before the next
+            // one is processed — so the filesystem is never thousands of blocks behind
+            // the report, an interrupt has nothing to catch up on, and the import line
+            // is literally line-by-line final. The overrides that made the report run
+            // ahead of disk (4096, then a 64-block trim) are gone.
+            // `memory_block_buffer_target` 0 keeps the save target at the head.
             node_cmd.engine.persistence_backpressure_threshold = 5120; // validate(): > threshold
             node_cmd.engine.memory_block_buffer_target = 0;
+            let runtime = runner.runtime();
             runner.run_command_until_exit(move |ctx| async move {
+                // THE IMPORT RUNS FIRST, against the bare database: no engine, no mesh,
+                // no heartbeat exists yet, so the chain file is the only writer and the
+                // sequence is exactly import → mesh → mesh sync → RPC (user-in.md).
+                let completed = {
+                    let db_args = DatabaseArgs {
+                        engine: overlay.db_engine.unwrap_or_default(),
+                        ..DatabaseArgs::default()
+                    };
+                    let db_path = {
+                        let mut args = operator_datadir_args(datadir.clone());
+                        args.engine = db_args.engine;
+                        args.resolve_datadir(Chain::mainnet()).db()
+                    };
+                    let db = open_db(&db_path, db_args.database_args())?;
+                    let factory: ProviderFactory<NodeTypesWithDBAdapter<N, DatabaseEnv>> =
+                        ProviderFactory::new(db, chain.clone(), None, runtime)?;
+                    let base = smartnet_file_tier::base()
+                        .ok_or_else(|| eyre!("file tier base is not set — run `smartnet init`"))?
+                        .to_path_buf();
+                    // The changeset window the engine will trim with: the operator's key
+                    // if set, otherwise the shipped default — same number either way.
+                    let window = node_cmd
+                        .pruning
+                        .changeset_window
+                        .unwrap_or_else(|| PruneConfig::default().changeset_window);
+                    let evm = EthEvmConfig::new(chain.clone());
+                    // On the BLOCKING pool, not inline: `run_until_ctrl_c` selects the
+                    // command future against `tokio::signal::ctrl_c()` on this same
+                    // task, so a synchronous import here would swallow every ^C — the
+                    // signal future never gets polled again until the import is over
+                    // (observed: `^C^C^C` while ranges kept landing). Awaiting a
+                    // blocking task yields immediately, the select sees the signal,
+                    // `drain::request_exit()` flips, and the import stops at its next
+                    // block boundary — the database handle is dropped inside the
+                    // closure, so it is gone before the node opens the database.
+                    tokio::task::spawn_blocking(move || {
+                        smartnet_node_ethereum::import::run_import(
+                            &factory,
+                            &evm,
+                            base,
+                            window,
+                            &file,
+                        )
+                    })
+                    .await??
+                };
+                if !completed {
+                    // ctrl-c during the import: every committed range is on disk and
+                    // SHUTDOWN_CLEAN is written — shut down instead of booting on top.
+                    return Ok(());
+                }
                 let wrapped = FnLauncher::new::<C, Ext>(launcher);
                 node_cmd.execute(ctx, datadir_args, wrapped).await
             })?;
@@ -970,27 +959,8 @@ where
                     fixed_gas_price_wei = SMARTNET_FIXED_GAS_PRICE_WEI,
                     "GPO_DEFAULT_SUGGESTED_FEE is not set: fee quotes fall back to the protocol constant \
                      SMARTNET_FIXED_GAS_PRICE_WEI, so quoting stays correct; pin it explicitly \
-                     (~/.smartnet/node/config.toml) so the node's configured price is auditable."
+                     (~/.smartnet/config.toml) so the node's configured price is auditable."
                 );
-            }
-            // Master switch (absent = off): without it the catch-up service never starts,
-            // so the SYNC_* keys below stay inert on an unedited/older config.
-            node_cmd.rpc.rpc_sync = overlay.rpc_sync;
-            if let Some(v) = overlay.sync_peers {
-                // Parse here (not during overlay load) so the overlay holds plain strings.
-                let parsed = v
-                    .into_iter()
-                    .map(|p| {
-                        p.parse().map_err(|e| eyre::eyre!("invalid SYNC_PEERS entry {p:?}: {e}"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                node_cmd.rpc.sync_peers = Some(parsed);
-            }
-            if let Some(v) = overlay.sync_batch {
-                node_cmd.rpc.sync_batch = Some(v);
-            }
-            if let Some(v) = overlay.sync_poll_interval {
-                node_cmd.rpc.sync_poll_interval = Some(v);
             }
             // Optional: absent = mesh off (`spawn_mesh_service` is never called).
             if let Some(v) = overlay.mesh_port {
@@ -1004,9 +974,6 @@ where
             }
             if let Some(v) = overlay.mesh_max_msg_mb {
                 node_cmd.rpc.mesh_max_msg_mb = Some(v);
-            }
-            if let Some(v) = overlay.mesh_heartbeat_ms {
-                node_cmd.rpc.mesh_heartbeat_ms = Some(v);
             }
             if let Some(v) = overlay.heartbeat_ms {
                 node_cmd.rpc.heartbeat_ms = Some(v);
@@ -1029,13 +996,13 @@ where
 /// how they should be executed.
 pub trait ExtendedCommand {
     /// Execute the extension command with the provided CLI runner and the resolved
-    /// operator-config path (`--config` or the default `~/.smartnet/node/config.toml`).
+    /// operator-config path (`--config` or the default `~/.smartnet/config.toml`).
     fn execute(self, runner: CliRunner, cfg_path: PathBuf) -> Result<()>;
 }
 
 /// Tests touch **only** the shipped template `smartnet/example.config.toml`, and only by
 /// reading it. A config file is never written by a test: the template is the single config
-/// source, `make install` copies it to `~/.smartnet/node/config.toml`, and that installed
+/// source, `make install` copies it to `~/.smartnet/config.toml`, and that installed
 /// copy is the only config the node ever reads.
 #[cfg(test)]
 mod tests {
@@ -1134,17 +1101,12 @@ mod tests {
             "HTTP_ADDR",
             "RPC_SERVER",
                 "GPO_DEFAULT_SUGGESTED_FEE",
-            "RPC_SYNC",
-            "SYNC_PEERS",
-            "SYNC_BATCH",
-            "SYNC_POLL_INTERVAL",
             "CROSS_BLOCK_CACHE_SIZE",
             "MESH_PORT",
             "MESH_ADDR",
             "MESH_PEERS_FILE",
             "MESH_MAX_MSG_MB",
-            "MESH_HEARTBEAT",
-            "HEARTBEAT_MS",
+            "NODE_HEARTBEAT",
             "RPC_MEMPOOL",
             "RPC_NODEINFO",
             "MIN_TO_TXPOOL_ENTRY",
@@ -1209,9 +1171,16 @@ mod tests {
         let raw = std::fs::read_to_string(&template).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("heartbeat-zero.toml");
-        std::fs::write(&path, raw.replace("HEARTBEAT_MS = 2000", "HEARTBEAT_MS = 0")).unwrap();
-        let err = load_operator_overlay(&path).expect_err("HEARTBEAT_MS = 0 must be rejected");
-        assert!(format!("{err:?}").contains("HEARTBEAT_MS"), "got: {err:?}");
+        // Patch by key prefix (not by the current template value) so a template cadence
+        // change can never silently skip this test.
+        let patched = raw
+            .lines()
+            .map(|l| if l.starts_with("NODE_HEARTBEAT =") { "NODE_HEARTBEAT = 0" } else { l })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, patched).unwrap();
+        let err = load_operator_overlay(&path).expect_err("NODE_HEARTBEAT = 0 must be rejected");
+        assert!(format!("{err:?}").contains("NODE_HEARTBEAT"), "got: {err:?}");
     }
 
     /// `MESH_MAX_MSG_MB` is optional (unset = the 32 MB protocol default) but a present
@@ -1235,24 +1204,18 @@ mod tests {
         assert_eq!(cfg.mesh_max_msg_mb, Some(64));
     }
 
-    /// `MESH_HEARTBEAT` is optional (unset = the 500 ms default) but a present value must
-    /// be a positive millisecond count — `0` would collapse the keepalive/silence timers.
+    /// `MESH_HEARTBEAT` is retired (user-in #1): the mesh keepalive now derives from the
+    /// NODE's `NODE_HEARTBEAT`, so the old key is an unknown key — fail-closed, named.
     #[test]
-    fn mesh_heartbeat_zero_is_rejected() {
+    fn mesh_heartbeat_key_is_retired() {
         let template =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../example.config.toml");
         let raw = std::fs::read_to_string(&template).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mesh-heartbeat-zero.toml");
-        std::fs::write(&path, format!("{raw}\nMESH_HEARTBEAT = 0\n")).unwrap();
-        let err = load_operator_overlay(&path).expect_err("MESH_HEARTBEAT = 0 must be rejected");
-        assert!(format!("{err:?}").contains("MESH_HEARTBEAT"), "got: {err:?}");
-
-        // A sane value parses through as a millisecond count.
-        let path = dir.path().join("mesh-heartbeat-ok.toml");
+        let path = dir.path().join("mesh-heartbeat-retired.toml");
         std::fs::write(&path, format!("{raw}\nMESH_HEARTBEAT = 250\n")).unwrap();
-        let cfg = load_operator_overlay(&path).expect("MESH_HEARTBEAT = 250 must boot");
-        assert_eq!(cfg.mesh_heartbeat_ms, Some(250));
+        let err = load_operator_overlay(&path).expect_err("the retired key must be rejected");
+        assert!(format!("{err:?}").contains("MESH_HEARTBEAT"), "got: {err:?}");
     }
 
     /// `RPC_MEMPOOL` and `RPC_NODEINFO` are optional: when absent the overlay stays `None` and
@@ -1279,68 +1242,4 @@ mod tests {
         assert!(cfg.nodeinfo.is_none(), "RPC_NODEINFO is optional");
     }
 
-    /// `RPC_SYNC` is the master switch for the in-node catch-up service: optional (absent =
-    /// off, so older configs keep booting with sync disabled), `true`/`false` parse, and
-    /// anything else is a hard config error naming the key.
-    #[test]
-    fn rpc_sync_is_optional_defaults_off_and_parses() {
-        let template =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../example.config.toml");
-        let raw = std::fs::read_to_string(&template).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-
-        // Absent → `None` (the command path reads that as false): sync stays off while the
-        // SYNC_* keys keep parsing, so removing only the master switch still boots.
-        let filtered: String = raw
-            .lines()
-            .filter(|line| !strip_comment(line).trim().starts_with("RPC_SYNC"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let path = dir.path().join("no-rpc-sync.toml");
-        std::fs::write(&path, filtered).unwrap();
-        let cfg = load_operator_overlay(&path).expect("RPC_SYNC is optional and must boot");
-        assert!(cfg.rpc_sync.is_none(), "RPC_SYNC absent must stay None (read as off)");
-        assert!(cfg.sync_batch.is_some(), "the SYNC_* keys must still parse");
-
-        // Explicit `true` flips the master switch on.
-        let path = dir.path().join("rpc-sync-on.toml");
-        std::fs::write(&path, raw.replace("RPC_SYNC = false", "RPC_SYNC = true")).unwrap();
-        let cfg = load_operator_overlay(&path).expect("RPC_SYNC = true must boot");
-        assert_eq!(cfg.rpc_sync, Some(true), "RPC_SYNC = true must parse");
-
-        // Anything else is a hard error naming the key (fail-closed, no silent default).
-        let path = dir.path().join("rpc-sync-bad.toml");
-        std::fs::write(&path, raw.replace("RPC_SYNC = false", "RPC_SYNC = maybe")).unwrap();
-        let err = load_operator_overlay(&path).expect_err("RPC_SYNC must be true or false");
-        assert!(format!("{err:?}").contains("RPC_SYNC"), "error must name the key: {err:?}");
-    }
-
-    /// With `RPC_SYNC = true` the busy-loop guard is armed again: `SYNC_POLL_INTERVAL = 0`
-    /// alongside `SYNC_BATCH >= 1` aborts startup. With the master switch off (the default)
-    /// the same config boots — sync can never run, so the interval is irrelevant.
-    #[test]
-    fn zero_poll_interval_is_rejected_only_while_rpc_sync_is_on() {
-        let template =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../example.config.toml");
-        let raw = std::fs::read_to_string(&template).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-
-        // Template ships SYNC_BATCH = 0, so arm the switch with a batch that would loop.
-        let armed = raw
-            .replace("RPC_SYNC = false", "RPC_SYNC = true")
-            .replace("SYNC_BATCH = 0", "SYNC_BATCH = 4")
-            .replace("SYNC_POLL_INTERVAL = 3", "SYNC_POLL_INTERVAL = 0");
-        let path = dir.path().join("sync-loop.toml");
-        std::fs::write(&path, &armed).unwrap();
-        let err = load_operator_overlay(&path)
-            .expect_err("SYNC_POLL_INTERVAL = 0 with RPC_SYNC = true must be rejected");
-        assert!(format!("{err:?}").contains("SYNC_POLL_INTERVAL"), "got: {err:?}");
-
-        // Same values with the master switch off: booting is fine, sync stays dark.
-        let path = dir.path().join("sync-loop-off.toml");
-        std::fs::write(&path, armed.replace("RPC_SYNC = true", "RPC_SYNC = false")).unwrap();
-        let cfg =
-            load_operator_overlay(&path).expect("with RPC_SYNC = false the poll interval is inert");
-        assert_eq!(cfg.rpc_sync, Some(false));
-    }
 }

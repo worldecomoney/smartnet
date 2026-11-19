@@ -6,13 +6,13 @@ use crate::{
 };
 use alloy_consensus::{transaction::TransactionMeta, BlockHeader};
 use alloy_eips::{BlockHashOrNumber, BlockNumHash};
-use alloy_primitives::{map::B256Map, BlockNumber, TxHash, B256};
+use alloy_primitives::{map::B256Map, Address, BlockNumber, TxHash, B256};
 use parking_lot::RwLock;
 use smartnet_ethereum_primitives::EthPrimitives;
 use smartnet_execution_types::{BlockExecutionOutput, BlockExecutionResult, Chain, ExecutionOutcome};
 use smartnet_primitives_traits::{
     BlockBody as _, IndexedTx, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
-    SignedTransaction,
+    SignedTransaction, TokenMeta,
 };
 use smartnet_trie::{
     updates::TrieUpdatesSorted, HashedPostStateSorted, LazyTrieData, SortedTrieData,
@@ -755,6 +755,11 @@ pub struct ExecutedBlock<N: NodePrimitives = EthPrimitives> {
     /// This allows deferring the computation of the trie data which can be expensive.
     /// The data can be populated asynchronously after the block was validated.
     pub trie_data: DeferredTrieData,
+    /// Token metadata captured while executing this block (`name` / `symbol` /
+    /// `decimals` of token contracts it introduced), keyed by deployed address —
+    /// written beside the block's runtime bytecodes at commit (`{address}.meta` next
+    /// to `{address}`).
+    pub token_meta: Vec<(Address, TokenMeta)>,
 }
 
 impl<N: NodePrimitives> Default for ExecutedBlock<N> {
@@ -771,6 +776,7 @@ impl<N: NodePrimitives> Default for ExecutedBlock<N> {
                 state: Default::default(),
             }),
             trie_data: DeferredTrieData::ready(ComputedTrieData::default()),
+            token_meta: Vec::new(),
         }
     }
 }
@@ -793,7 +799,12 @@ impl<N: NodePrimitives> ExecutedBlock<N> {
         execution_output: Arc<BlockExecutionOutput<N::Receipt>>,
         trie_data: ComputedTrieData,
     ) -> Self {
-        Self { recovered_block, execution_output, trie_data: DeferredTrieData::ready(trie_data) }
+        Self {
+            recovered_block,
+            execution_output,
+            trie_data: DeferredTrieData::ready(trie_data),
+            token_meta: Vec::new(),
+        }
     }
 
     /// Create a new [`ExecutedBlock`] with deferred trie data.
@@ -815,7 +826,19 @@ impl<N: NodePrimitives> ExecutedBlock<N> {
         execution_output: Arc<BlockExecutionOutput<N::Receipt>>,
         trie_data: DeferredTrieData,
     ) -> Self {
-        Self { recovered_block, execution_output, trie_data }
+        Self { recovered_block, execution_output, trie_data, token_meta: Vec::new() }
+    }
+
+    /// Attaches the token metadata captured while executing this block (keyed by code
+    /// hash); the persistence writes each one as `{hash}.meta` beside the bytecode.
+    pub fn with_token_meta(mut self, token_meta: Vec<(Address, TokenMeta)>) -> Self {
+        self.token_meta = token_meta;
+        self
+    }
+
+    /// The token metadata captured while executing this block, keyed by deployed address.
+    pub fn token_meta(&self) -> &[(Address, TokenMeta)] {
+        &self.token_meta
     }
 
     /// Returns a reference to an inner [`SealedBlock`]

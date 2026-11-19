@@ -43,6 +43,20 @@ pub use tracing_appender;
 pub use tracing_subscriber;
 
 // Re-export our types
+/// One line per 10 seconds for the two REPORT lines the operator specified
+/// (`user-in.md`): the node status line `blockNr - X nodes connected` and the import
+/// progress line. This is a **cadence for those two lines only**.
+///
+/// There is no verbosity gate: every other event prints exactly as it is emitted.
+/// The 10-second gate over `INFO`/`WARN` was removed by operator order
+/// (2026-11-18 — "no gates for verb, output as is").
+pub const REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// The node status line (`blockNr - X nodes connected`) — the heartbeat's report.
+pub const STATUS_TARGET: &str = "smartnet::status";
+
+/// The import progress line — the import run's report.
+pub const IMPORT_TARGET: &str = "smartnet::import";
 pub use formatter::LogFormat;
 pub use layers::{FileInfo, FileWorkerGuard, Layers};
 pub use log_handle::{
@@ -62,6 +76,7 @@ pub mod log_handle;
 mod test_tracer;
 mod throttle;
 
+use std::time::Duration;
 use tracing::level_filters::LevelFilter;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

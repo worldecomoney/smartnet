@@ -47,6 +47,8 @@ pub mod link;
 pub mod peers;
 /// The one shared node-identity keystore loader (headless, `PASSWORD_FILE`-only).
 pub mod keystore;
+/// Pre-authentication read budget — byte cap on a connection until its `HELLO` verifies.
+pub mod preauth;
 /// Binary mesh protocol v1 (envelope, opcodes, announce/get/data).
 pub mod protocol;
 /// The wire unit of gossip, its stable hash, and canonical bytes.

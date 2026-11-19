@@ -46,3 +46,4 @@ writeable = "writeable"
 encrypter = "encrypter" # rustls's own spelling (MessageEncrypter, Tls13 encrypter())
 Encrypter = "Encrypter" # rustls type-name spelling
 unparseable = "unparseable" # accepted variant of "unparsable"
+clen = "clen" # EVM assembly slot notation: code length (rtbc_prototype.rs)

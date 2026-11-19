@@ -220,7 +220,7 @@ pub(crate) fn truncate_pool_to_max_txs(
 /// because the pool cached a `state_nonce` one behind the true head at validation time
 /// (`NO_NONCE_GAPS` not set at insert); the only path back to `pending` is a
 /// `CanonStateNotification` for a committed block, so a sealer that reads only `pending`
-/// can deadlock on a mis-classified contiguous run (`MPP-ISSUE.md`: `pending=0 queued=15`,
+/// can deadlock on a misclassified contiguous run (`MPP-ISSUE.md`: `pending=0 queued=15`,
 /// head stalls forever).
 ///
 /// Folding is safe because every executability verdict is re-decided downstream against

@@ -16,7 +16,7 @@
 //! the `pre_rejected` flag keeps it from popping the enclosing create's stash.
 
 use crate::rtbc::{check_initcode, check_runtime, RtbcPolicy, RtbcReject};
-use alloy_primitives::Bytes;
+use alloy_primitives::{Address, Bytes};
 use revm::{
     context::ContextTr,
     context_interface::{journaled_state::JournalCheckpoint, JournalTr},
@@ -35,12 +35,21 @@ pub struct RtbcInspector {
     stack: Vec<JournalCheckpoint>,
     /// Set when the pre-hook rejected without stashing (see module docs).
     pre_rejected: bool,
+    /// `(creator, created)` for every accepted install — the contract-metadata capture
+    /// reads these after execution (the creator is the address that ran the create
+    /// frame; it is not derivable from state). `[]` unless the wiring site asks.
+    creations: Vec<(Address, Address)>,
 }
 
 impl RtbcInspector {
     /// Inspector with an explicit policy.
     pub const fn new(policy: RtbcPolicy) -> Self {
-        Self { policy, stack: Vec::new(), pre_rejected: false }
+        Self { policy, stack: Vec::new(), pre_rejected: false, creations: Vec::new() }
+    }
+
+    /// The `(creator, created)` pairs recorded for accepted installs, draining the log.
+    pub fn take_creations(&mut self) -> Vec<(Address, Address)> {
+        core::mem::take(&mut self.creations)
     }
 
     fn reject(reject: RtbcReject, len: usize) {
@@ -76,7 +85,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for RtbcInspec
     fn create_end(
         &mut self,
         context: &mut CTX,
-        _inputs: &CreateInputs,
+        inputs: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
         if self.pre_rejected {
@@ -86,7 +95,13 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for RtbcInspec
         let Some(cp) = self.stack.pop() else { return };
         if outcome.result.result.is_ok() {
             match check_runtime(&outcome.result.output, &self.policy) {
-                Ok(()) => context.journal_mut().checkpoint_commit(),
+                Ok(()) => {
+                    // Accepted install — remember who created it (contract metadata).
+                    if let Some(created) = outcome.address {
+                        self.creations.push((inputs.caller(), created));
+                    }
+                    context.journal_mut().checkpoint_commit()
+                }
                 Err(reject) => {
                     Self::reject(reject, outcome.result.output.len());
                     context.journal_mut().checkpoint_revert(cp);

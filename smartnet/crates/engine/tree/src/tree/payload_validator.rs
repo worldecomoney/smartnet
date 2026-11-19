@@ -577,7 +577,7 @@ where
         // The receipt root task is spawned before execution and receives receipts incrementally
         // as transactions complete, allowing parallel computation during execution.
         let execute_block_start = Instant::now();
-        let (output, senders, receipt_root_rx) =
+        let (output, senders, receipt_root_rx, token_meta) =
             match self.execute_block(state_provider, env, &input, &mut handle) {
                 Ok(output) => output,
                 Err(err) => return self.handle_execution_error(input, err, &parent_block),
@@ -824,14 +824,9 @@ where
         let changeset_provider =
             ensure_ok_post_block!(overlay_factory.database_provider_ro(), block);
 
-        let executed_block = self.spawn_deferred_trie_task(
-            block,
-            output,
-            &ctx,
-            hashed_state,
-            trie_output,
-            changeset_provider,
-        );
+        let executed_block = self
+            .spawn_deferred_trie_task(block, output, &ctx, hashed_state, trie_output, changeset_provider)
+            .with_token_meta(token_meta);
         Ok((executed_block, timing_stats))
     }
 
@@ -903,6 +898,7 @@ where
             BlockExecutionOutput<N::Receipt>,
             Vec<Address>,
             tokio::sync::oneshot::Receiver<(B256, alloy_primitives::Bloom)>,
+            Vec<(Address, smartnet_primitives_traits::TokenMeta)>,
         ),
         InsertBlockErrorKind,
     >
@@ -914,6 +910,10 @@ where
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
         debug!(target: "engine::tree::payload_validator", "Executing block");
+
+        // Kept aside for the token-metadata probe below — the block's own env, reused
+        // read-only after execution.
+        let probe_env = env.evm_env.clone();
 
         let mut db = debug_span!(target: "engine::tree", "build_state_db").in_scope(|| {
             State::builder()
@@ -982,9 +982,15 @@ where
 
         // Finish execution and get the result
         let post_exec_start = Instant::now();
-        let (_evm, result) = debug_span!(target: "engine::tree", "BlockExecutor::finish")
+        let (result, creations) = debug_span!(target: "engine::tree", "BlockExecutor::finish")
             .in_scope(|| executor.finish())
-            .map(|(evm, result)| (evm.into_db(), result))?;
+            .map(|(mut evm, result)| {
+                // The rtbc inspector's create log (creator → created contract), read out
+                // before the EVM goes — the creator is not derivable from state. It
+                // feeds the metadata capture below.
+                let creations = evm.components_mut().1.take_creations();
+                (result, creations)
+            })?;
         self.metrics.record_post_execution(post_exec_start.elapsed());
 
         // Merge transitions into bundle state
@@ -993,12 +999,26 @@ where
 
         let output = BlockExecutionOutput { result, state: db.take_bundle() };
 
+        // Contract metadata — through the ONE entrance both ingest paths use
+        // (`capture_block_meta`, operator: "make sure all import and mesh sync both go
+        // through this same single entrance"); the records ride the executed block to
+        // the commit. Probe state is discarded — this cannot change what the block
+        // commits.
+        let token_meta = smartnet_evm::token_meta::capture_block_meta(
+            &self.evm_config,
+            &mut db,
+            &probe_env,
+            &output.state,
+            creations,
+            |_| true,
+        );
+
         let execution_duration = execution_start.elapsed();
         self.metrics.record_block_execution(&output, execution_duration);
         self.metrics.record_block_execution_gas_bucket(output.result.gas_used, execution_duration);
         debug!(target: "engine::tree::payload_validator", elapsed = ?execution_duration, "Executed block");
 
-        Ok((output, senders, result_rx))
+        Ok((output, senders, result_rx, token_meta))
     }
 
     /// Executes transactions and collects senders, streaming receipts to a background task.

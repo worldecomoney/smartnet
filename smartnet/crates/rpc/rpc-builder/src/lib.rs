@@ -1,15 +1,19 @@
 //! Configure `SmartNet` RPC.
 //!
 //! This crate contains several builder and config types that allow to configure the selection of
-//! [`SmartnetRpcModule`] specific to transports (ws, http).
+//! [`SmartnetRpcModule`] per transport. **RPC = HTTP, nothing else** (operator ruling,
+//! 2026-11-19): JSON-RPC is served over HTTP only; `WebSocket` carries the mesh binary
+//! protocol (`doc/MESH-PAYLOAD-PROTOCOL.md`, RLP frames) and never RPC. The node never
+//! mounts WS as an RPC transport (`config.rs`), and the `ws` plumbing below is legacy.
 //!
 //! The [`RpcModuleBuilder`] is the main entrypoint for configuring all RPC modules. It takes
 //! instances of components required to start the servers, such as provider impls, network and
 //! transaction pool. [`RpcModuleBuilder::build`] returns a [`TransportRpcModules`] which contains
 //! the transport specific config (what APIs are available via this transport).
 //!
-//! The [`RpcServerConfig`] is used to assemble and start the http and ws servers,
-//! it requires the [`TransportRpcModules`] so it can start the servers with the configured modules.
+//! The [`RpcServerConfig`] is used to assemble and start the HTTP server (the ws machinery
+//! is legacy, see above), it requires the [`TransportRpcModules`] so it can start the server
+//! with the configured modules.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]

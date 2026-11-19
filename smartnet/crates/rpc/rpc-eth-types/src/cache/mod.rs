@@ -454,7 +454,10 @@ where
 
             match action {
                 None => {
-                    unreachable!("can't close")
+                    // All senders dropped — service shutdown. The service holds its own
+                    // sender today so this cannot fire, but exit cleanly rather than
+                    // panic if that ever changes.
+                    return Poll::Ready(());
                 }
                 Some(action) => {
                     match action {

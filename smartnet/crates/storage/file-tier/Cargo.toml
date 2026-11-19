@@ -19,6 +19,7 @@ thiserror.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
+smartnet-primitives-traits = { workspace = true, features = ["std"] }
 alloy-primitives.workspace = true
 alloy-eips.workspace = true
 

@@ -16,8 +16,8 @@ pub use fixed_fee::{SMARTNET_FIXED_GAS_PRICE_WEI, SMARTNET_FIXED_TRANSFER_FEE_WE
 
 mod calibri_lite_genesis;
 pub use calibri_lite_genesis::{
-    extra_data_validators, parse_extra_data_validators, validate_calibri_lite_genesis,
-    CALIBRI_LITE_MAX_EXTRA_DATA_SIZE,
+    extra_data_validators, normalize_calibri_genesis_raw, parse_extra_data_validators,
+    validate_calibri_lite_genesis, CALIBRI_LITE_MAX_EXTRA_DATA_SIZE,
 };
 
 mod api;

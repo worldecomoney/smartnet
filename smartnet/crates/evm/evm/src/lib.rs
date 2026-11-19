@@ -50,6 +50,9 @@ pub mod rtbc;
 /// RTBC admission inspector — the hook side of the gate (Wave 3).
 pub mod rtbc_inspector;
 
+/// ERC-20 token metadata capture (`name`/`symbol`/`decimals`) at ingest.
+pub mod token_meta;
+
 #[cfg(test)]
 mod rtbc_prototype;
 #[cfg(any(test, feature = "test-utils"))]

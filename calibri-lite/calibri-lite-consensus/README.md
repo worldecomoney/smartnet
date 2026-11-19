@@ -22,7 +22,7 @@ use calibri_lite_consensus::{
 };
 ```
 
-Used by `smartnet-ethereum-consensus` (`beacon_pre_consensus.rs`) and `smartnet-validator`.
+Used by `smartnet-seal` (`beacon_pre_consensus.rs`) and `smartnet-validator`.
 
 ## Out of scope
 
@@ -30,4 +30,4 @@ Used by `smartnet-ethereum-consensus` (`beacon_pre_consensus.rs`) and `smartnet-
 - Wallet RPC / MetaMask paths
 - Genesis JSON `clique` key names (opaque config)
 
-See [../../README.md](../../README.md) and `current-state.txt`.
+See [../../README.md](../../README.md).

@@ -52,7 +52,7 @@ use smartnet_rpc_eth_api::{
         config::{EthConfigApiServer, EthConfigHandler},
         pending_block::BuildPendingEnv,
     },
-    FullEthApiServer, RpcConvert, RpcTypes, SignableTxRequest,
+    EthApiServer, FullEthApiServer, RpcConvert, RpcTypes, SignableTxRequest,
 };
 use smartnet_rpc_eth_types::{error::FromEvmError, EthApiError};
 use smartnet_rpc_server_types::SmartnetRpcModule;
@@ -61,7 +61,7 @@ use smartnet_validator::ValidatorDaemon;
 use std::{
     marker::PhantomData,
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Type configuration for a regular Ethereum node.
@@ -333,22 +333,10 @@ where
         self,
         ctx: smartnet_node_api::AddOnsContext<'_, N>,
     ) -> eyre::Result<Self::Handle> {
-        // RPC catch-up service — fully isolated in the `smartnet-engine-rpc-sync` crate
-        // (own task, no shared code with mesh / RLP import / the RPC server). This is the
-        // only call into it: whether the service runs is decided in one place — `sync_gate`
-        // in that crate — from the operator keys: `RPC_SYNC = true` (master switch, default
-        // off) AND non-empty `SYNC_PEERS` AND `SYNC_BATCH >= 1` AND a non-zero
-        // `SYNC_POLL_INTERVAL`. Anything else stays off and is logged once, so
-        // `RPC_SYNC` unset or `SYNC_BATCH = 0` can never start a catch-up loop.
-        smartnet_engine_rpc_sync::spawn_rpc_sync_service(
-            ctx.config.rpc.rpc_sync.unwrap_or(false),
-            ctx.config.rpc.sync_peers.clone().unwrap_or_default(),
-            ctx.config.rpc.sync_batch,
-            ctx.config.rpc.sync_poll_interval,
-            ctx.beacon_engine_handle.clone(),
-            ctx.node.provider().clone(),
-            ctx.node.task_executor().clone(),
-        );
+        // RPC catch-up service REMOVED (user-in.md #5): node-to-node sync is mesh-only.
+        // `RPC_SYNC`, `SYNC_PEERS`, `SYNC_BATCH` and `SYNC_POLL_INTERVAL` are gone from
+        // the schema — a leftover key now fails the boot (fail-closed), and there is no
+        // catch-up loop to start. Block acquisition is mesh gossip + RLP import.
 
         // Validator heartbeat cadence (`HEARTBEAT_MS`). The validator section is still
         // the on/off switch: a malformed validator section aborts boot (fail-closed),
@@ -424,6 +412,11 @@ where
         // answered. The gate receiver below is how boot learns catch-up finished.
         let mesh = crate::mesh::spawn_mesh_service(&ctx, eth_api.clone()).await;
         let mesh_enabled = mesh.enabled;
+        // The status line's "X nodes connected" reading — taken here because `mesh.ready`
+        // is moved into the sync-gate wait just below; `eth_api` moves into the heartbeat
+        // task further down, so its tip handle is taken here too.
+        let status_spreader = mesh.spreader.clone();
+        let status_api = eth_api.clone();
 
         // Sync gate: wait until every peer link completed a bootstrap exchange, the
         // local tip has reached the highest reported peer tip, and no ordered pull is
@@ -448,8 +441,10 @@ where
         // Validator heartbeat. On each beat: one validator seal pass (only when
         // `SEAL = true`). The task is critical but a failed beat is logged and retried —
         // it never takes the node down.
-        if validator_enabled {
-            task_executor.spawn_critical_task("node-heartbeat", async move {
+        // ONE heartbeat per node (user-in #1): the task is unconditional — the mesh,
+        // the validator and the node duties all re-use this single interval, and the
+        // 10-second status line lives on it.
+        task_executor.spawn_critical_task("node-heartbeat", async move {
                 let validator = if validator_enabled {
                     match config_path {
                         Some(path) => {
@@ -478,19 +473,40 @@ where
                     interval_ms = heartbeat.as_millis() as u64,
                     validator = validator.is_some(),
                     mesh = mesh_enabled,
-                    "validator heartbeat started"
+                    "node heartbeat started (single multi-purpose HB)"
                 );
 
                 let mut tick = tokio::time::interval(heartbeat);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // The second heartbeat (user-in #1b): ONE standard line per
+                // `REPORT_INTERVAL` — `blockNr - X nodes connected`. Nothing else is
+                // throttled: every other event prints as emitted (the verbosity gate
+                // is gone, operator order 2026-11-18). While an import streams it
+                // prints its own line instead.
+                let mut status_at: Option<Instant> = None;
                 loop {
                     tick.tick().await;
                     if let Some(validator) = validator.as_ref() {
                         validator.beat().await;
                     }
+                    if status_at.is_none_or(|at| at.elapsed() >= smartnet_tracing::REPORT_INTERVAL)
+                        && !crate::import::import_active()
+                    {
+                        status_at = Some(Instant::now());
+                        let nodes = status_spreader.connected_count();
+                        let tip = EthApiServer::block_number(&status_api)
+                            .ok()
+                            .and_then(|nr| u64::try_from(nr).ok())
+                            .map_or_else(|| "?".to_string(), |nr| nr.to_string());
+                        info!(
+                            target: smartnet_tracing::STATUS_TARGET,
+                            block = %tip,
+                            nodes,
+                            "blockNr = {tip} - {nodes} nodes connected"
+                        );
+                    }
                 }
             });
-        }
 
         Ok(handle)
     }
@@ -727,41 +743,7 @@ where
     type Consensus = Arc<EthBeaconConsensus<<Node::Types as NodeTypes>::ChainSpec>>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        let chain_spec = ctx.chain_spec();
-        let mut consensus = EthBeaconConsensus::new(chain_spec.clone());
-        let genesis_cfg = &chain_spec.genesis().config;
-        // The Calibri-Lite consensus setup keys on the genesis carrying a validator section in
-        // `extraData` (the legacy `config.clique` object is inert; see `GENESIS-LEGACY-CONFIG.md`).
-        if !smartnet_chainspec::extra_data_validators(chain_spec.genesis().extra_data.as_ref())
-            .is_empty()
-        {
-            if genesis_cfg.london_block.is_none() && chain_spec.is_london_active_at_block(1) {
-                warn!(
-                    target: "smartnet::cli",
-                    event = "CALIBRI_LITE_TX_COMPAT_PROFILE",
-                    london_execution_from_block = 1,
-                    "Calibri Lite execution compatibility profile active (EIP-1559/type-2 for wallet/EVM; not consensus identity)"
-                );
-            }
-            if chain_spec.is_paris_active_at_block(1) {
-                warn!(
-                    target: "smartnet::cli",
-                    event = "CALIBRI_LITE_GENESIS_MERGE_FIELDS",
-                    "Genesis includes Merge-era fields; Calibri Lite runtime profile skips merge header checks — remove terminalTotalDifficulty* for a clean genesis if desired"
-                );
-            }
-            consensus = consensus
-                .with_max_extra_data_size(smartnet_chainspec::CALIBRI_LITE_MAX_EXTRA_DATA_SIZE);
-            let profile = calibri_lite_consensus::SmartNetRuntimeProfile::detect(
-                chain_spec.chain().id(),
-                chain_spec.genesis(),
-            );
-            if let Some(profile) = profile {
-                consensus = consensus.with_smartnet_runtime_profile(profile);
-            }
-        }
-
-        Ok(Arc::new(consensus))
+        Ok(build_eth_consensus(ctx.chain_spec()))
     }
 }
 
@@ -785,4 +767,64 @@ where
     async fn build(self, ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
         Ok(EthereumEngineValidator::new(ctx.config.chain.clone()))
     }
+}
+
+/// Builds the node's consensus instance from the chain spec — the ONE place the
+/// Calibri-Lite runtime profile is applied (max extraData, the profile detected from
+/// the genesis, the London/Paris shape warnings).
+///
+/// Shared by the add-ons builder and the standalone RLP import: the import must check
+/// seals exactly the way the live node does, so both call this instead of each
+/// constructing `EthBeaconConsensus` their own way.
+pub fn build_eth_consensus<ChainSpec>(chain_spec: Arc<ChainSpec>) -> Arc<EthBeaconConsensus<ChainSpec>>
+where
+    ChainSpec: EthChainSpec + EthereumHardforks + core::fmt::Debug + Send + Sync + 'static,
+{
+    // The validator registry (`validators.jsonl`, statuses included) is the authority
+    // the validator gate answers from — loaded ONCE at bootstrap so every block this
+    // node sees is gate-checked. A missing file leaves the array empty: the gate then
+    // fails closed for this chain (no enabled validator ⇒ no block validates).
+    let registry_path = calibri_lite_consensus::registry::default_validators_file();
+    if let Err(err) = calibri_lite_consensus::registry::load_validators(&registry_path) {
+        warn!(
+            target: "smartnet::cli",
+            %err,
+            path = %registry_path.display(),
+            "validators.jsonl unreadable — the validator gate will fail closed (no block validates)"
+        );
+    }
+
+    let mut consensus = EthBeaconConsensus::new(chain_spec.clone());
+    let genesis_cfg = &chain_spec.genesis().config;
+    // The Calibri-Lite consensus setup keys on the genesis carrying a validator section in
+    // `extraData` (the legacy `config.clique` object is inert; see `GENESIS-LEGACY-CONFIG.md`).
+    if !smartnet_chainspec::extra_data_validators(chain_spec.genesis().extra_data.as_ref()).is_empty()
+    {
+        if genesis_cfg.london_block.is_none() && chain_spec.is_london_active_at_block(1) {
+            warn!(
+                target: "smartnet::cli",
+                event = "CALIBRI_LITE_TX_COMPAT_PROFILE",
+                london_execution_from_block = 1,
+                "Calibri Lite execution compatibility profile active (EIP-1559/type-2 for wallet/EVM; not consensus identity)"
+            );
+        }
+        if chain_spec.is_paris_active_at_block(1) {
+            warn!(
+                target: "smartnet::cli",
+                event = "CALIBRI_LITE_GENESIS_MERGE_FIELDS",
+                "Genesis includes Merge-era fields; Calibri Lite runtime profile skips merge header checks — remove terminalTotalDifficulty* for a clean genesis if desired"
+            );
+        }
+        consensus =
+            consensus.with_max_extra_data_size(smartnet_chainspec::CALIBRI_LITE_MAX_EXTRA_DATA_SIZE);
+        let profile = calibri_lite_consensus::SmartNetRuntimeProfile::detect(
+            chain_spec.chain().id(),
+            chain_spec.genesis(),
+        );
+        if let Some(profile) = profile {
+            consensus = consensus.with_smartnet_runtime_profile(profile);
+        }
+    }
+
+    Arc::new(consensus)
 }

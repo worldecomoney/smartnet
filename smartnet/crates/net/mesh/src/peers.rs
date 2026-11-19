@@ -129,14 +129,22 @@ pub fn load_peers(path: &Path) -> Result<ParsedPeers, io::Error> {
 }
 
 /// Builds the inbound-`HELLO` allowlist from a peer file: the addresses of entries whose
-/// `key_id` parses as a `0x` address.
+/// `key_id` parses as a `0x` address **and** that are still members (`active && valid` —
+/// the same gate as [`PeerEntry::is_target`]).
 ///
 /// This is the cheap `DoS` gate order: an inbound `HELLO` whose claimed address is absent
 /// from this list is dropped before any signature recovery. Re-read with the peer file so
-/// membership changes take effect without a restart. Entries with a legacy/label `key_id`
+/// membership changes take effect without a restart: marking a peer `valid: false`
+/// (revoked) or `active: false` (paused) removes it from the inbound allowlist on the
+/// next handshake, not just from outbound gossip. Entries with a legacy/label `key_id`
 /// contribute no address (they cannot be authenticated and are refused at the `HELLO`).
 pub fn allowlist_addresses(parsed: &ParsedPeers) -> Vec<Address> {
-    parsed.peers.iter().filter_map(PeerEntry::address).collect()
+    parsed
+        .peers
+        .iter()
+        .filter(|peer| peer.active && peer.valid)
+        .filter_map(PeerEntry::address)
+        .collect()
 }
 
 #[cfg(test)]
@@ -221,6 +229,26 @@ mod tests {
         assert_eq!(allowlist.len(), 2);
         assert!(allowlist.contains(&"0x70997970c51812dc3a010c7d01b50e0d17dc79c8".parse().unwrap()));
         assert!(allowlist.contains(&"0x1111111111111111111111111111111111111111".parse().unwrap()));
+    }
+
+    /// Revocation must revoke: a `valid: false` (or `active: false`) peer is excluded
+    /// from the inbound-`HELLO` allowlist, not only from outbound gossip — otherwise a
+    /// revoked peer keeps full inbound access on its next connection.
+    #[test]
+    fn allowlist_excludes_revoked_and_paused_peers() {
+        let content = r#"{"key_id":"0x1111111111111111111111111111111111111111","ip":"1.1.1.1","port_range":1,"active":true,"valid":true}
+{"key_id":"0x2222222222222222222222222222222222222222","ip":"1.1.1.2","port_range":2,"active":true,"valid":false}
+{"key_id":"0x3333333333333333333333333333333333333333","ip":"1.1.1.3","port_range":3,"active":false,"valid":true}
+"#;
+        let parsed = parse_peers(content);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let allowlist = allowlist_addresses(&parsed);
+        let member: Address = "0x1111111111111111111111111111111111111111".parse().unwrap();
+        let revoked: Address = "0x2222222222222222222222222222222222222222".parse().unwrap();
+        let paused: Address = "0x3333333333333333333333333333333333333333".parse().unwrap();
+        assert_eq!(allowlist, vec![member], "only the active+valid member is admitted");
+        assert!(!allowlist.contains(&revoked), "revoked peer must lose inbound access");
+        assert!(!allowlist.contains(&paused), "paused peer must lose inbound access");
     }
 
     #[test]

@@ -1,11 +1,13 @@
 use crate::{ChainSpec, DepositContract};
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use alloy_chains::Chain;
 use alloy_eips::{calc_next_block_base_fee, eip1559::BaseFeeParams, eip7840::BlobParams};
 use alloy_genesis::Genesis;
 use alloy_primitives::{B256, U256};
 use core::fmt::{Debug, Display};
 use smartnet_ethereum_forks::EthereumHardforks;
+use smartnet_ethereum_primitives::TransactionSigned;
 use smartnet_primitives_traits::{AlloyBlockHeader, BlockHeader};
 
 /// Trait representing type configuring a chain spec.
@@ -33,6 +35,14 @@ pub trait EthChainSpec: Send + Sync + Unpin + Debug {
 
     /// The genesis hash.
     fn genesis_hash(&self) -> B256;
+
+    /// The calibri\* genesis pre-fund records (GENESIS.md): the alloc entries as real
+    /// block-0 transactions — `from = 0x0` (zero signature), never executed, never
+    /// metered; the alloc is the single source of truth for opening balances. Empty
+    /// for legacy clique genesis (byte-perfect legacy).
+    fn genesis_tx_records(&self) -> Vec<TransactionSigned> {
+        Vec::new()
+    }
 
     /// The delete limit for pruner, per run.
     fn prune_delete_limit(&self) -> usize;
@@ -118,6 +128,10 @@ impl<H: BlockHeader> EthChainSpec for ChainSpec<H> {
 
     fn genesis_hash(&self) -> B256 {
         self.genesis_hash()
+    }
+
+    fn genesis_tx_records(&self) -> Vec<TransactionSigned> {
+        Self::genesis_tx_records(self)
     }
 
     fn prune_delete_limit(&self) -> usize {

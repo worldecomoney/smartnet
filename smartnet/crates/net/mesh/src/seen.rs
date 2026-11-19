@@ -11,7 +11,7 @@
 //! entries (oldest evicted) so a long-running node cannot grow it without bound.
 
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, HashMap, VecDeque},
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -35,6 +35,11 @@ pub struct SeenCache {
 #[derive(Debug, Default)]
 struct SeenState {
     map: HashMap<[u8; 32], Instant>,
+    /// Insertion (stamp) order — oldest first. Popped from the front on cap eviction so
+    /// going over the cap costs amortized O(1) instead of a full scan per eviction.
+    /// Stale slots (TTL-swept or re-stamped entries) are skipped lazily and reaped by
+    /// the same TTL prune that sweeps the map, so the deque stays bounded with it.
+    order: VecDeque<([u8; 32], Instant)>,
     last_prune: Option<Instant>,
 }
 
@@ -65,8 +70,7 @@ impl SeenCache {
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
 
         if state.last_prune.is_none_or(|at| now.saturating_duration_since(at) >= PRUNE_EVERY) {
-            let ttl = self.ttl;
-            state.map.retain(|_, at| now.saturating_duration_since(*at) < ttl);
+            Self::prune(&mut state, self.ttl, now);
             state.last_prune = Some(now);
         }
 
@@ -85,7 +89,8 @@ impl SeenCache {
             }
         };
         if is_new {
-            self.enforce_cap(&mut state.map, now);
+            state.order.push_back((id, now));
+            self.enforce_cap(&mut state, now);
         }
         is_new
     }
@@ -106,18 +111,35 @@ impl SeenCache {
         self.len() == 0
     }
 
+    /// Drops expired map entries and reaps the order deque against the surviving map.
+    fn prune(state: &mut SeenState, ttl: Duration, now: Instant) {
+        state.map.retain(|_, at| now.saturating_duration_since(*at) < ttl);
+        let map = &state.map;
+        state.order.retain(|(id, at)| map.get(id) == Some(at));
+    }
+
     /// Evicts oldest entries until the map fits within the configured cap.
-    fn enforce_cap(&self, map: &mut HashMap<[u8; 32], Instant>, now: Instant) {
-        if map.len() <= self.max {
+    ///
+    /// Amortized O(1): pops stale order slots off the front and removes the first slot
+    /// still live in the map — no per-eviction scan of the whole map.
+    fn enforce_cap(&self, state: &mut SeenState, now: Instant) {
+        if state.map.len() <= self.max {
             return;
         }
-        let ttl = self.ttl;
-        map.retain(|_, at| now.saturating_duration_since(*at) < ttl);
-        while map.len() > self.max {
-            let Some(oldest) = map.iter().min_by_key(|(_, at)| *at).map(|(id, _)| *id) else {
+        Self::prune(state, self.ttl, now);
+        while state.map.len() > self.max {
+            let mut evicted = false;
+            while let Some((id, at)) = state.order.pop_front() {
+                if state.map.get(&id) == Some(&at) {
+                    state.map.remove(&id);
+                    evicted = true;
+                    break;
+                }
+            }
+            if !evicted {
+                // Order exhausted without a live slot — nothing left to evict.
                 break;
-            };
-            map.remove(&oldest);
+            }
         }
     }
 }
@@ -152,5 +174,25 @@ mod tests {
         assert!(!cache.check_and_mark_at([9u8; 32], t0 + Duration::from_secs(9)));
         // expired → seen again as new
         assert!(cache.check_and_mark_at([9u8; 32], t0 + Duration::from_secs(11)));
+    }
+
+    /// Going over the cap evicts the oldest entry — not an arbitrary one — and keeps
+    /// the map bounded at `max`.
+    #[test]
+    fn cap_evicts_oldest_first_and_stays_bounded() {
+        let cache = SeenCache::new(Duration::from_secs(3_600), 3);
+        // Past stamps so `contains` (real clock) sees them as fresh.
+        let t0 = Instant::now() - Duration::from_secs(100);
+        for i in 0..3u8 {
+            assert!(cache.check_and_mark_at([i; 32], t0 + Duration::from_secs(i as u64)));
+        }
+        assert_eq!(cache.len(), 3);
+
+        // Fourth distinct id goes over the cap → the oldest ([0]) is evicted.
+        assert!(cache.check_and_mark_at([3u8; 32], t0 + Duration::from_secs(3)));
+        assert_eq!(cache.len(), 3, "cap must hold");
+        assert!(!cache.contains(&[0u8; 32]), "oldest entry must be evicted");
+        assert!(cache.contains(&[1u8; 32]));
+        assert!(cache.contains(&[3u8; 32]), "newest entry must survive");
     }
 }

@@ -618,6 +618,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-rpc-types-engine",
  "k256",
+ "serde_json",
  "smartnet-chainspec",
  "smartnet-primitives-traits",
  "tracing",
@@ -1900,6 +1901,7 @@ dependencies = [
  "derive_more",
  "serde_json",
  "smartnet-ethereum-forks",
+ "smartnet-ethereum-primitives",
  "smartnet-primitives-traits",
 ]
 
@@ -1912,6 +1914,16 @@ dependencies = [
  "alloy-primitives",
  "auto_impl",
  "once_cell",
+]
+
+[[package]]
+name = "smartnet-ethereum-primitives"
+version = "3.7.2"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "smartnet-primitives-traits",
 ]
 
 [[package]]

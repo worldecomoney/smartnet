@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use alloy_primitives::{
     keccak256,
-    map::{AddressMap, B256Map, HashMap},
+    map::{AddressMap, HashMap},
     Address, BlockNumber, Bytes, StorageKey, B256, U256,
 };
 use smartnet_primitives_traits::{Account, Bytecode};
@@ -19,7 +19,7 @@ use smartnet_storage_errors::provider::ProviderResult;
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct StateProviderTest {
     accounts: AddressMap<(HashMap<StorageKey, U256>, Account)>,
-    contracts: B256Map<Bytecode>,
+    contracts: AddressMap<Bytecode>,
     block_hash: HashMap<u64, B256>,
 }
 
@@ -33,9 +33,8 @@ impl StateProviderTest {
         storage: HashMap<StorageKey, U256>,
     ) {
         if let Some(bytecode) = bytecode {
-            let hash = keccak256(&bytecode);
-            account.bytecode_hash = Some(hash);
-            self.contracts.insert(hash, Bytecode::new_raw(bytecode));
+            account.bytecode_hash = Some(keccak256(&bytecode));
+            self.contracts.insert(address, Bytecode::new_raw(bytecode));
         }
         self.accounts.insert(address, (storage, account));
     }
@@ -168,7 +167,7 @@ impl StateProvider for StateProviderTest {
 }
 
 impl BytecodeReader for StateProviderTest {
-    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
-        Ok(self.contracts.get(code_hash).cloned())
+    fn code_by_address(&self, address: &Address) -> ProviderResult<Option<Bytecode>> {
+        Ok(self.contracts.get(address).cloned())
     }
 }

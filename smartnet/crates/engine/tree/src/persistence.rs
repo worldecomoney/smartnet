@@ -732,12 +732,61 @@ mod tests {
             }
             writer.finish_active().unwrap();
         }
+        // Realistic shape: block 1 IS committed — a save appends its line and commits
+        // it, so after a crash the file may only lead the DB by the uncommitted tail.
+        // Recovery drops that tail (drop-2, then trim to the committed tip) and both
+        // stores end at BX = 1.
+        {
+            let blocks: Vec<_> =
+                TestBlockBuilder::eth().with_state().get_executed_blocks(0..2).collect();
+            let provider_rw = provider_factory.provider_rw().unwrap();
+            provider_rw.insert_block(blocks[1].recovered_block()).unwrap();
+            provider_rw.commit().unwrap();
+        }
 
         let bx = recover_file_tier(&provider_factory, Some(dir.path())).unwrap();
         assert_eq!(bx, 1, "blocks 2 and 3 removed; BX is block 1");
         assert!(
             verify_bt_records(dir.path(), ShardId { s: 0, y: 0 }, 1).unwrap(),
             "one record (block 1) survives"
+        );
+    }
+
+    /// A range save appends its lines first and commits once, so after a crash the file
+    /// can lead the committed DB by more than the drop-2 window. Recovery anchors on
+    /// whichever is behind: drop-2, then trim the active files back to the committed tip
+    /// — a re-sync must never start past a block the DB never committed (that would
+    /// leave a permanent hole), and no file line may survive its commit (a later import
+    /// would append the same block twice into a shard a seal has already closed).
+    #[test]
+    fn test_file_tier_recovery_trims_a_file_that_led_the_commit() {
+        use smartnet_file_tier::verify_bt_records;
+
+        smartnet_tracing::init_test_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let provider_factory = create_test_provider_factory();
+
+        // Five lines in the file, only block 1 committed.
+        {
+            let mut writer = FileTierWriter::new(dir.path());
+            for b in 1..=5u64 {
+                writer.files_for_block(b).unwrap().append_bt(&block_records(b).bt).unwrap();
+            }
+            writer.finish_active().unwrap();
+        }
+        {
+            let blocks: Vec<_> =
+                TestBlockBuilder::eth().with_state().get_executed_blocks(0..2).collect();
+            let provider_rw = provider_factory.provider_rw().unwrap();
+            provider_rw.insert_block(blocks[1].recovered_block()).unwrap();
+            provider_rw.commit().unwrap();
+        }
+
+        let bx = recover_file_tier(&provider_factory, Some(dir.path())).unwrap();
+        assert_eq!(bx, 1, "anchored on the committed tip, not the file's");
+        assert!(
+            verify_bt_records(dir.path(), ShardId { s: 0, y: 0 }, 1).unwrap(),
+            "only the committed line survives the trim"
         );
     }
 

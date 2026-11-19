@@ -571,18 +571,27 @@ impl<
 impl<Provider: DBProvider + BlockNumReader> BytecodeReader
     for HistoricalStateProviderRef<'_, Provider>
 {
-    /// Get account code by its hash.
+    /// Get the contract's code by its deployed address.
     ///
     /// Contract bytecode is **file-tier only** when the file tier is enabled — the
     /// `Bytecodes` table is never consulted as a fallback (operator rule: bytecode has no
-    /// DB fallback). `Ok(None)` means the code is not in the content-addressed files.
+    /// DB fallback). `Ok(None)` means the code is not in the per-address files.
     /// The table read exists solely for the file-tier-disabled test mode, where the table
-    /// is the only place bytecode can live.
-    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
+    /// is the only place bytecode can live (hash-keyed, reached via the account).
+    fn code_by_address(&self, address: &Address) -> ProviderResult<Option<Bytecode>> {
         if smartnet_file_tier::base().is_some() {
-            return super::bytecode_from_files(code_hash);
+            return super::code_from_files(address);
         }
-        self.tx().get_by_encoded_key::<tables::Bytecodes>(code_hash).map_err(Into::into)
+        let Some(account) = self.tx().get_by_encoded_key::<tables::PlainAccountState>(address)?
+        else {
+            return Ok(None)
+        };
+        match account.bytecode_hash {
+            Some(hash) if account.has_bytecode() => {
+                self.tx().get_by_encoded_key::<tables::Bytecodes>(&hash).map_err(Into::into)
+            }
+            _ => Ok(None),
+        }
     }
 }
 

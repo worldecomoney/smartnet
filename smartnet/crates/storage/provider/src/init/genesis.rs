@@ -13,7 +13,7 @@ use std::path::Path;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::{
     keccak256,
-    map::{AddressMap, B256Map, B256Set, HashMap},
+    map::{AddressMap, B256Map, HashMap},
     Address, B256, U256,
 };
 use smartnet_chainspec::EthChainSpec;
@@ -273,7 +273,7 @@ where
             .map(|provider| provider.storage_path().starts_with(base))
             .unwrap_or(false)
     });
-    insert_genesis_header(&provider_rw, &chain, file_tier_base)?;
+    insert_genesis_header(&provider_rw, &chain, file_tier_base, &chain.genesis_tx_records())?;
 
     insert_genesis_state(&provider_rw, alloc.iter())?;
 
@@ -336,7 +336,13 @@ pub fn read_genesis_spec<DB: Database>(db: &DB) -> Result<Option<Genesis>, Datab
     let tx = db.tx()?;
     tx.get::<tables::Settings>(keys::GENESIS_SPEC.to_string())?
         .map(|bytes| {
-            serde_json::from_slice(&bytes)
+            // Idempotent calibri* normalization: DBs initialized before the defaults
+            // landed store unnormalized rows — every boot parse agrees with init.
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|e| DatabaseError::Other(format!("genesis spec row is corrupt: {e}")))?;
+            smartnet_chainspec::normalize_calibri_genesis_raw(&mut value)
+                .map_err(|e| DatabaseError::Other(format!("genesis spec row invalid: {e}")))?;
+            serde_json::from_value(value)
                 .map_err(|e| DatabaseError::Other(format!("genesis spec row is corrupt: {e}")))
         })
         .transpose()
@@ -489,6 +495,10 @@ pub fn insert_genesis_header<Provider, Spec>(
     // The file-tier base *scoped to this factory's datadir* (the process-global base only
     // when it contains this datadir; a foreign datadir's base — parallel tests — is None).
     file_tier_base: Option<&'static Path>,
+    // The calibri* pre-fund records (GENESIS.md): the alloc entries as real tx listings
+    // in block 0 — the state still comes from the alloc, no doubles. Empty for legacy
+    // clique genesis (byte-perfect).
+    txs: &[smartnet_ethereum_primitives::TransactionSigned],
 ) -> ProviderResult<()>
 where
     Provider: NodePrimitivesProvider + DBProvider<Tx: DbTxMut>,
@@ -503,11 +513,29 @@ where
         // Production: the payload lives only in the file tier. Write it once (launch may call
         // this on an empty database with a pre-existing file tree); a present record is
         // authoritative and is never duplicated.
-        crate::storage_engine::save_genesis_payload(base, header, block_hash)?;
+        crate::storage_engine::save_genesis_payload(base, header, block_hash, txs)?;
     }
 
     provider.tx_ref().put::<tables::CanonicalChain>(genesis_block_number, block_hash)?;
     provider.tx_ref().put::<tables::HeaderNumbers>(block_hash, genesis_block_number)?;
+
+    // The records' DB index rows (the tx-counter values 0..N-1): RPC lookups
+    // (`eth_getTransactionByHash`) resolve through these, exactly like later blocks.
+    for (idx, tx) in txs.iter().enumerate() {
+        let tx_num = idx as u64;
+        provider
+            .tx_ref()
+            .put::<tables::TxLocations>(
+                tx_num,
+                smartnet_db_api::models::StoredTransactionLocation::new(
+                    genesis_block_number,
+                    idx as u64,
+                ),
+            )?;
+        provider
+            .tx_ref()
+            .put::<tables::TransactionHashNumbers>(*tx.tx_hash(), tx_num)?;
+    }
 
     Ok(())
 }
@@ -696,7 +724,6 @@ where
     let history_list = IntegerList::new([block])?;
 
     // track seen bytecode hashes to avoid re-hashing and re-writing duplicates
-    let mut seen_bytecodes: B256Set = B256Set::default();
 
     let mut provider_rw = provider_factory.database_provider_rw()?;
 
@@ -727,7 +754,6 @@ where
             &account,
             block,
             &history_list,
-            &mut seen_bytecodes,
         )?;
 
         total_accounts += 1;
@@ -760,25 +786,23 @@ fn write_account_to_db<TX: DbTxMut>(
     genesis_account: &GenesisAccount,
     block: u64,
     history_list: &IntegerList,
-    seen_bytecodes: &mut B256Set,
 ) -> Result<(), eyre::Error> {
     let bytecode_hash = if let Some(code) = &genesis_account.code {
         let bytecode = Bytecode::new_raw_checked(code.clone())
             .map_err(|e| eyre::eyre!("Invalid bytecode for {address}: {e}"))?;
         let hash = bytecode.hash_slow();
-        if seen_bytecodes.insert(hash) {
-            // Strict store split: bytecode is file-tier only when the tier is enabled
-            // (no DB fallback, no dupes). The `Bytecodes` table is written solely in the
-            // tier-disabled test mode, where the table is the only bytecode store.
-            match crate::storage_engine::write_bytecode(
-                smartnet_file_tier::base(),
-                &hash,
-                bytecode.0.original_byte_slice(),
-            )? {
-                crate::storage_engine::BytecodeDestination::FileTier => {}
-                crate::storage_engine::BytecodeDestination::DatabaseTable => {
-                    tx.put::<tables::Bytecodes>(hash, bytecode)?;
-                }
+        // Strict store split: bytecode is file-tier only when the tier is enabled
+        // (no DB fallback). The file is keyed by the deployed address (operator
+        // layout); the `Bytecodes` table is written solely in the tier-disabled test
+        // mode, where the table (hash-keyed) is the only bytecode store.
+        match crate::storage_engine::write_bytecode(
+            smartnet_file_tier::base(),
+            address,
+            bytecode.0.original_byte_slice(),
+        )? {
+            crate::storage_engine::BytecodeDestination::FileTier => {}
+            crate::storage_engine::BytecodeDestination::DatabaseTable => {
+                tx.put::<tables::Bytecodes>(hash, bytecode)?;
             }
         }
         Some(hash)

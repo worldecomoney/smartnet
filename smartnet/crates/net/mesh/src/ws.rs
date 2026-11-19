@@ -32,6 +32,7 @@ use crate::{
     inject::Injector,
     link::PendingRumor,
     peers::{allowlist_addresses, load_peers, PeerEntry},
+    preauth::{self, PreAuthGuard},
     protocol::{self, Limits, Message, PeerRecord, ProtocolError},
     rumor::{Rumor, RumorKind},
     seen::SeenCache,
@@ -58,7 +59,7 @@ use tokio::{
     time::MissedTickBehavior,
 };
 use tokio_tungstenite::{
-    accept_hdr_async_with_config, connect_async_with_config,
+    accept_hdr_async_with_config, client_async_with_config,
     tungstenite::{
         handshake::server::{ErrorResponse, Request, Response},
         http::StatusCode,
@@ -227,6 +228,7 @@ impl MeshServer {
         socket: WebSocketStream<S>,
         peer: SocketAddr,
         config: &ServerConfig,
+        budget: &preauth::Budget,
     ) where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -241,11 +243,16 @@ impl MeshServer {
         // is recovered, with the nonce checked against the replay cache. A failure here
         // closes the connection — an unauthenticated peer never reaches the protocol
         // loop. There is no blacklist: the peer may reconnect and be re-evaluated.
+        //
+        // Until this returns Ok the connection could read at most `preauth::PREAUTH_BUDGET`
+        // bytes (the accept path wraps the raw stream in `PreAuthGuard`); a positive
+        // verification lifts that cap for the rest of the session.
         if let Err(err) = self.handshake(&sink, &mut stream, peer, limit).await {
             debug!(target: "smartnet::mesh", %peer, %err, "mesh identity handshake failed");
             let _ = sink.lock().await.close().await;
             return;
         }
+        preauth::arm(budget);
 
         let mut mode = LinkMode::Rumor;
         // Ordered catch-up on this connection: `(next_to_fetch, target)` — the range
@@ -1004,10 +1011,15 @@ pub async fn serve(
                     Err(error)
                 }
             };
+            // Pre-auth byte cap: the raw stream is wrapped so a not-yet-verified peer
+            // can read at most `preauth::PREAUTH_BUDGET` bytes (upgrade + HELLO) until
+            // `handle_connection` arms the shared budget after a positive HELLO.
+            let budget = preauth::restricted();
+            let guarded = PreAuthGuard::new(stream, budget.clone());
             let websocket_config = websocket_config(config.limits.max_message_bytes);
             let handshake = tokio::time::timeout(
                 config.handshake_timeout,
-                accept_hdr_async_with_config(stream, callback, Some(websocket_config)),
+                accept_hdr_async_with_config(guarded, callback, Some(websocket_config)),
             )
             .await;
             let socket = match handshake {
@@ -1022,7 +1034,7 @@ pub async fn serve(
                 }
             };
 
-            server.handle_connection(socket, peer, &config).await;
+            server.handle_connection(socket, peer, &config, &budget).await;
         });
     }
 }
@@ -1057,6 +1069,7 @@ async fn send_rumor_inner(
     let limit = Limits::default().max_message_bytes;
     let mut socket = connect(ip, port, limit).await?;
     handshake_client(&mut socket, identity, allowlist, limit).await?;
+    socket.get_mut().arm();
     exchange(&mut socket, rumor, limit).await?;
     let _ = socket.close(None).await;
     Ok(())
@@ -1405,6 +1418,8 @@ pub(crate) async fn run_link_session(
         let _ = socket.close(None).await;
         return Err(err);
     }
+    // Responder authenticated (signed HELLO_PONG + nonce echo): lift the pre-auth cap.
+    socket.get_mut().arm();
     connected.store(true, Ordering::Release);
     let result = match bootstrap_sync(
         &mut socket,
@@ -1686,6 +1701,7 @@ async fn ping_inner(
     let limit = Limits::default().max_message_bytes;
     let mut socket = connect(ip, port, limit).await?;
     handshake_client(&mut socket, identity, allowlist, limit).await?;
+    socket.get_mut().arm();
     send_protocol(&mut socket, &Message::Ping, limit).await?;
     loop {
         match recv_protocol(&mut socket, limit).await? {
@@ -1722,6 +1738,7 @@ async fn fetch_peers_inner(
     let limit = Limits::default().max_message_bytes;
     let mut socket = connect(ip, port, limit).await?;
     handshake_client(&mut socket, identity, allowlist, limit).await?;
+    socket.get_mut().arm();
     send_protocol(&mut socket, &Message::BootstrapPeersPing, limit).await?;
     loop {
         match recv_protocol(&mut socket, limit).await? {
@@ -1744,10 +1761,20 @@ async fn connect(
     ip: &str,
     port: u16,
     max_message_bytes: usize,
-) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, TransportError> {
+) -> Result<WebSocketStream<PreAuthGuard<TcpStream>>, TransportError> {
     let url = format!("ws://{ip}:{port}{MESH_PATH}");
+    // Dial manually so the raw stream carries the pre-auth byte cap: a peer we have
+    // not yet verified with `HELLO_PONG` can push at most `preauth::PREAUTH_BUDGET`
+    // bytes before `handshake_client` arms the guard (same rule as the accept path).
+    let stream = TcpStream::connect((ip, port))
+        .await
+        .map_err(|err| TransportError::WebSocket(WsError::Io(err)))?;
+    stream
+        .set_nodelay(true)
+        .map_err(|err| TransportError::WebSocket(WsError::Io(err)))?;
+    let guarded = PreAuthGuard::new(stream, preauth::restricted());
     let (socket, _) =
-        connect_async_with_config(url, Some(websocket_config(max_message_bytes)), true).await?;
+        client_async_with_config(url, guarded, Some(websocket_config(max_message_bytes))).await?;
     Ok(socket)
 }
 

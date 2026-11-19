@@ -81,7 +81,7 @@ not backlog — unless flagged otherwise.
 | **4895 withdrawals** | **rulebook §1 says `true`, the live wire carries none**: validator seals `header.withdrawals_root = None` (`validator/src/run_once.rs:758`), fake-block JSON emits `"withdrawals": null` (`:1439`), genesis header "never carries a withdrawals [root]" (`chainspec/src/spec.rs:31`), and consensus **rejects** a present root (`WithdrawalsRootUnexpected`, `consensus/src/lib.rs:308-317`). Implemented = **no**. Discrepancy recorded here only — the EIP table is untouched per operator (2026-10-28); see the §4 note. |
 | 4788 / 2935 / 7685 / 7928 / 7825 | not implemented — rulebook `false`; fields are `None` and rejected if present (evidence row above) |
 | V3+ payload mechanics, blob market, KZG | absent by design — nothing emits them |
-| Phase C shim retirement (`EthereumHardfork` enum, `ChainHardforks`, ~67 `is_*_active_at_*` sites) | **not yet** — postponed/owner-held (`TODO.md` *Mars migration*); behavior is already flat, only the city facade remains |
+| Phase C shim retirement (`EthereumHardfork` enum, `ChainHardforks`, ~67 `is_*_active_at_*` sites) | **not yet** — postponed/owner-held (`doc/BACKLOG.md` *Mars migration*); behavior is already flat, only the city facade remains |
 | Spec bump (§7) | staged, not active — by design |
 
 ## 1. The rulebook
@@ -155,8 +155,8 @@ carries no withdrawals, see §CURRENT. Kept for the record of that pass.)*
   node path. *(Superseded: today's seal sets `withdrawals_root = None` / `withdrawals: null` —
   §CURRENT.)*
 - Submission made version-aware (V2). Explicit tx-type rulebook (0/1/2 on, 3/4 off).
-- Verified: `smartnet-validator` 97, `smartnet-chainspec` 19, `smartnet-evm-ethereum` 11+8,
-  `smartnet-node-ethereum` 7 tests pass; `cargo check -p smartnet --bin smartnet` clean.
+- Verified: `smartnet-validator` 97, `smartnet-chainspec` 19, `smartnet-evm-config` 11+8,
+  `smartnet-node` 7 tests pass; `cargo check -p smartnet --bin smartnet` clean.
 
 ## 6. Remaining (Phase C — remove the legacy city facade)
 
@@ -164,7 +164,7 @@ Behavior no longer branches on cities, but the legacy `EthereumHardfork` enum / 
 schedule and its `is_*_active_at_*` call sites (~23 files, 67 sites) remain as a compatibility
 shim. The follow-up is mechanical: collapse those call sites to the pinned spec / flat policy
 constants, then retire the city enum and schedule entirely (§0.2 — no cities, ever).
-(2026-10-28: tracked in `TODO.md` as *Mars migration — postponed, owner-held*; the in-code
+(2026-10-28: tracked in `doc/BACKLOG.md` as *Mars migration — postponed, owner-held*; the in-code
 `MARS_EIPS` table it mentioned no longer exists.) `eth_*` RPC names, tx types 0x0/0x1/0x2, and
 MetaMask behavior stay untouched (operator ruling).
 
@@ -173,6 +173,6 @@ MetaMask behavior stay untouched (operator ruling).
 `config.rs` carries a staged-bump note: raising the engine rung beyond today's minimum
 requires wire/payload shapes (the V3+-era fields) the validator does not produce yet. Per
 operator (2026-10-28) that work — and any residual activation-shim removal — stays parked in
-`TODO.md` (*Mars migration*, postponed/owner-held). When it happens: change the pinned knob +
+`doc/BACKLOG.md` (*Mars migration*, postponed/owner-held). When it happens: change the pinned knob +
 validator shapes, E2E-gated. Still §0: this would be an EIP-set change, flat and always-on —
 never a fork, never a city, never a version.

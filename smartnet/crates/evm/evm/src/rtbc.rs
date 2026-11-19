@@ -97,27 +97,78 @@ pub fn check_runtime(code: &[u8], policy: &RtbcPolicy) -> Result<(), RtbcReject>
 /// this strip, the linear decode walks past solc's `fe` terminator into hash bytes
 /// and can false-reject production contracts (measured: `wemx` solc-7.6).
 fn strip_solc_metadata(code: &[u8]) -> &[u8] {
-    if code.len() < 4 {
-        return code;
+    match metadata_suffix(code) {
+        Some(blob) => &code[..code.len() - 2 - blob.len()],
+        None => code,
     }
-    let len =
-        u16::from_be_bytes([code[code.len() - 2], code[code.len() - 1]]) as usize;
+}
+
+/// The validated trailing solc CBOR metadata blob — the shared rules of
+/// [`strip_solc_metadata`] and [`solc_version`].
+fn metadata_suffix(code: &[u8]) -> Option<&[u8]> {
+    if code.len() < 4 {
+        return None;
+    }
+    let len = u16::from_be_bytes([code[code.len() - 2], code[code.len() - 1]]) as usize;
     if len == 0 || len + 2 > code.len() || len > 256 {
-        return code;
+        return None;
     }
     let blob = &code[code.len() - 2 - len..code.len() - 2];
-    let Some(&header) = blob.first() else { return code };
+    let header = *blob.first()?;
     if !(0xa0..=0xbf).contains(&header) {
-        return code;
+        return None;
     }
     let known_key = contains_bytes(blob, b"ipfs")
         || contains_bytes(blob, b"bzzr0")
         || contains_bytes(blob, b"bzzr1")
         || contains_bytes(blob, b"solc");
     if !known_key {
-        return code;
+        return None;
     }
-    &code[..code.len() - 2 - len]
+    Some(blob)
+}
+
+/// The compiler stamp of the trailing solc CBOR metadata: the `solc` key's
+/// `major.minor.patch` triple. `None` when there is no metadata suffix or the stamp
+/// carries no `solc` key (pre-0.5.9 builds emit only `bzzr0`/`bzzr1`/`ipfs`).
+///
+/// Used by the contract-metadata capture (`{address}.meta` carries `compiler`).
+pub fn solc_version(code: &[u8]) -> Option<[u8; 3]> {
+    let blob = metadata_suffix(code)?;
+    // The `solc` key is CBOR text(4): `0x64 's' 'o' 'l' 'c'`, value = array(3) of uints.
+    let mut idx = 0;
+    while let Some(pos) = blob[idx..].windows(4).position(|w| w == b"solc").map(|p| p + idx) {
+        if pos > 0 && blob[pos - 1] == 0x64 {
+            let rest = &blob[pos + 4..];
+            // solc stamps the version as bytes(3) — `0x43 0x0M 0x0m 0x0p` (measured on
+            // 0.5.16 / 0.7.6 / 0.8.26 artifacts); some tools emit array(3) of uints.
+            return match *rest.first()? {
+                0x43 => Some([*rest.get(1)?, *rest.get(2)?, *rest.get(3)?]),
+                0x83 => {
+                    let mut rest = &rest[1..];
+                    let mut version = [0u8; 3];
+                    for slot in &mut version {
+                        let (value, used) = cbor_uint(rest)?;
+                        *slot = value;
+                        rest = &rest[used..];
+                    }
+                    Some(version)
+                }
+                _ => None,
+            };
+        }
+        idx = pos + 4;
+    }
+    None
+}
+
+/// One CBOR unsigned integer (0..=255) — `(value, bytes consumed)`.
+fn cbor_uint(rest: &[u8]) -> Option<(u8, usize)> {
+    match *rest.first()? {
+        value @ 0x00..=0x17 => Some((value, 1)),
+        0x18 => Some((*rest.get(1)?, 2)),
+        _ => None,
+    }
 }
 
 /// True if `needle` occurs in `haystack`.
@@ -209,6 +260,64 @@ mod tests {
     }
 
     /// Synthetic metadata suffix containing a raw 0xff byte: strip must hide it.
+    #[test]
+    fn solc_version_reads_the_metadata_stamp() {
+        // synthetic: stand-in runtime + CBOR map(1) {"solc": h'000706'} + 2-byte length —
+        // the bytes(3) form real solc builds carry
+        let mut code = vec![0xfe];
+        code.extend([0xa1, 0x64, b's', b'o', b'l', b'c', 0x43, 0x00, 0x07, 0x06]);
+        let len = code.len() - 1;
+        code.extend((len as u16).to_be_bytes());
+        assert_eq!(solc_version(&code), Some([0, 7, 6]));
+
+        // the array(3) form some tools emit
+        let mut code = vec![0xfe];
+        code.extend([0xa1, 0x64, b's', b'o', b'l', b'c', 0x83, 0x00, 0x07, 0x06]);
+        let len = code.len() - 1;
+        code.extend((len as u16).to_be_bytes());
+        assert_eq!(solc_version(&code), Some([0, 7, 6]));
+    }
+
+    #[test]
+    fn solc_version_decodes_two_byte_uints_and_absent_key() {
+        // minor/patch >= 24 encode as 0x18 xx — e.g. 0.8.26
+        let mut code = vec![0xfe];
+        code.extend([0xa1, 0x64, b's', b'o', b'l', b'c', 0x83, 0x00, 0x08, 0x18, 0x1a]);
+        let len = code.len() - 1;
+        code.extend((len as u16).to_be_bytes());
+        assert_eq!(solc_version(&code), Some([0, 8, 26]));
+
+        // bzzr-only stamp (pre-`solc`-key): no version
+        let mut code = vec![0xfe];
+        code.extend([0xa1, 0x64, b'b', b'z', b'z', b'r', b'0', 0x40]);
+        let len = code.len() - 1;
+        code.extend((len as u16).to_be_bytes());
+        assert_eq!(solc_version(&code), None);
+
+        // no suffix at all
+        assert_eq!(solc_version(&[0xfe, 0x00]), None);
+    }
+
+    #[test]
+    fn solc_version_reads_real_artifacts() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for (file, expected) in [
+            ("wemx.7.6.opt.json", Some([0u8, 7, 6])),
+            ("wemc.8.26.london.opt.json", Some([0u8, 8, 26])),
+        ] {
+            let raw = fs::read_to_string(dir.join(file)).expect("fixture");
+            let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            for (name, contract) in json["contracts"].as_object().expect("contracts map") {
+                let runtime_hex = contract["bin-runtime"].as_str().unwrap_or_default();
+                if runtime_hex.is_empty() {
+                    continue;
+                }
+                let runtime = alloy_primitives::hex::decode(runtime_hex).unwrap();
+                assert_eq!(solc_version(&runtime), expected, "{file}:{name}");
+            }
+        }
+    }
+
     #[test]
     fn metadata_suffix_with_ff_passes() {
         // body: JUMPDEST STOP

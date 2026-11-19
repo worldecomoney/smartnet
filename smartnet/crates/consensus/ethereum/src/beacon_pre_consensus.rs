@@ -6,10 +6,7 @@
 use alloc::format;
 
 use super::EthBeaconConsensus;
-use calibri_lite_consensus::{
-    get_quorum_addresses, validate_pre_consensus_header,
-    validate_pre_consensus_timestamp_against_parent, validate_static_signer,
-};
+use calibri_lite_consensus::validate_pre_consensus_timestamp_against_parent;
 use core::fmt::Debug;
 use smartnet_chainspec::{
     extra_data_validators, EthChainSpec, EthereumHardforks, SMARTNET_FIXED_GAS_PRICE_WEI,
@@ -27,17 +24,14 @@ where
         _is_post_merge: bool,
     ) -> Result<(), ConsensusError> {
         let genesis = self.chain_spec.genesis();
-        // Seal validation is gated on the genesis carrying a validator section in `extraData`
-        // — NOT on the legacy `config.clique` object (which is inert; see
-        // `GENESIS-LEGACY-CONFIG.md`). A chain without validators is unsealed.
-        if extra_data_validators(genesis.extra_data.as_ref()).is_empty() {
-            return Ok(());
-        }
+        let sealed_genesis = !extra_data_validators(genesis.extra_data.as_ref()).is_empty();
+        let has_registry = !calibri_lite_consensus::registry::get_val_all().is_empty();
 
-        // SmartNet fixed-fee validity check (`doc/FEES-CURR.md`): a base fee, when present,
-        // must be the protocol constant. Absent stays legal — pre SmartNet-era headers
-        // legitimately carry no `baseFeePerGas` (see `smartnet-net-rpc-sync` `verify_block0_shape`).
-        if let Some(got) = header.base_fee_per_gas &&
+        // Fee policy — unchanged trigger: only a SmartNet-sealed genesis carries the
+        // fixed-fee rule (it is a pricing rule for who BUILDS a transaction, not part
+        // of the acceptance gate).
+        if sealed_genesis &&
+            let Some(got) = header.base_fee_per_gas &&
             got != SMARTNET_FIXED_GAS_PRICE_WEI
         {
             return Err(ConsensusError::SmartNetBaseFeeInvalid {
@@ -46,35 +40,30 @@ where
             });
         }
 
-        let quorum = get_quorum_addresses(genesis, header.number)
-            .map_err(|err| ConsensusError::Other(format!("quorum resolution failed: {err}")))?;
-
-        if let Some(profile) = &self.smartnet_runtime {
-            let signer =
-                validate_pre_consensus_header(profile, header, &quorum).map_err(|err| {
-                    ConsensusError::Other(format!(
-                        "invalid Calibri Lite pre-consensus header: {err}"
-                    ))
-                })?;
-            tracing::debug!(
-                target: "consensus::pre_consensus",
-                number = header.number,
-                %signer,
-                proposal = true,
-                "validator signature + proposal meta validated"
-            );
-        } else {
-            let signer = validate_static_signer(header, &quorum)
-                .map_err(|err| ConsensusError::Other(format!("invalid header signer: {err}")))?;
-            tracing::debug!(
-                target: "consensus::pre_consensus",
-                number = header.number,
-                %signer,
-                proposal = false,
-                "validator signature validated (static signer path)"
-            );
+        // THE validator gate (operator, 2026-11-19): the seal's signer must be the
+        // SELECT chair for this slot — and `get_val_chair` only ever answers with a
+        // `status: true` validator of `validators.jsonl` (statuses loaded, keccak math,
+        // 1-validator detour), so a `status: false` record can never pass here. The
+        // gate applies to every chain that HAS validators: a sealed genesis, or a
+        // registry loaded at bootstrap (which covers an extraData-less calibri* genesis
+        // too — the old gate returned `Ok(())` there and switched validation OFF). Only
+        // a legacy chain with neither keeps the old no-seal behaviour. Fail closed: no
+        // enabled validator ⇒ no block validates.
+        if !sealed_genesis && !has_registry {
+            // A legacy chain with no validators at all: nothing to gate against.
+            return Ok(());
         }
 
+        // Through the ONE entrance both ingest paths use (operator: "make sure all
+        // import and mesh sync both go through this same single entrance").
+        let signer =
+            calibri_lite_consensus::check_seal(header).map_err(ConsensusError::Other)?;
+        tracing::debug!(
+            target: "consensus::pre_consensus",
+            number = header.number,
+            %signer,
+            "validator gate passed — signer is the SELECT chair"
+        );
         Ok(())
     }
 

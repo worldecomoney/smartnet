@@ -46,20 +46,22 @@ pub use verify::verify_bt_records;
 /// get `BX`, finish pending seals, and flush the files for a clean shutdown. Exposes the
 /// line-based tools [`rm_last_line`] / [`rm_above_block`].
 pub mod recovery;
-pub use recovery::{flush, reconcile_seals, remove_last_lines, rm_above_block, rm_last_line};
+pub use recovery::{
+    align_active_to_block, flush, reconcile_seals, remove_last_lines, rm_above_block, rm_last_line,
+};
 
 /// The append-side writer: one plain-JSONL appender per active sub-shard file. Passive — never
 /// compresses or rotates (the engine's seal step does).
 pub mod writer;
 pub use writer::{
-    append_records_and_seal, write_genesis_block, AppendOutcome, FileTierWriter, FileWriteTimes,
-    SubShardFiles,
+    append_records_and_seal, write_genesis_block, write_genesis_block_with_txs, AppendOutcome,
+    FileTierWriter, FileWriteTimes, SubShardFiles,
 };
 
 /// Extraction: alloy consensus types → the record types. Generic over the consensus traits so
 /// this crate needs only `alloy-consensus` + `alloy-primitives`.
 pub mod extract;
-pub use extract::{extract_block, extract_empty_block, BlockRecords, SignatureAccess};
+pub use extract::{extract_block, extract_empty_block, genesis_block_records, BlockRecords, SignatureAccess};
 
 /// Read path: locate a block's records (plain `.jsonl` or gzip `.gz`) and rebuild the consensus
 /// types from them (spec §6).
@@ -71,10 +73,14 @@ pub use reader::{
     ChainIdentityError, ReceiptBuild,
 };
 
-/// Runtime bytecode in content-addressed files (6C): raw binary, write-once, keyed by
-/// `keccak256(code)` — `bytecodes/{h[0..2]}/{h[2..4]}/{hash}`.
+/// Runtime bytecode in per-contract files (6C): raw binary, write-once, keyed by the
+/// **deployed address** — `bytecodes/{a[0..3]}/{a[3..6]}/{a[6..9]}/{a[9..]}` (operator
+/// layout). Token metadata rides beside it as `{address}.meta`.
 pub mod bytecode;
-pub use bytecode::{bytecode_path, read_bytecode, write_bytecode, BYTECODES_DIR};
+pub use bytecode::{
+    bytecode_meta_path, bytecode_path, holders_path, read_bytecode, read_bytecode_meta,
+    write_bytecode, write_bytecode_meta, write_holders_stub, BYTECODES_DIR,
+};
 
 /// The four files that make up a sub-shard (`logs` joins the spec's `b`/`txs`/`4626`).
 pub const FILE_NAMES: [&str; 4] = ["b", "txs", "logs", "4626"];
