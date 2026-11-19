@@ -12,24 +12,25 @@
   
   Runtime handling:
   
-  On every bootstrap node must open encrypted key using password file from config
-  and keep decrypted key in memory ONLY! 
+  On every bootstrap node must load encrypted key to memory, along with password file from config
+  and keep both in memory, use decryption every time private key is needed, must never keep raw 
+  unencrypted file in memory!
+ 
   There should be just one main function that does key file decryption.
-  Decryption process must take time on bottstrap only, and only once, never re-occur.
+  
+  Encrypted key and password loads in RAM at bottstrap only, and only once, never re-occur.
+
   Tests must use very same function and not write any different functions or re-implement this function.
   No test can implement decryption of encrypted key file using different functions.
   
-  
+
   Decryted/raw private key must never be stored anywhere! not in files not in DB!
   Password file and/or it's content can not be stored anywhere else or copied to other files, places, or BD!
   
 ## Suspicion (investigated — NOT substantiated, 2026-10-22)
 
- - Claim: decoded raw key and/or password file content may be stored in DB to "speed things up".
- - **Verdict: no violation found.** Full trace of the working tree found no code path that
-   persists, logs, caches, or transmits the decrypted key, the password-file content, or the
-   raw unencrypted key file. Key material is decrypted once at bootstrap and lives only in
-   memory for the process lifetime.
+ - Claim: decoded raw key and/or password file content may NEVER be stored in DB to "speed things up".
+ - Full trace of the working tree found no code path that persists, logs, caches, or transmits the decrypted key, the password-file content, or the raw unencrypted key file. Key material is decrypted once at bootstrap and lives only in memory for the process lifetime.
  - What was checked (all clean):
    - Decrypted-key flow: `validator/src/lib.rs` `load()` → `RunOnceArgs.secret_key` (memory
      only, never serialized; `k256`/`alloy` `Debug` is redacted).
