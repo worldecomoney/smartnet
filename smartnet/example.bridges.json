@@ -1,0 +1,83 @@
+{
+  "bridge_fee": "0.10",
+  "bridges": {
+    "address": "0x0123....5554",
+  },
+  "burn_to": "0x000000000000000000000000000000000000dead",
+  "pairs": {
+    "BSC_USDT_WEM": {
+      "address": "0x1234000000000000000000000000000000005555",
+      "in_enabled": true,
+      "out_enabled": true,
+      "legs": { "USDT": { "chain_id": "0x38" }, "WEM": { "chain_id": "0x13b" } }
+    },
+    "BSC_BUSD_WEM": {
+      "address": "0x1234000000000000000000000000000000006666",
+      "in_enabled": true,
+      "out_enabled": true,
+      "legs": { "BUSD": { "chain_id": "0x38" }, "WEM": { "chain_id": "0x13b" } }
+    },
+    "ETH_USDT_WEM": {
+      "address": "0x1234000000000000000000000000000000001111",
+      "in_enabled": true,
+      "out_enabled": true,
+      "legs": { "USDT": { "chain_id": "0x1" }, "WEM": { "chain_id": "0x13b" } }
+    }
+  },
+  "networks": {
+    "0x38": {
+      "chainId": "0x38",
+      "alias": "BSC",
+      "chainName": "BNB Smart Chain",
+      "is_own": false,
+      "rpcUrls": ["https://bsc-dataseed.binance.org/"],
+      "blockExplorerUrls": ["https://bscscan.com"],
+      "network_fee": "0.10",
+      "minAmount": "0",
+      "minConfBlocks": 10,
+      "maxConfBlocks": 100,
+      "instruments": {
+        "BNB":  { "type": "native", "decimals": 18, "stable": false, "price": 0 },
+        "USDT": { "type": "erc20", "address": "0x55d398326f99059fF775485246999027B3197955", "decimals": 18, "stable": true, "price": 1.0 },
+        "BUSD": { "type": "erc20", "address": "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56", "decimals": 18, "stable": true, "price": 1.0 },
+        "WEMU": { "type": "erc20", "address": "0x4669E0ad8028331014851850C89d3dADbBCdA81e", "decimals": 2, "stable": false, "price": 0.36 },
+        "USDC": { "type": "erc20", "address": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", "decimals": 18, "stable": true, "price": 1.0 }
+      }
+    },
+    "0x1": {
+      "chainId": "0x1",
+      "alias": "ETH",
+      "chainName": "Ethereum",
+      "is_own": false,
+      "rpcUrls": ["https://eth.llamarpc.com"],
+      "blockExplorerUrls": ["https://etherscan.io"],
+      "network_fee": "5.00",
+      "minAmount": "10",
+      "minConfBlocks": 12,
+      "maxConfBlocks": 120,
+      "instruments": {
+        "ETH":  { "type": "native", "decimals": 18, "stable": false, "price": 0 },
+        "USDT": { "type": "erc20", "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "decimals": 6, "stable": true, "price": 1.0 }
+      }
+    },
+    "0x13b": {
+      "chainId": "0x13b",
+      "alias": "WEM",
+      "icon": "net-wem",
+      "chainName": "WEM Mainnet",
+      "is_own": true,
+      "rpcUrls": ["https://rpc2.wemblockchain.com"],
+      "blockExplorerUrls": ["https://wemscan.com"],
+      "network_fee": "0.01",
+      "minConfBlocks": 8,
+      "maxConfBlocks": 120,
+      "bridges": {
+        "bridge1": { "address": "", "status": true },
+        "bridge2": { "address": "", "status": true }
+      },
+      "instruments": {
+        "WEM": { "type": "coin", "decimals": 18, "stable": true, "price": 1.0 }
+      }
+    }
+  }
+}

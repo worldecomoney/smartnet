@@ -33,6 +33,7 @@ reqwest = { workspace = true, default-features = false, features = ["rustls-no-p
 k256 = { workspace = true, default-features = false, features = ["ecdsa"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
+smartnet-chainspec.workspace = true
 smartnet-payload-types.workspace = true
 smartnet-db = { workspace = true, default-features = false }
 smartnet-provider.workspace = true

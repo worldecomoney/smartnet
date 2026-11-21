@@ -1,6 +1,6 @@
-{"key_id": "node-a", "url": "", "ip": "127.0.0.1", "port_range": 30811, "active": true, "valid": true}
-{"key_id": "node-b", "url": "", "ip": "127.0.0.1", "port_range": 30812, "active": true, "valid": true}
-{"key_id": "node-c", "url": "", "ip": "127.0.0.1", "port_range": 30813, "active": true, "valid": true}
-{"key_id": "node-d", "url": "", "ip": "127.0.0.1", "port_range": 30814, "active": true, "valid": true}
-{"key_id": "node-e", "url": "", "ip": "127.0.0.1", "port_range": 30815, "active": true, "valid": true}
-{"key_id": "node-f", "url": "", "ip": "127.0.0.1", "port_range": 30816, "active": true, "valid": true}
+{"address": "0x0123...567a", "url": "", "ip": "127.0.0.1", "port_range": 30811, "active": true, "valid": true}
+{"address": "0x0123...567b", "url": "", "ip": "127.0.0.1", "port_range": 30812, "active": true, "valid": true}
+{"address": "0x0123...567c", "url": "", "ip": "127.0.0.1", "port_range": 30813, "active": true, "valid": true}
+{"address": "0x0123...567d", "url": "", "ip": "127.0.0.1", "port_range": 30814, "active": true, "valid": true}
+{"address": "0x0123...567e", "url": "", "ip": "127.0.0.1", "port_range": 30815, "active": true, "valid": true}
+{"address": "0x0123...567f", "url": "", "ip": "127.0.0.1", "port_range": 30816, "active": true, "valid": true}

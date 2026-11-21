@@ -37,6 +37,7 @@ thiserror.workspace = true
 # required by smartnet-codecs
 modular-bitfield = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 # arbitrary utils
 arbitrary = { workspace = true, features = ["derive"], optional = true }
@@ -76,7 +77,7 @@ std = [
     "quanta",
     "thiserror/std",
     "alloy-trie/std",
-    "serde_json/std",
+    "serde_json?/std",
     "revm-bytecode/std",
     "revm-state/std",
     "alloy-rpc-types-eth?/std",
@@ -101,6 +102,7 @@ arbitrary = [
 ]
 serde = [
     "dep:serde",
+    "dep:serde_json",
     "alloy-consensus/serde",
     "alloy-eips/serde",
     "alloy-primitives/serde",

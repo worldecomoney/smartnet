@@ -78,6 +78,9 @@ pub struct EthEvmConfig<C = ChainSpec, EvmFactory = EthEvmFactory> {
     pub executor_factory: EthBlockExecutorFactory<SmartnetReceiptBuilder, Arc<C>, EvmFactory>,
     /// Ethereum block assembler.
     pub block_assembler: EthBlockAssembler<C>,
+    /// Historical RLP import only: skip revm's upfront balance/value-max-fee check.
+    /// The live/sync config never sets this; legacy geth admitted txs under lesser checks.
+    import_mode: bool,
 }
 
 impl EthEvmConfig {
@@ -109,7 +112,16 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
                 chain_spec,
                 evm_factory,
             ),
+            import_mode: false,
         }
+    }
+
+    /// Marks this config as the historical-import one: revm's upfront balance check is
+    /// skipped for every transaction while replaying legacy RLP history. Never use for
+    /// a live node or mesh sync.
+    pub const fn for_import(mut self) -> Self {
+        self.import_mode = true;
+        self
     }
 
     /// Returns the chain spec associated with this configuration.
@@ -245,12 +257,31 @@ where
     }
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv<SpecId>, Self::Error> {
-        Ok(EvmEnv::for_eth_block(
+        let mut env = EvmEnv::for_eth_block(
             header,
             self.chain_spec(),
             self.chain_spec().chain().id(),
             self.chain_spec().blob_params_at_timestamp(header.timestamp),
-        ))
+        );
+        // Historical geth/clique credits fees to the recovered seal signer, never to the
+        // zeroed vote-marker coinbase. Only the import config rewrites the beneficiary;
+        // live/sync keeps the header value byte-for-byte.
+        if self.import_mode {
+            env.block_env.beneficiary =
+                smartnet_engine_primitives::ethereum::execution_beneficiary_for_header(header);
+            // Historical chain gas schedule is pre-Berlin (Istanbul): no EIP-2929
+            // cold-access surcharges. LONDON adds 8,100 gas on the first
+            // CREATE-with-storage transaction (block 19,545) and every later
+            // storage-touching tx, breaking the pinned F5 state/receipt roots.
+            // Live/sync stays on LONDON (type-0 + type-2 support); only the
+            // read-only historical import runs on the chain's real gas schedule.
+            env.cfg_env.set_spec_and_mainnet_gas_params(SpecId::ISTANBUL);
+        }
+        // The import-only flag rides into the EVM through CfgEnv. The door in
+        // `EthEvm::transact_raw` preserves and restores this value; on live/sync it is
+        // false, so only the chair's own overdraft gets through, as before.
+        env.cfg_env.disable_balance_check = self.import_mode;
+        Ok(env)
     }
 
     fn next_evm_env(
@@ -407,6 +438,50 @@ mod tests {
         // Assert that the chain ID in the `cfg_env` is correctly set to the chain ID of the
         // ChainSpec
         assert_eq!(cfg_env.chain_id, chain_spec.chain().id());
+    }
+
+    /// The first tx block of the trusted chain: zero coinbase vote marker, 97-byte
+    /// extraData whose trailing signature recovers to the sole clique sealer.
+    const BLOCK_17214_RLP: &str = concat!(
+        "f902d1f9025ba026129d98cbe54047b3b91454bb847222fe924eb07f24e021ea2b75f75a553a96a01dcc4de8dec75d7a",
+        "ab85b567b6ccd41ad312451b948a7413f0a142fd40d49347940000000000000000000000000000000000000000a0ce45",
+        "6f0573acf30a3e39bd8b538b59eb1214e73d5c439100feee727b9da587baa0b2d845752dd5db9caa99cbb1d2121e31da",
+        "b79f5a4b664ff9b325040d632d7d7fa0056b23fbba480696b65fe5a59b8f2148a1299103c4f57df839233af2cf4ca2d2",
+        "b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000282433e8401c9c38082520884684661cab861d883010d0f8467657468",
+        "88676f312e32312e33856c696e757800000000000000d8bc0c59c31d12d303642f34bd531fee91cb84a764b27b0e8828",
+        "7cc115dbf1c749b2a0a596717e61eb5b0c350ee1258b7584594593a72b9bd083a0ce041e269f00a00000000000000000",
+        "000000000000000000000000000000000000000000000000880000000000000000f870f86e80843b9aca008252089455",
+        "92a508e36703e84b6fd1b500808e3c79cc5be8890ad78ebc5ac62000008082029aa0c897ad85fc6f46d1dd26f43016c8",
+        "86b152d96a6b0e15fd86cea74877bb8962c9a016c7549c8132eea34f1e3184e669d93a77eb5051ec0f8ce9c8aa51889f",
+        "cd6923c0"
+    );
+
+    #[test]
+    fn import_mode_env_credits_recovered_sealer_only() {
+        use alloy_primitives::{address, hex, Address};
+
+        let bytes = hex::decode(BLOCK_17214_RLP).unwrap();
+        let block: Block = alloy_rlp::Decodable::decode(&mut bytes.as_slice()).unwrap();
+
+        let live = EthEvmConfig::new(wem_chain_spec()).evm_env(&block.header).unwrap();
+        assert_eq!(live.block_env.beneficiary, Address::ZERO);
+        assert_eq!(live.cfg_env.spec, SpecId::LONDON);
+
+        let import =
+            EthEvmConfig::new(wem_chain_spec()).for_import().evm_env(&block.header).unwrap();
+        assert_eq!(
+            import.block_env.beneficiary,
+            address!("0x24bf191a358c09e79b9ead2d8999d08590b5af31")
+        );
+        assert_ne!(import.block_env.beneficiary, block.header.beneficiary);
+        // Historical import runs the trusted chain's pre-Berlin gas schedule;
+        // live/sync stays on LONDON for type-0 + type-2 support.
+        assert_eq!(import.cfg_env.spec, SpecId::ISTANBUL);
     }
 
     #[test]

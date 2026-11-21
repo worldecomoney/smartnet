@@ -223,11 +223,36 @@ where
         &mut self,
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        if self.inspect {
+        // THE door (operator, 2026-11-19 — the one sanctioned execution-layer exception):
+        // the balance check is switched off ONLY for a transaction sent by the block's
+        // sealer — the header beneficiary, the chair's wallet. That is the mint mimic:
+        // "1 distinct fn that can tx out by chair only ignoring it's own balance,
+        // mimiking minting" — the chair's mandate issuance executes and credits the
+        // bridge even when the chair holds nothing. Every other sender, always, is
+        // balance-checked exactly as before.
+        //
+        // Deterministic for all time: the sender is recovered from the signature and the
+        // beneficiary is sealed into the header, so every node — import, mesh sync, or a
+        // re-import years later — opens the chair door for precisely the same transactions.
+        //
+        // Historical-data compatibility accommodation, not a claim the tx would be valid
+        // on a modern chain: the import-only EVM config carries `disable_balance_check =
+        // true` in CfgEnv so legacy geth history can be replayed. OR it with the chair
+        // condition, then RESTORE the incoming value — live/sync arrives with false and
+        // keeps byte-identical behavior; import arrives with true and keeps it for every
+        // tx. The flag is re-evaluated per transaction and never leaks across executions.
+        let balance_check_disabled = self.cfg.disable_balance_check;
+        let door_opens = tx.caller == self.block.beneficiary;
+        self.cfg.disable_balance_check = balance_check_disabled || door_opens;
+
+        let result = if self.inspect {
             self.inner.inspect_tx(tx)
         } else {
             self.inner.transact(tx)
-        }
+        };
+
+        self.cfg.disable_balance_check = balance_check_disabled;
+        result
     }
 
     fn transact_system_call(

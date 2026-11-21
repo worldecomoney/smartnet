@@ -9,6 +9,7 @@ pub const DEFAULT_HEARTBEAT_MS: u64 = 500;
 pub mod app;
 pub mod balances;
 pub mod block_rlp_wire;
+pub mod chair;
 pub mod config;
 pub mod import;
 pub mod io;

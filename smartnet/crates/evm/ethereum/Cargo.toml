@@ -32,6 +32,7 @@ alloy-rpc-types-engine.workspace = true
 smartnet-testing-utils.workspace = true
 smartnet-evm = { workspace = true, features = ["test-utils"] }
 alloy-genesis.workspace = true
+alloy-rlp.workspace = true
 
 [features]
 default = ["std"]

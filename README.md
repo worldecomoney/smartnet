@@ -6,7 +6,8 @@
 > this client has been extensively modified and does not feature any Ethereum legacy, P2P or "Swiss-knife" tools. 
 > Its primary objective is to facilitate the rapid deployment of fast, secure private EVM/DeFi compatible network.
 > The validator is **merged into the node** — one process, one config, one heartbeat
-> (`NODE_HEARTBEAT`, ms; 500 advised), sealing switched on/off with `SEAL` in the config.
+> (`NODE_HEARTBEAT`, ms; 500 advised), sealing switched on/off with `SEAL` in the config. No
+> `smartnet-validator` binary exists anymore.
 
 ## ENV
 Debian 13

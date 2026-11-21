@@ -21,3 +21,6 @@ tmp/
 
 # Downloaded solc compilers (multi-MB toolchain, not source).
 solc/
+
+# 1h holders updater binary (built by the operator)
+tools/1h/upd

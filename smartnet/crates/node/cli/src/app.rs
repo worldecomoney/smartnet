@@ -803,7 +803,10 @@ where
                         .pruning
                         .changeset_window
                         .unwrap_or_else(|| PruneConfig::default().changeset_window);
-                    let evm = EthEvmConfig::new(chain.clone());
+                    // Historical import only: replay legacy geth history under the
+                    // import-mode balance-check accommodation. The node's live/sync
+                    // config (`node.rs`) stays default and keeps every check.
+                    let evm = EthEvmConfig::new(chain.clone()).for_import();
                     // On the BLOCKING pool, not inline: `run_until_ctrl_c` selects the
                     // command future against `tokio::signal::ctrl_c()` on this same
                     // task, so a synchronous import here would swallow every ^C — the

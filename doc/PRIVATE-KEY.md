@@ -14,11 +14,11 @@
   
   On every bootstrap node must load encrypted key to memory, along with password file from config
   and keep both in memory, use decryption every time private key is needed, must never keep raw 
-  unencrypted file in memory!
+  unencrypted file in memory or naywhere else!
  
-  There should be just one main function that does key file decryption.
+  Encrypted key and password loads in RAM at bottstrap only, and only once, never re-occur. Example: var encrypted_key_in_ram_var = getFileContent( getEncryptedKeyFilePath() ) var password_in_ram_var  = getFileContent( config_path_to_password_flie ) 
   
-  Encrypted key and password loads in RAM at bottstrap only, and only once, never re-occur.
+  There should be just one main function that does key file decryption. Example tmpPkey =  decryptPkey({encrypted_key_in_ram_var}, {password_in_ram_var}) After op sign is done, tmpPkey = null/0/''
 
   Tests must use very same function and not write any different functions or re-implement this function.
   No test can implement decryption of encrypted key file using different functions.

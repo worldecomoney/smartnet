@@ -486,3 +486,227 @@ fn test_balance_increment_not_duplicated() {
         );
     }
 }
+
+// [catalog: KEEP — THE door (bridge mint-mimic, operator 2026-11-19): the block sealer's
+// own transaction executes and credits the recipient even when the sealer's wallet is
+// empty. "1 distinct fn that can tx out by chair only ignoring it's own balance,
+// mimiking minting" — the issuance is a real transaction on chain, the money appears at
+// the bridge address, and the sealer is never debited below zero.]
+#[test]
+fn chair_issuance_executes_despite_empty_wallet() {
+    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
+
+    let chair_key_pair = generators::generate_key(&mut generators::rng());
+    let chair_address = public_key_to_address(*chair_key_pair.verifying_key());
+    let bridge_address = address!("0x00000000000000000000000000000000000000bb");
+
+    // The chair's wallet is EMPTY — the whole point of the door.
+    let db = CacheDB::new(EmptyDB::default());
+
+    let mut header = chain_spec.genesis_header().clone();
+    header.gas_limit = 1_500_000;
+    // The door keys on the header beneficiary — the sealer's own wallet.
+    header.beneficiary = chair_address;
+
+    let value = U256::from(ETH_TO_WEI);
+    let tx = sign_tx_with_key_pair(
+        chair_key_pair,
+        Transaction::Legacy(TxLegacy {
+            chain_id: Some(chain_spec.chain.id()),
+            nonce: 0,
+            gas_price: header.base_fee_per_gas.unwrap().into(),
+            gas_limit: 30_000,
+            to: TxKind::Call(bridge_address),
+            value,
+            input: Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF]),
+        }),
+    );
+
+    let provider = EthEvmConfig::new(chain_spec);
+    let executor = provider.batch_executor(db);
+
+    let (state_tx, state_rx) = mpsc::channel();
+    let state_tx_clone = state_tx.clone();
+    executor
+        .execute_with_state_hook(
+            &Block { header, body: BlockBody { transactions: vec![tx], ..Default::default() } }
+                .try_into_recovered()
+                .unwrap(),
+            move |_, state: &EvmState| {
+                if let Some(account) = state.get(&bridge_address) {
+                    let _ = state_tx_clone.send(account.info.balance);
+                }
+            },
+        )
+        .expect("the sealer's issuance must execute despite an empty wallet");
+
+    drop(state_tx);
+    let balances: Vec<U256> = state_rx.try_iter().collect();
+    assert_eq!(
+        *balances.last().expect("the bridge must appear in the state diff"),
+        value,
+        "the bridge is credited the full issuance amount"
+    );
+}
+
+// [catalog: KEEP — THE door stays closed for everyone else: the very same issuance from
+// any sender that is not the sealer is refused by the balance check, always. This is
+// what makes normal import/sync identical to before — only the sealer's own overdraft
+// is admitted, nothing else changes for any transaction that was valid before.]
+#[test]
+fn the_door_stays_closed_for_any_other_sender() {
+    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
+
+    let sealer_key_pair = generators::generate_key(&mut generators::rng());
+    let sealer_address = public_key_to_address(*sealer_key_pair.verifying_key());
+    // NOT the sealer: an ordinary sender with no funds.
+    let sender_key_pair = generators::generate_key(&mut generators::rng());
+    let bridge_address = address!("0x00000000000000000000000000000000000000bb");
+
+    let db = CacheDB::new(EmptyDB::default());
+
+    let mut header = chain_spec.genesis_header().clone();
+    header.gas_limit = 1_500_000;
+    header.beneficiary = sealer_address;
+
+    let tx = sign_tx_with_key_pair(
+        sender_key_pair,
+        Transaction::Legacy(TxLegacy {
+            chain_id: Some(chain_spec.chain.id()),
+            nonce: 0,
+            gas_price: header.base_fee_per_gas.unwrap().into(),
+            gas_limit: 30_000,
+            to: TxKind::Call(bridge_address),
+            value: U256::from(ETH_TO_WEI),
+            input: Bytes::new(),
+        }),
+    );
+
+    let provider = EthEvmConfig::new(chain_spec);
+    let mut executor = provider.batch_executor(db);
+    let err = executor
+        .execute_one(
+            &Block { header, body: BlockBody { transactions: vec![tx], ..Default::default() } }
+                .try_into_recovered()
+                .unwrap(),
+        )
+        .expect_err("a non-sealer sender without funds must be refused");
+
+    assert!(
+        format!("{err}").contains("lack of funds"),
+        "the ordinary balance check must stand, got: {err}"
+    );
+}
+
+// [catalog: KEEP — historical RLP import accommodation: legacy geth history carries txs
+// that fail today's value + gas_limit*fee_cap check. Import mode skips ONLY that check;
+// every other validity rule (nonce, base fee, tip) stays on. Sync/default mode still
+// refuses the very same tx — pinned by the test above.]
+#[test]
+fn import_mode_admits_the_legacy_underfunded_tx() {
+    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
+
+    let sealer_key_pair = generators::generate_key(&mut generators::rng());
+    let sealer_address = public_key_to_address(*sealer_key_pair.verifying_key());
+    let sender_key_pair = generators::generate_key(&mut generators::rng());
+    let bridge_address = address!("0x00000000000000000000000000000000000000bb");
+
+    let db = CacheDB::new(EmptyDB::default());
+
+    let mut header = chain_spec.genesis_header().clone();
+    header.gas_limit = 1_500_000;
+    header.beneficiary = sealer_address;
+
+    let value = U256::from(ETH_TO_WEI);
+    let tx = sign_tx_with_key_pair(
+        sender_key_pair,
+        Transaction::Legacy(TxLegacy {
+            chain_id: Some(chain_spec.chain.id()),
+            nonce: 0,
+            gas_price: header.base_fee_per_gas.unwrap().into(),
+            gas_limit: 30_000,
+            to: TxKind::Call(bridge_address),
+            value,
+            input: Bytes::new(),
+        }),
+    );
+
+    let provider = EthEvmConfig::new(chain_spec).for_import();
+    let executor = provider.batch_executor(db);
+
+    let (state_tx, state_rx) = mpsc::channel();
+    executor
+        .execute_with_state_hook(
+            &Block { header, body: BlockBody { transactions: vec![tx], ..Default::default() } }
+                .try_into_recovered()
+                .unwrap(),
+            move |_, state: &EvmState| {
+                if let Some(account) = state.get(&bridge_address) {
+                    let _ = state_tx.send(account.info.balance);
+                }
+            },
+        )
+        .expect("import mode must replay the legacy underfunded tx");
+
+    let balances: Vec<U256> = state_rx.try_iter().collect();
+    assert_eq!(
+        *balances.last().expect("the recipient must appear in the state diff"),
+        value,
+        "import mode credits the full value of the legacy tx"
+    );
+}
+
+// [catalog: KEEP — the chair door keeps working in import mode (both conditions true):
+// OR-ing the import flag with `caller == beneficiary` must not change the mint-mimic path.]
+#[test]
+fn chair_issuance_still_executes_under_import_mode() {
+    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
+
+    let chair_key_pair = generators::generate_key(&mut generators::rng());
+    let chair_address = public_key_to_address(*chair_key_pair.verifying_key());
+    let bridge_address = address!("0x00000000000000000000000000000000000000bb");
+
+    let db = CacheDB::new(EmptyDB::default());
+
+    let mut header = chain_spec.genesis_header().clone();
+    header.gas_limit = 1_500_000;
+    header.beneficiary = chair_address;
+
+    let value = U256::from(ETH_TO_WEI);
+    let tx = sign_tx_with_key_pair(
+        chair_key_pair,
+        Transaction::Legacy(TxLegacy {
+            chain_id: Some(chain_spec.chain.id()),
+            nonce: 0,
+            gas_price: header.base_fee_per_gas.unwrap().into(),
+            gas_limit: 30_000,
+            to: TxKind::Call(bridge_address),
+            value,
+            input: Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF]),
+        }),
+    );
+
+    let provider = EthEvmConfig::new(chain_spec).for_import();
+    let executor = provider.batch_executor(db);
+
+    let (state_tx, state_rx) = mpsc::channel();
+    executor
+        .execute_with_state_hook(
+            &Block { header, body: BlockBody { transactions: vec![tx], ..Default::default() } }
+                .try_into_recovered()
+                .unwrap(),
+            move |_, state: &EvmState| {
+                if let Some(account) = state.get(&bridge_address) {
+                    let _ = state_tx.send(account.info.balance);
+                }
+            },
+        )
+        .expect("the chair's issuance must still execute in import mode");
+
+    let balances: Vec<U256> = state_rx.try_iter().collect();
+    assert_eq!(
+        *balances.last().expect("the bridge must appear in the state diff"),
+        value,
+        "the chair path is unchanged under import mode"
+    );
+}

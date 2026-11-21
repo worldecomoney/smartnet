@@ -6,26 +6,24 @@
 //!
 //! Per [`IMPORT_RANGE`] blocks the run:
 //!
-//! 1. **reads** the next items from the file in place (read-only, [`READ_CAPACITY`]
-//!    read-ahead) and decodes them;
-//! 2. **positions** each one with [`classify`] — genesis and anything at or below the
-//!    committed tip is skipped (resume), the number must be `prev + 1` and the parent
-//!    hash must equal the previous block's, anything else stops the run;
-//! 3. **checks and executes** the range against the state of the last committed block:
-//!    exactly **two checks** (operator) — the chain position (step 2) and the
-//!    validator gate: the seal's signer must be a `status: true` validator of the RAM
-//!    registry (`validate_static_signer` against `enabled_set()`, the set
-//!    `get_val_chair` picks from); execution is
-//!    one EVM pass per block with the node's own config and the rtbc create-admission
-//!    inspector, over a single `State` anchored at the committed block so an earlier
-//!    block of the range is visible to its successors;
-//! 4. **writes** the range through the storage engine's block-write protocol —
-//!    file-tier append, DB state/index, **one commit** — with the range's trie updates
-//!    computed once from the disk trie at the anchor (only the range's changed paths
-//!    walk) and attached before the commit;
-//! 5. **reports** `done N blocks` for the finished range and one `import progress` line
-//!    per [`smartnet_tracing::REPORT_INTERVAL`] — always the committed tip
-//!    (`last_block_number()`), never an intent.
+//! 1. **reads** the next items from the file in place (read-only, [`READ_CAPACITY`] read-ahead) and
+//!    decodes them;
+//! 2. **positions** each one with [`classify`] — genesis and anything at or below the committed tip
+//!    is skipped (resume), the number must be `prev + 1` and the parent hash must equal the
+//!    previous block's, anything else stops the run;
+//! 3. **checks and executes** the range against the state of the last committed block: exactly
+//!    **two checks** (operator) — the chain position (step 2) and the validator gate: the seal's
+//!    signer must be a `status: true` validator of the RAM registry (`validate_static_signer`
+//!    against `enabled_set()`, the set `get_val_chair` picks from); execution is one EVM pass per
+//!    block with the node's own config and the rtbc create-admission inspector, over a single
+//!    `State` anchored at the committed block so an earlier block of the range is visible to its
+//!    successors;
+//! 4. **writes** the range through the storage engine's block-write protocol — file-tier append, DB
+//!    state/index, **one commit** — with the range's trie updates computed once from the disk trie
+//!    at the anchor (only the range's changed paths walk) and attached before the commit;
+//! 5. **reports** `done N blocks` for the finished range and one `import progress` line per
+//!    [`smartnet_tracing::REPORT_INTERVAL`] — always the committed tip (`last_block_number()`),
+//!    never an intent.
 //!
 //! The file is READ ONLY. On ctrl-c/SIGTERM the run stops at the next range boundary —
 //! everything so far is already committed — writes `SHUTDOWN_CLEAN` and returns, so a
@@ -34,14 +32,17 @@
 
 use alloy_primitives::B256;
 use alloy_rlp::Decodable;
-use smartnet_chain_state::{ComputedTrieData, ExecutedBlock, DeferredTrieData};
+use smartnet_chain_state::{ComputedTrieData, DeferredTrieData, ExecutedBlock};
+use smartnet_ethereum_primitives::{calculate_receipt_root_no_memo, Receipt};
 use smartnet_evm::{
     execute::{BlockExecutionOutput, BlockExecutor},
     rtbc_inspector::rtbc,
     ConfigureEvm, Evm as _,
 };
-use smartnet_file_tier::SignatureAccess;
-use smartnet_primitives_traits::{NodePrimitives, RecoveredBlock, SealedBlock};
+use smartnet_file_tier::{read_block_at, SignatureAccess};
+use smartnet_primitives_traits::{
+    proofs::calculate_transaction_root, NodePrimitives, RecoveredBlock, SealedBlock,
+};
 use smartnet_provider::{
     providers::{BlockchainProvider, ProviderNodeTypes},
     ProviderFactory, StateProviderFactory, StorageEngine,
@@ -51,12 +52,15 @@ use smartnet_revm::{
     db::{states::bundle_state::BundleRetention, State},
 };
 use smartnet_storage_api::{BlockNumReader, HeaderProvider, StateProviderBox};
-use smartnet_trie_common::{updates::TrieUpdatesSorted, HashedPostState};
 use smartnet_timing::fmt_wall;
+use smartnet_trie_common::{updates::TrieUpdatesSorted, HashedPostState};
 use std::{
     io::{self, BufRead},
     path::Path,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tracing::{debug, info, warn};
@@ -78,6 +82,130 @@ const IMPORT_RANGE: usize = 1000;
 /// A single range write above which it is logged as slow (diagnostics only — the report
 /// stays the two fields below).
 const SLOW_RANGE_WARN: Duration = Duration::from_secs(10);
+
+// TEMPORARY F5 DIAGNOSTIC — opt-in with `SMARTNET_IMPORT_DIAG=1`, logging only.
+// It prints every block in the pinned range (plus the anchor root) and never gates the import.
+const DIAG_START: u64 = 6_660_200;
+const DIAG_END: u64 = 6_660_220;
+static DIAG_PRINTED: AtomicBool = AtomicBool::new(false);
+
+fn diag_enabled() -> bool {
+    matches!(std::env::var("SMARTNET_IMPORT_DIAG").as_deref(), Ok("1" | "true" | "yes"))
+}
+
+fn diag_for(number: u64) -> bool {
+    diag_enabled() && (DIAG_START..=DIAG_END).contains(&number)
+}
+
+/// Logging-only single-block state-delta dump, opt-in with `SMARTNET_DIAG_BLOCK=<number>`.
+fn delta_diag_block() -> Option<u64> {
+    std::env::var("SMARTNET_DIAG_BLOCK").ok()?.parse().ok()
+}
+
+fn delta_diag_for(number: u64) -> bool {
+    delta_diag_block() == Some(number)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn report_delta_diag(
+    number: u64,
+    header: &smartnet_primitives_traits::Header,
+    seal_signer: alloy_primitives::Address,
+    recovered: &RecoveredBlock<smartnet_ethereum_primitives::Block>,
+    bundle: &smartnet_revm::db::BundleState,
+    decoded_receipts_root: B256,
+    computed_receipts_root: B256,
+    gas_used: u64,
+    receipts: &[Receipt],
+) {
+    info!(
+        target: "smartnet::import_diag",
+        block = number,
+        %decoded_receipts_root,
+        %computed_receipts_root,
+        receipts_root_ok = decoded_receipts_root == computed_receipts_root,
+        gas_used,
+        receipts = ?receipts,
+        "delta diagnostic block result"
+    );
+    for (index, receipt) in receipts.iter().enumerate() {
+        let mut enc = Vec::new();
+        alloy_eips::eip2718::Encodable2718::encode_2718(
+            &alloy_consensus::TxReceipt::with_bloom_ref(receipt),
+            &mut enc,
+        );
+        info!(
+            target: "smartnet::import_diag",
+            block = number,
+            tx = index,
+            enc2718 = %alloy_primitives::hex::encode(&enc),
+            "delta diagnostic receipt bytes"
+        );
+    }
+    info!(
+        target: "smartnet::import_diag",
+        block = number,
+        header_beneficiary = %header.beneficiary,
+        seal_signer = %seal_signer,
+        execution_beneficiary = %smartnet_engine_primitives::ethereum::execution_beneficiary_for_header(header),
+        "delta diagnostic addresses"
+    );
+    for (index, tx) in recovered.transactions_recovered().enumerate() {
+        info!(
+            target: "smartnet::import_diag",
+            block = number,
+            tx = index,
+            sender = %tx.signer(),
+            tx_data = ?tx,
+            "delta diagnostic tx"
+        );
+    }
+    for (address, account) in bundle.state() {
+        let before = account.original_info.as_ref().map(|info| (info.balance, info.nonce));
+        let after = account.info.as_ref().map(|info| (info.balance, info.nonce));
+        info!(
+            target: "smartnet::import_diag",
+            block = number,
+            %address,
+            ?before,
+            ?after,
+            code_hash = ?account.info.as_ref().map(|info| info.code_hash),
+            status = ?account.status,
+            storage_slots = account.storage.len(),
+            "delta diagnostic account"
+        );
+        for (slot, value) in &account.storage {
+            info!(
+                target: "smartnet::import_diag",
+                block = number,
+                %address,
+                slot = %slot,
+                original = %value.previous_or_original_value,
+                present = %value.present_value,
+                "delta diagnostic storage"
+            );
+        }
+    }
+}
+
+/// Result of executing one range: blocks ready to write, the range's net hashed state,
+/// and (only under the temporary diagnostic) the pinned-range comparison records.
+type RangeExecution<N> = (Vec<ExecutedBlock<N>>, HashedPostState, Vec<DiagRecord>);
+
+/// One block's decoded values and the values execution/FS later produced. Only built
+/// inside the pinned diagnostic range; empty everywhere else.
+#[derive(Debug)]
+struct DiagRecord {
+    number: u64,
+    decoded_hash: B256,
+    decoded_state_root: B256,
+    decoded_tx_root: B256,
+    decoded_receipts_root: B256,
+    computed_state_root: Option<B256>,
+    computed_tx_root: B256,
+    computed_receipts_root: B256,
+    body_tx_count: u64,
+}
 
 /// The state database one range executes against: the committed anchor, with the
 /// range's own earlier blocks visible through the accumulating `State`.
@@ -223,6 +351,7 @@ where
         Block = smartnet_ethereum_primitives::Block,
         BlockHeader = smartnet_primitives_traits::Header,
         SignedTx = smartnet_ethereum_primitives::TransactionSigned,
+        Receipt = Receipt,
     >,
     <P::Primitives as NodePrimitives>::SignedTx: SignatureAccess,
     Evm: ConfigureEvm<Primitives = P::Primitives>,
@@ -276,6 +405,16 @@ where
         "import starting (file read in place, read-only)"
     );
 
+    let diag = diag_enabled();
+    if diag {
+        info!(
+            target: "smartnet::import_diag",
+            start = DIAG_START,
+            end = DIAG_END,
+            "temporary divergence diagnostic enabled (logging only, not a gate)"
+        );
+    }
+
     let base = file_tier_base.clone();
     let mut engine = StorageEngine::new(factory.clone(), Some(file_tier_base), changeset_window);
 
@@ -314,9 +453,11 @@ where
             scanned += 1;
 
             let mut bytes = item.as_ref();
-            let block: smartnet_ethereum_primitives::Block =
-                Decodable::decode(&mut bytes).map_err(|err| {
-                    eyre::eyre!("item {scanned} (offset {item_start}): block RLP decode failed: {err}")
+            let block: smartnet_ethereum_primitives::Block = Decodable::decode(&mut bytes)
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "item {scanned} (offset {item_start}): block RLP decode failed: {err}"
+                    )
                 })?;
             if !bytes.is_empty() {
                 return Err(eyre::eyre!(
@@ -362,8 +503,8 @@ where
         // Checks + execution for the whole range, against the committed anchor. The
         // provider is built per range: it caches the chain tip, and this run moves it.
         let state = BlockchainProvider::new(factory.clone())?;
-        let (blocks, hashed_state) =
-            execute_range(&state, evm, anchor_hash, std::mem::take(&mut pending))?;
+        let (blocks, hashed_state, diag_records) =
+            execute_range(&state, evm, anchor_hash, std::mem::take(&mut pending), diag)?;
         let range_len = blocks.len() as u64;
         // The fill loop classified exactly these blocks in order, so the chain tip it
         // tracked IS this range's last block.
@@ -377,8 +518,8 @@ where
         {
             // The anchor state (the DB tip before this range) — nothing has been
             // committed yet, so the provider built for execution is still exact.
-            let (root, updates) = state.state_by_block_hash(anchor_hash)?
-                .state_root_with_updates(hashed_state)?;
+            let (root, updates) =
+                state.state_by_block_hash(anchor_hash)?.state_root_with_updates(hashed_state)?;
             range_root = root;
             if let Some(last) = blocks.last_mut() {
                 last.trie_data = DeferredTrieData::ready(ComputedTrieData::without_trie_input(
@@ -395,6 +536,9 @@ where
         // Seals only ever complete after their commit (this call joins what the append
         // spawned), so a compressed shard can never hold blocks the DB does not have.
         engine.join_seal_tasks();
+        if diag {
+            report_diagnostic_range(&base, &diag_records);
+        }
         let save_wall = save_start.elapsed();
         if save_wall > SLOW_RANGE_WARN {
             warn!(
@@ -481,16 +625,32 @@ fn execute_range<P, Evm>(
     evm: &Evm,
     anchor_hash: B256,
     blocks: Vec<smartnet_ethereum_primitives::Block>,
-) -> eyre::Result<(Vec<ExecutedBlock<P::Primitives>>, HashedPostState)>
+    diag: bool,
+) -> eyre::Result<RangeExecution<P::Primitives>>
 where
     P: ProviderNodeTypes,
     P::Primitives: NodePrimitives<
         Block = smartnet_ethereum_primitives::Block,
         BlockHeader = smartnet_primitives_traits::Header,
         SignedTx = smartnet_ethereum_primitives::TransactionSigned,
+        Receipt = Receipt,
     >,
     Evm: ConfigureEvm<Primitives = P::Primitives>,
 {
+    let diag_provider = if diag { Some(state.state_by_block_hash(anchor_hash)?) } else { None };
+    if diag && blocks.iter().any(|b| diag_for(b.header.number)) {
+        match diag_provider.as_ref().map(|p| p.state_root(HashedPostState::default())) {
+            Some(Ok(root)) => info!(
+                target: "smartnet::import_diag",
+                %root,
+                "diagnostic anchor state root (empty overlay)"
+            ),
+            Some(Err(err)) => {
+                warn!(target: "smartnet::import_diag", %err, "anchor root probe failed")
+            }
+            None => {}
+        }
+    }
     let anchor_provider = state.state_by_block_hash(anchor_hash)?;
     let mut db: RangeState = State::builder()
         .with_database(StateProviderDatabase::new(anchor_provider))
@@ -499,12 +659,18 @@ where
 
     let mut executed: Vec<ExecutedBlock<P::Primitives>> = Vec::with_capacity(blocks.len());
     let mut net_state = HashedPostState::default();
+    let mut diag_records = Vec::new();
     // Contracts whose token metadata was already probed this range (the sidecar is
     // keyed by deployed address and write-once, so one probe per address is enough).
     let mut probed = std::collections::HashSet::new();
 
     for block in blocks {
         let number = block.header.number;
+        let want_diag = diag_for(number);
+        let decoded_hash = block.header.hash_slow();
+        let decoded_state_root = block.header.state_root;
+        let decoded_tx_root = block.header.transactions_root;
+        let decoded_receipts_root = block.header.receipts_root;
         let sealed = SealedBlock::seal_slow(block);
         let recovered = RecoveredBlock::try_recover_sealed(sealed.clone())
             .map_err(|err| eyre::eyre!("block {number}: sender recovery failed: {err}"))?;
@@ -516,7 +682,7 @@ where
         // `validators.jsonl`. Check 1 (previous block hash + number) already happened in
         // `classify`; nothing else gates acceptance — no fee rule, no genesis branch, no
         // body check.
-        calibri_lite_consensus::check_seal(sealed.header())
+        let seal_signer = calibri_lite_consensus::check_seal(sealed.header())
             .map_err(|err| eyre::eyre!("block {number}: validator check failed: {err}"))?;
 
         // One EVM pass: the node's own config, the rtbc create-admission inspector —
@@ -551,6 +717,20 @@ where
         db.merge_transitions(BundleRetention::Reverts);
         let bundle = db.take_bundle();
 
+        if delta_diag_for(number) {
+            report_delta_diag(
+                number,
+                sealed.header(),
+                seal_signer,
+                &recovered,
+                &bundle,
+                decoded_receipts_root,
+                calculate_receipt_root_no_memo(&result.receipts),
+                result.gas_used,
+                &result.receipts,
+            );
+        }
+
         // Contract metadata — through the ONE entrance both ingest paths use
         // (`capture_block_meta`, operator: "make sure all import and mesh sync both go
         // through this same single entrance"); the records ride the block to the commit.
@@ -570,6 +750,26 @@ where
         let hashed_state = db.database.0.hashed_post_state(&bundle);
         net_state.extend_ref(&hashed_state);
 
+        if want_diag {
+            let computed_state_root = match &diag_provider {
+                Some(provider) => Some(provider.state_root(net_state.clone())?),
+                None => None,
+            };
+            let body = recovered.body();
+            let body_txs = body.transactions().cloned().collect::<Vec<_>>();
+            diag_records.push(DiagRecord {
+                number,
+                decoded_hash,
+                decoded_state_root,
+                decoded_tx_root,
+                decoded_receipts_root,
+                computed_state_root,
+                computed_tx_root: calculate_transaction_root(&body_txs),
+                computed_receipts_root: calculate_receipt_root_no_memo(&result.receipts),
+                body_tx_count: body_txs.len() as u64,
+            });
+        }
+
         let trie_data = ComputedTrieData::without_trie_input(
             Arc::new(hashed_state.into_sorted()),
             Arc::new(TrieUpdatesSorted::default()),
@@ -584,7 +784,55 @@ where
         );
     }
 
-    Ok((executed, net_state))
+    Ok((executed, net_state, diag_records))
+}
+
+/// Temporary logging-only diagnostic report. Every pinned block is logged once — including
+/// the block with the transaction (BUG2A) — so a mismatch in an early empty block cannot hide
+/// what a later block computed. Nothing here changes acceptance or the write path.
+fn report_diagnostic_range(base: &Path, records: &[DiagRecord]) {
+    if DIAG_PRINTED.load(Ordering::Relaxed) || records.is_empty() {
+        return;
+    }
+    for r in records {
+        let fs = match read_block_at(base, r.number) {
+            Ok(bundle) => bundle.map(|b| b.bt),
+            Err(err) => {
+                warn!(target: "smartnet::import_diag", block = r.number, %err, "FS read failed");
+                continue;
+            }
+        };
+        let fs_hash_ok = fs
+            .as_ref()
+            .and_then(|bt| bt.h.parse::<B256>().ok())
+            .map(|hash| hash == r.decoded_hash)
+            .unwrap_or(false);
+        let fs_tc = fs.as_ref().map(|bt| bt.tc);
+        let computed_sr = r.computed_state_root;
+        let sr_ok = computed_sr.map(|c| c == r.decoded_state_root).unwrap_or(false);
+        let txr_ok = r.decoded_tx_root == r.computed_tx_root;
+        let rcr_ok = r.decoded_receipts_root == r.computed_receipts_root;
+        let tc_ok = fs_tc == Some(r.body_tx_count);
+        let computed = computed_sr.map(|c| c.to_string()).unwrap_or_else(|| "n/a".to_string());
+        let outcome =
+            if fs_hash_ok && sr_ok && txr_ok && rcr_ok && tc_ok { "match" } else { "DIVERGENCE" };
+        warn!(
+            target: "smartnet::import_diag",
+            block = r.number,
+            decoded_sr = %r.decoded_state_root,
+            computed_sr = %computed,
+            %sr_ok,
+            %txr_ok,
+            %rcr_ok,
+            %fs_hash_ok,
+            body_txs = r.body_tx_count,
+            ?fs_tc,
+            %tc_ok,
+            outcome,
+            "F5 diagnostic block (logging only, import continues)"
+        );
+    }
+    DIAG_PRINTED.store(true, Ordering::Relaxed);
 }
 
 #[cfg(test)]

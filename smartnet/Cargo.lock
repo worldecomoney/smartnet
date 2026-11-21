@@ -6245,6 +6245,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "smartnet-bridge"
+version = "2.1.0"
+dependencies = [
+ "alloy-primitives",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "smartnet-chain-state"
 version = "3.7.2"
 dependencies = [
@@ -6700,6 +6710,7 @@ dependencies = [
  "alloy-evm",
  "alloy-genesis",
  "alloy-primitives",
+ "alloy-rlp",
  "alloy-rpc-types-engine",
  "revm",
  "smartnet-chainspec",
@@ -7034,17 +7045,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "smartnet-node-txsend"
-version = "3.7.2"
-dependencies = [
- "alloy-consensus",
- "alloy-eips 2.0.4",
- "alloy-primitives",
- "alloy-signer",
- "alloy-signer-local",
 ]
 
 [[package]]
@@ -8037,6 +8037,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "smartnet-chainspec",
  "smartnet-db",
  "smartnet-payload-types",
  "smartnet-provider",

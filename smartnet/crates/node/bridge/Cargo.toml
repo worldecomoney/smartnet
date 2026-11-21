@@ -1,0 +1,20 @@
+[package]
+name = "smartnet-bridge"
+version = "2.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+description = "THE SmartNet bridge: record store, scan, accept pipeline, the IN/OUT flows (BRIDGE-DOC.md)."
+
+[lib]
+name = "smartnet_bridge"
+path = "src/lib.rs"
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing = { workspace = true, default-features = false, features = ["attributes"] }
+
+[lints]
+workspace = true

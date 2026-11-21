@@ -114,6 +114,14 @@ pub use constants::gas_units::{format_gas, format_gas_throughput};
 pub mod token_meta;
 pub use token_meta::TokenMeta;
 
+/// THE signaling wire format — the bridge's `0.91`/`0.92` requests and the chair's
+/// `0.01` authorization, one definition used by all sides (`BRIDGE-DOC.md` §9).
+pub mod bridge_signal;
+
+/// THE `bridges.json` schema — parsed, fail-closed validated, loaded (`BRIDGE-DOC.md` §3).
+#[cfg(feature = "serde")]
+pub mod bridge_config;
+
 /// Minimal account
 pub mod account;
 pub use account::{Account, Bytecode};

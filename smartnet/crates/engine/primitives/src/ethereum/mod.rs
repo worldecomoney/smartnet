@@ -9,6 +9,7 @@ pub use payload::{BlobSidecars, EthBuiltPayload};
 mod error;
 pub use error::*;
 
+use alloy_consensus::Header;
 use alloy_rpc_types_engine::{ExecutionData, ExecutionPayload, ExecutionPayloadSidecar};
 pub use alloy_rpc_types_engine::{
     ExecutionPayloadEnvelopeV2, ExecutionPayloadEnvelopeV3, ExecutionPayloadEnvelopeV4,
@@ -105,9 +106,17 @@ pub fn execution_data_from_block_rlp(block: smartnet_ethereum_primitives::Block)
 pub fn execution_beneficiary(payload: &ExecutionData) -> alloy_primitives::Address {
     let fee_recipient = payload.payload.fee_recipient();
     match calibri_lite_consensus::pre_consensus::into_block_raw(payload.payload.clone()) {
-        Ok(block) => recover_calibri_lite_signer(&block.header).unwrap_or(fee_recipient),
+        Ok(block) => execution_beneficiary_for_header(&block.header),
         Err(_) => fee_recipient,
     }
+}
+
+/// Same rule for a decoded header, used by historical import (which has the real
+/// header in hand rather than an engine payload). Falls back to the header's own
+/// beneficiary when no seal can be recovered, so unsigned/legacy-shaped headers
+/// keep their previous behavior.
+pub fn execution_beneficiary_for_header(header: &Header) -> alloy_primitives::Address {
+    recover_calibri_lite_signer(header).unwrap_or(header.beneficiary)
 }
 
 impl PayloadTypes for EthPayloadTypes {
@@ -188,6 +197,11 @@ mod tests {
             address!("0x24bf191a358c09e79b9ead2d8999d08590b5af31")
         );
         assert_ne!(execution_beneficiary(&data), data.payload.fee_recipient());
+
+        // the header-based helper used by historical import resolves the same sealer
+        let rebuilt =
+            calibri_lite_consensus::pre_consensus::into_block_raw(data.payload.clone()).unwrap();
+        assert_eq!(execution_beneficiary_for_header(&rebuilt.header), execution_beneficiary(&data));
     }
 
     #[test]
@@ -201,5 +215,8 @@ mod tests {
         let block = smartnet_ethereum_primitives::Block { header, body: Default::default() };
         let data = execution_data_from_block_rlp(block);
         assert_eq!(execution_beneficiary(&data), fee_recipient);
+
+        let rebuilt = calibri_lite_consensus::pre_consensus::into_block_raw(data.payload).unwrap();
+        assert_eq!(execution_beneficiary_for_header(&rebuilt.header), fee_recipient);
     }
 }

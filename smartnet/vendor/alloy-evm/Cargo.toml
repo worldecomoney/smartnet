@@ -96,6 +96,10 @@ default-features = false
 [dependencies.revm]
 version = "38.0.0"
 default-features = false
+# THE door (see src/eth/mod.rs `transact_raw`): the per-tx balance-check switch needs
+# revm's `optional_balance_check` field on CfgEnv. Declared HERE so every workspace that
+# builds this crate (smartnet, calibri-lite) compiles revm with the field present.
+features = ["optional_balance_check"]
 
 [dependencies.thiserror]
 version = "2.0.0"
