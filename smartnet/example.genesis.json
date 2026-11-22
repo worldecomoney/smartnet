@@ -1,0 +1,21 @@
+{
+  "config": {
+    "chainId": 315,
+    "home": "MARS",
+    "consensus": "calibri-lite",
+    "timestamp": "0x675fd019",
+    "gasLimit": "0x47b760",
+  },
+  "calibri-lite": {
+       "quorum": 1,
+       "period": 1
+  },
+  "alloc": {
+    "86..BC": {
+      "balance": "0x20000000000000000000"
+    }, 
+   "55..cB": {
+      "balance": "0x20000000000000000000"
+    }
+  },
+}

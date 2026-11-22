@@ -30,7 +30,7 @@
 
 # The single runtime root. `~/` is expanded once against $HOME; all other path keys below are
 # relative to this directory (no other `~`, no absolute values, no CWD resolution).
-HOME_DIR_PATH = "~/.smartnetX/"
+HOME_DIR_PATH = "~/.smartnet/"
 
 # Optional log verbosity rank (VERB, 0-3): 0=errors only, 1=info, 2=debug, 3=trace.
 # Emits the given level and everything more severe. Optional — leave blank for the default
@@ -47,7 +47,7 @@ VERB = 1
 # COINBASE = "0x<address-of-one-encrypted-key>"
 
 # --- storage ----------------------------------------------------------------
-# Chain data directory, relative to HOME_DIR_PATH (here: ~/.smartnetX/data). Absolute values
+# Chain data directory, relative to HOME_DIR_PATH (here: ~/.smartnet/data). Absolute values
 # and `~` are rejected — HOME_DIR_PATH owns both.
 DATADIR_PATH = "data"
 
@@ -117,12 +117,12 @@ MESH_PORT = 41700
 MESH_ADDR = "0.0.0.0"
 
 # Mesh peer file — one JSON object per line, re-read on every spread (membership changes
-# need no restart). Relative to HOME_DIR_PATH (here: ~/.smartnetX/mainnet.jsonl). When absent
+# need no restart). Relative to HOME_DIR_PATH (here: ~/.smartnet/mainnet.jsonl). When absent
 # or blank, the scaffold looks for ./mainnet.jsonl then HOME_DIR_PATH/mainnet.jsonl; neither
 # holding the file is a startup error. Absolute values and `~` are rejected.
 # `address` is the peer's 0x Ethereum identity (legacy `key_id` is still accepted).
 # Sample:
-#   {"address":"0x24bf191a358c09e79b9ead2d8999d08590b5af31","url":"","ip":"127.0.0.1","port_range":41811,"active":true,"valid":true}
+#   {"address":"0x24..31","url":"","ip":"127.0.0.1","port_range":41811,"active":true,"valid":true}
 MESH_PEERS_FILE = "mainnet.jsonl"
 
 # Max size of a single mesh WebSocket frame, in megabytes — covers the largest rumor the
@@ -148,7 +148,7 @@ NODE_HEARTBEAT = 500
 # --- VALIDATOR -------------------------------------------------------
 
 # The one validator registry file. Read at bootstrap into RAM; the node's block gate and
-# the chair both use it. Relative to HOME_DIR_PATH (here: ~/.smartnetX/validators.jsonl).
+# the chair both use it. Relative to HOME_DIR_PATH (here: ~/.smartnet/validators.jsonl).
 # When absent or blank, the scaffold looks for ./validators.jsonl then
 # HOME_DIR_PATH/validators.jsonl; neither means an error. It is never a CLI argument.
 VAL_FILE = "validators.jsonl"
@@ -175,7 +175,7 @@ MAX_CONTRACTS_PER_BLOCK = 1
 MAX_NFT_PER_BLOCK = 2
 
 # Directory holding the encrypted keystore, relative to HOME_DIR_PATH (here:
-# ~/.smartnetX/keystore). Absolute values and `~` are rejected here — only HOME_DIR_PATH
+# ~/.smartnet/keystore). Absolute values and `~` are rejected here — only HOME_DIR_PATH
 # may be absolute or start with `~/`.
 KEY_PATH = "keystore"
 
@@ -184,10 +184,10 @@ KEY_PATH = "keystore"
 # exactly one file. This file is never edited to record a filename.
 # Create it before the first boot (the raw-key file is optional; without it a key is generated):
 #   smartnet --config /path/to/config.toml keystore [RAW_PRIVATE_KEY_FILE]
-# File read for the keystore password, relative to HOME_DIR_PATH (here: ~/.smartnetX/pw.txt).
+# File read for the keystore password, relative to HOME_DIR_PATH (here: ~/.smartnet/pw.txt).
 # `""` means "prompt on the terminal" (no built-in path exists in the code). The headless
 # mesh-identity load requires a password file — an interactive prompt is unavailable at boot.
-PASSWORD_FILE = "pw.txt"
+PASSWORD_FILE = "password.txt"
 
 # --- txpool tx lifetimes (TTL-POOL.md) --------------------------------------
 # QUEUED (future-nonce) txs expire after this many seconds: the pool maintenance sweep
