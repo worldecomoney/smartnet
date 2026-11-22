@@ -2,15 +2,12 @@
 
 > **STATUS: CURRENT — project entry point**
 >
-> Single-binary EVM/DeFi-compatible execution network influenced by the upstream client, Reth V 2.1, it is not a fork, 
-> this client has been extensively modified and does not feature any Ethereum legacy, P2P or "Swiss-knife" tools. 
-> Its primary objective is to facilitate the rapid deployment of fast, secure private EVM/DeFi compatible network.
-> The validator is **merged into the node** — one process, one config, one heartbeat
-> (`NODE_HEARTBEAT`, ms; 500 advised), sealing switched on/off with `SEAL` in the config. No
-> `smartnet-validator` binary exists anymore.
+> Single-binary EVM/DeFi-compatible execution network. This client has been extensively modified and does not feature any Ethereum legacy, P2P or "Swiss-knife" tools. 
+> SmartNet primary objective is to facilitate the rapid deployment of fast, secure private EVM/DeFi compatible network.
+
 
 ## ENV
-Debian 13
+Developed and tested with Debian 13
 
 | Path | Role |
 |------|------|

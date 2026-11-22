@@ -1,5 +1,3 @@
-# IMPORTANT-NEVER-DO-NOT-TOUCH.md
-
 # WHAT WE ARE
 
 - A separate, private, open network derived from Ethereum — not committed to Ethereum legacy.
