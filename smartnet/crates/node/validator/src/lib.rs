@@ -19,7 +19,6 @@ pub mod outcome;
 pub mod payload_checkpoints;
 pub mod run_once;
 pub mod seed_tx;
-pub mod validators;
 
 use clap::{Parser, Subcommand};
 use std::{
@@ -44,8 +43,10 @@ pub struct Cli {
     /// The operator subcommand to run; `None` runs the default (daemon) behaviour.
     pub command: Option<Commands>,
 
-    /// Operator config (`KEY_PATH`, `PASSWORD_FILE`, `NODE_URL`, `COINBASE`, `ALLOW_EMPTY`, …).
-    /// Defaults to `~/.smartnet/config.toml` if not specified.
+    /// Operator config (`KEY_PATH`, `PASSWORD_FILE`, node-level `COINBASE` keystore selector,
+    /// `SEAL`, `ALLOW_EMPTY`, …). `COINBASE` is any node's selector and only picks the key file;
+    /// the fee receiver is derived from the decrypted key. Explicit path is used verbatim;
+    /// otherwise search `./config.toml`, then `~/.smartnet/config.toml`.
     #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<PathBuf>,
 
@@ -57,9 +58,8 @@ pub struct Cli {
 /// Validator operator subcommands.
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// The only way a key enters the validator: import a plaintext private-key file into an
-    /// encrypted keystore, point the config at it, then delete the source. Also replaces an
-    /// existing keystore (key-change flow).
+    /// Write an encrypted keystore into the config's `KEY_PATH`. The optional positional file
+    /// is a plaintext private key (deleted after success); without it a fresh key is generated.
     Keystore(KeystoreCli),
     /// Fund an account through the canonical seed-transaction flow.
     SeedTx,
@@ -67,17 +67,17 @@ pub enum Commands {
     Ping(PingCli),
 }
 
-/// Arguments for the `keystore` import subcommand.
+/// Arguments for the `keystore` subcommand.
+///
+/// Usage: `keystore [RAW_PRIVATE_KEY_FILE] --config CONFIG`. There are no `--key` or
+/// `--password` flags: `KEY_PATH` and `PASSWORD_FILE` are read from the named config. The
+/// raw-key file is optional; without it a random secp256k1 key is generated.
 #[derive(clap::Args, Debug)]
 pub struct KeystoreCli {
-    /// Path to a file holding the 64-hex-character private key, with or without a `0x`
-    /// prefix. The file is deleted once the keystore and config are written.
-    #[arg(long, value_name = "PATH")]
-    pub key: PathBuf,
-    /// Path to the password file for the encrypted keystore. The path is written to
-    /// `PASSWORD_FILE` in the config; a missing/empty file prompts (and is created).
-    #[arg(long, value_name = "PATH")]
-    pub password: PathBuf,
+    /// Optional file holding the 64-hex-character private key (`0x` prefix optional, any
+    /// case). Deleted only after the encrypted keystore is written. Omit to generate a key.
+    #[arg(value_name = "RAW_PRIVATE_KEY_FILE")]
+    pub private_key_file: Option<PathBuf>,
 }
 
 /// Arguments for the `ping` liveness probe.
@@ -99,27 +99,17 @@ pub struct PingCli {
     pub finalize: bool,
 }
 
-/// Default operator config path: `$HOME/.smartnet/validator/config.toml`.
+/// Resolve the operator config path: explicit `--config` verbatim, else `./config.toml`, then
+/// `~/.smartnet/config.toml`; all three missing is an error.
 ///
-/// `HOME` unset is an error — there is no fallback to the current working directory and no
-/// built-in config location. Pass `--config <path>` explicitly instead.
-pub(crate) fn default_validator_config_path() -> eyre::Result<PathBuf> {
-    let home = std::env::var("HOME").map_err(|_| {
-        eyre::eyre!(
-            "HOME is not set, so the default config path ~/.smartnet/config.toml cannot \
-             be resolved — pass `--config /path/to/config.toml` (no built-in fallback path exists)"
-        )
-    })?;
-    Ok(PathBuf::from(home).join(".smartnet").join("config.toml"))
-}
+/// Re-exported from `smartnet-fs-util` so the node CLI, extensions and this crate all apply one
+/// rule. `_with` takes the environment as arguments so the order can be tested in isolation.
+pub use smartnet_fs_util::runtime_paths::{resolve_config_path, resolve_config_path_with};
 
 impl Cli {
-    /// Returns the resolved config path — explicit `--config` flag or `~/.smartnet/config.toml`.
+    /// Returns the resolved config path: explicit `--config`, else the two-step scaffolding.
     pub fn resolved_config(&self) -> eyre::Result<PathBuf> {
-        match &self.config {
-            Some(p) => Ok(p.clone()),
-            None => default_validator_config_path(),
-        }
+        resolve_config_path(self.config.as_deref())
     }
 }
 
@@ -150,12 +140,13 @@ pub async fn run_validator_cli(cli: Cli) -> i32 {
     // existing provider, which is fine (the process default is set either way).
     let _ = smartnet_tls_provider::install_default();
 
-    // Resolve log verbosity from config before tracing (optional key `VERB`, defaults to 1).
-    let verb =
-        match crate::config::load_validator_config(&cli.resolved_config().unwrap_or_default()) {
-            Ok(cfg) => cfg.verb,
-            Err(_) => None,
-        };
+    // Resolve log verbosity with the same global config rule as every command (optional
+    // `VERB`, defaults to 1).
+    let verb = cli
+        .resolved_config()
+        .ok()
+        .and_then(|path| crate::config::load_validator_config(&path).ok())
+        .and_then(|cfg| cfg.verb);
     let level = verb_to_level(verb);
 
     // Terminal only. There is no log file: everything goes to stderr so stdout stays clean
@@ -225,28 +216,18 @@ where
             return Ok(None);
         }
 
-        let password = keystore_util::resolve_password_for_run(cfg.password_file.as_deref())?;
-        let key_path = cfg.keystore_path()?;
-        let secret_key =
-            keystore_util::load_secret_from_keystore(&key_path, &password).map_err(|status| {
-                match status {
-                    outcome::ValidatorStatus::Failed { message } => eyre::eyre!(message),
-                    other => eyre::eyre!("{other:?}"),
-                }
-            })?;
+        // Headless runtime: PASSWORD_FILE is mandatory; no prompt. Only the encrypted keystore
+        // and password bytes stay in RAM — no decrypted signing key is retained.
+        let password_file = cfg.password_file.as_deref().ok_or_else(|| {
+            eyre::eyre!("PASSWORD_FILE is required in config — headless boot never prompts")
+        })?;
+        // COINBASE is node-level: read it from the same config for every role. It only selects
+        // the key file; the signer address is derived inside the material, never written back.
+        let coinbase = smartnet_fs_util::keystore_selector::coinbase_from_config(&config_path)?;
+        let key = keystore_util::KeystoreMaterial::load(&cfg.key_dir, password_file, coinbase)?;
 
-        let signer = run_once::signer_address(&secret_key);
+        let signer = key.address();
 
-        // Bootstrap: read `validators.jsonl` ONCE into the RAM array (user-in.md #3).
-        // Fail closed — no readable registry means no sealer for this run.
-        let registry_path = calibri_lite_consensus::registry::default_validators_file();
-        if let Err(err) = crate::validators::load_validators(&registry_path) {
-            eyre::bail!(
-                "validators.jsonl unreadable ({}) : {err} — validator stays off for this run \
-                 (fail closed)",
-                registry_path.display()
-            );
-        }
         let heartbeat_ms = cfg.heartbeat_ms;
         // The daemon re-checks on the next beat anyway, so the post-import canonical probe is
         // bounded by one heartbeat: a slow promotion is benign (`IMPORT_CANONICAL_STALLED`) and
@@ -259,7 +240,7 @@ where
         let args = run_once::RunOnceArgs {
             coinbase: signer,
             fee_receiver: signer,
-            secret_key,
+            key,
             dump_payload: None,
             allow_empty: cfg.allow_empty,
             chain_id,
@@ -408,6 +389,17 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(200)).await; // the active-pass window
                 Ok(315)
             }
+            fn enabled_validators(&self) -> Vec<Address> {
+                Vec::new()
+            }
+            fn get_val_chair(
+                &self,
+                _block_hash: B256,
+                _ts: u64,
+                _purpose: &str,
+            ) -> Option<Address> {
+                None
+            }
             async fn block_by_number(
                 &self,
                 _tag: alloy_rpc_types_eth::BlockNumberOrTag,
@@ -477,7 +469,9 @@ mod tests {
             args: run_once::RunOnceArgs {
                 coinbase: Address::ZERO,
                 fee_receiver: Address::ZERO,
-                secret_key: k256::ecdsa::SigningKey::from_slice(&[1u8; 32]).expect("valid scalar"),
+                key: keystore_util::test_material(
+                    &k256::ecdsa::SigningKey::from_slice(&[1u8; 32]).expect("valid scalar"),
+                ),
                 dump_payload: None,
                 allow_empty: false,
                 chain_id: 315,
@@ -530,6 +524,17 @@ mod tests {
             async fn chain_id(&self) -> eyre::Result<u64> {
                 self.entered.store(true, Ordering::Release);
                 Ok(315)
+            }
+            fn enabled_validators(&self) -> Vec<Address> {
+                Vec::new()
+            }
+            fn get_val_chair(
+                &self,
+                _block_hash: B256,
+                _ts: u64,
+                _purpose: &str,
+            ) -> Option<Address> {
+                None
             }
             async fn block_by_number(
                 &self,
@@ -620,8 +625,9 @@ mod tests {
                 args: run_once::RunOnceArgs {
                     coinbase: Address::ZERO,
                     fee_receiver: Address::ZERO,
-                    secret_key: k256::ecdsa::SigningKey::from_slice(&[1u8; 32])
-                        .expect("valid scalar"),
+                    key: keystore_util::test_material(
+                        &k256::ecdsa::SigningKey::from_slice(&[1u8; 32]).expect("valid scalar"),
+                    ),
                     dump_payload: None,
                     allow_empty: false,
                     chain_id: 315,
@@ -673,7 +679,7 @@ mod tests {
         assert!(parse_b256("nothex").is_err(), "garbage must be rejected");
     }
 
-    /// An explicit `--config` always wins over the default `~/.smartnet/...` path.
+    /// An explicit `--config` is used verbatim — no scaffolding, even for a missing file.
     #[test]
     fn resolved_config_prefers_the_explicit_flag() {
         let cli = Cli {
@@ -687,40 +693,113 @@ mod tests {
         );
     }
 
-    /// `keystore` carries both paths (`--key`, `--password`) — the only key-change interface.
+    /// Without `--config`, the global rule searches launch directory first, then `~/.smartnet`.
     #[test]
-    fn keystore_subcommand_parses_key_and_password() {
+    fn config_search_order_is_cwd_then_home() {
+        let root = std::env::temp_dir().join(format!("smartnet-config-search-{}", std::process::id()));
+        let launch_dir = root.join("launch");
+        let home_dir = root.join("home");
+        std::fs::create_dir_all(&launch_dir).expect("launch dir");
+        std::fs::create_dir_all(home_dir.join(".smartnet")).expect("smartnet dir");
+        let local = launch_dir.join("config.toml");
+        let installed = home_dir.join(".smartnet/config.toml");
+        std::fs::write(&local, "KEY_PATH = \"/tmp/local\"").expect("local config");
+        std::fs::write(&installed, "KEY_PATH = \"/tmp/home\"").expect("installed config");
+
+        let home = home_dir.to_string_lossy().to_string();
+        assert_eq!(
+            resolve_config_path_with(None, Some(&launch_dir), Some(&home)).unwrap(),
+            local,
+            "the launch directory wins"
+        );
+
+        std::fs::remove_file(&local).expect("remove local config");
+        assert_eq!(
+            resolve_config_path_with(None, Some(&launch_dir), Some(&home)).unwrap(),
+            installed,
+            "the installed file is the second stop"
+        );
+
+        let err = resolve_config_path_with(None, Some(&launch_dir), None).unwrap_err();
+        assert!(err.to_string().contains("searched"), "got: {err}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Both accepted orders: `--config` may follow the optional raw-key positional or precede
+    /// the subcommand. `--key`/`--password` are gone; the config owns both paths.
+    #[test]
+    fn keystore_subcommand_accepts_both_config_orders() {
         use clap::Parser;
-        let cli = Cli::try_parse_from([
-            "smartnet-validator",
-            "keystore",
-            "--key",
-            "/tmp/smartnet/validator/key",
-            "--password",
-            "/home/u/.smartnet/validator/pw.txt",
-        ])
-        .expect("keystore with --key and --password");
-        match cli.command {
-            Some(Commands::Keystore(k)) => {
-                assert_eq!(k.key, std::path::PathBuf::from("/tmp/smartnet/validator/key"));
-                assert_eq!(
-                    k.password,
-                    std::path::PathBuf::from("/home/u/.smartnet/validator/pw.txt")
-                );
+        for argv in [
+            vec![
+                "smartnet-validator",
+                "keystore",
+                "/tmp/smartnet/validator/raw.key",
+                "--config",
+                "/home/u/smartnet/config.toml",
+            ],
+            vec![
+                "smartnet-validator",
+                "--config",
+                "/home/u/smartnet/config.toml",
+                "keystore",
+                "/tmp/smartnet/validator/raw.key",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(argv).expect("keystore with an explicit config");
+            assert_eq!(
+                cli.config,
+                Some(std::path::PathBuf::from("/home/u/smartnet/config.toml"))
+            );
+            match cli.command {
+                Some(Commands::Keystore(k)) => assert_eq!(
+                    k.private_key_file,
+                    Some(std::path::PathBuf::from("/tmp/smartnet/validator/raw.key"))
+                ),
+                other => panic!("expected keystore, got {other:?}"),
             }
-            other => panic!("expected keystore, got {other:?}"),
         }
     }
 
-    /// Both flags are required: keys or a password path cannot be omitted.
+    /// The raw-key file is optional: omitting it generates a key. Old flags are hard errors.
     #[test]
-    fn keystore_requires_key_and_password() {
+    fn keystore_key_is_optional_and_old_flags_are_gone() {
         use clap::Parser;
-        assert!(Cli::try_parse_from(["smartnet-validator", "keystore"]).is_err());
-        assert!(Cli::try_parse_from(["smartnet-validator", "keystore", "--key", "/tmp/k"]).is_err());
-        assert!(Cli::try_parse_from(["smartnet-validator", "keystore", "--password", "/tmp/pw"])
-            .is_err());
-        // The old random-key `keystore` and positional `import` no longer exist.
-        assert!(Cli::try_parse_from(["smartnet-validator", "keystore", "import", "/x"]).is_err());
+        let cli = Cli::try_parse_from([
+            "smartnet-validator",
+            "--config",
+            "/home/u/smartnet/config.toml",
+            "keystore",
+        ])
+        .expect("key generation needs no positional file");
+        match cli.command {
+            Some(Commands::Keystore(k)) => assert_eq!(k.private_key_file, None),
+            other => panic!("expected keystore, got {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "smartnet-validator",
+                "keystore",
+                "--key",
+                "/tmp/k",
+                "--config",
+                "/home/u/smartnet/config.toml",
+            ])
+            .is_err(),
+            "--key must be rejected"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "smartnet-validator",
+                "keystore",
+                "--password",
+                "/tmp/pw",
+                "--config",
+                "/home/u/smartnet/config.toml",
+            ])
+            .is_err(),
+            "--password must be rejected"
+        );
     }
 }

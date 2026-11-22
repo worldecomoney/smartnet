@@ -1,15 +1,17 @@
 //! Genesis-backed storage bootstrap (`smartnet init`).
 //!
 //! The command’s job is to create and populate on-disk state for the chain: database, static files,
-//! and genesis execution according to the given chainspec (e.g. `genesis.json`). It reads
-//! `datadir` / `DATADIR_PATH` from `--config` and writes under that resolved path. A preliminary
-//! check requires that chain datadir to be missing or empty so existing data is never overwritten.
+//! and genesis execution according to the given chainspec (e.g. `genesis.json`). The operator's
+//! keystore is checked first (`smartnet keystore` must already have run); only then does this
+//! command read `DATADIR_PATH` from `--config`. A preliminary check requires that chain datadir
+//! to be missing or empty so existing data is never overwritten.
 
 use crate::{
+    app::ensure_keystore_ready,
     cli_core::chainspec::{ChainSpecParser, GenesisWithRaw},
     commands::{
         common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs},
-        node::{expand_tilde, operator_datadir_args},
+        node::operator_datadir_args,
     },
 };
 use clap::Parser;
@@ -18,6 +20,7 @@ use smartnet_chainspec::{
 };
 use smartnet_config::load_config_file;
 use smartnet_db::DatabaseBackend;
+use smartnet_fs_util::runtime_paths::{home_dir_from_config, resolve_runtime_path};
 use smartnet_node_core::args::DatabaseArgs;
 use smartnet_primitives_traits::AlloyBlockHeader;
 use smartnet_provider::{
@@ -66,11 +69,11 @@ fn ensure_chain_datadir_empty_for_init(
 }
 
 /// Bootstrap chain storage from a genesis chainspec: opens/creates DB and static files under the
-/// configured datadir, validates chain id against `--config` when present, then writes genesis
-/// state.
+/// configured datadir, then writes genesis state.
 ///
-/// Use: `smartnet init <GENESIS_FILE_OR_JSON> [--config /path/to/smartnet.toml]` — config is
-/// optional and defaults to `~/.smartnet/config.toml`.
+/// Use: `smartnet init <GENESIS_FILE_OR_JSON> [--config /path/to/smartnet.toml]`. The global
+/// config rule applies: an explicit `--config` is used verbatim; otherwise search
+/// `./config.toml` then `~/.smartnet/config.toml`.
 #[derive(Debug, Parser)]
 pub struct InitCommand<C: ChainSpecParser> {
     /// Genesis / chainspec: path to a JSON file, or inline JSON. The operator's verbatim
@@ -89,27 +92,30 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> InitComman
     ) -> eyre::Result<()> {
         info!(target: "smartnet::cli", "smartnet init starting");
 
-        // Config only, no built-in default: the datadir comes from DATADIR_PATH in the operator
-        // config. A missing config file, a missing key, an unset HOME, or a relative path are all
-        // hard errors — `init` must never guess where chain data lives.
+        // Exact order: keystore first. `smartnet init` must not even inspect DATADIR_PATH
+        // until the operator's key has been created by `smartnet keystore` and verified here.
+        ensure_keystore_ready(global_config)?;
+
+        // Config only, no built-in default: DATADIR_PATH is relative to HOME_DIR_PATH, the one
+        // absolute root in the operator config. A missing config, root, or key is a hard error —
+        // `init` must never guess where chain data lives.
         let cfg = load_config_file(global_config).map_err(|e| {
             eyre::eyre!("operator config `{}` cannot be loaded: {e}", global_config.display())
         })?;
-        let datadir_root = cfg.datadir.ok_or_else(|| {
+        let raw = std::fs::read_to_string(global_config).map_err(|e| {
+            eyre::eyre!("operator config `{}` cannot be read: {e}", global_config.display())
+        })?;
+        let home_dir = home_dir_from_config(&raw).map_err(|e| {
+            eyre::eyre!("operator config `{}` HOME_DIR_PATH: {e}", global_config.display())
+        })?;
+        let datadir = cfg.datadir.ok_or_else(|| {
             eyre::eyre!(
                 "operator config `{}` must set DATADIR_PATH — there is no built-in default data \
                  directory (template: smartnet/example.config.toml)",
                 global_config.display()
             )
         })?;
-        let datadir_root = expand_tilde(datadir_root)?;
-        if !datadir_root.is_absolute() {
-            eyre::bail!(
-                "DATADIR_PATH is relative ({}) — an absolute path is required; resolving it \
-                 against the current working directory would be a hidden default",
-                datadir_root.display()
-            );
-        }
+        let datadir_root = resolve_runtime_path(&home_dir, &datadir.to_string_lossy())?;
         // The engine comes from config (`DB_ENGINE`, default `fjall`) and is validated here:
         // an unknown engine name must fail `init` loudly instead of silently defaulting —
         // config dictates the engine, and the tree this init creates belongs to that engine.

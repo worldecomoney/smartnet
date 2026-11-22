@@ -41,7 +41,9 @@ fn main() {
             handle.wait_for_node_exit().await
         }
     }) {
-        eprintln!("Error: {err:?}");
+        // Display only: `{err:?}` makes eyre print its capture `Location:` and backtrace,
+        // which is noise for an operator-facing boot failure (e.g. a busy HTTP-RPC port).
+        eprintln!("Error: {err}");
         std::process::exit(1);
     }
 }

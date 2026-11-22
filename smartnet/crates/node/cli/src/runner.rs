@@ -5,7 +5,7 @@
 use smartnet_tasks::{PanickedTaskError, TaskExecutor};
 use std::{future::Future, pin::pin, sync::mpsc, time::Duration};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Executes CLI commands.
 ///
@@ -78,8 +78,8 @@ impl CliRunner {
             run_until_ctrl_c(command(context)),
         ));
 
-        if let Err(err) = &command_res {
-            error!(target: "smartnet::cli", %err, "shutting down due to error");
+        if command_res.is_err() {
+            // The binary reports the error once on stderr; no duplicate shutdown log here.
         } else {
             debug!(target: "smartnet::cli", "shutting down gracefully");
             // after the command has finished or exit signal was received we shutdown the
@@ -124,8 +124,8 @@ impl CliRunner {
             ),
         ));
 
-        if let Err(err) = &command_res {
-            error!(target: "smartnet::cli", %err, "shutting down due to error");
+        if command_res.is_err() {
+            // The binary reports the error once on stderr; no duplicate shutdown log here.
         } else {
             debug!(target: "smartnet::cli", "shutting down gracefully");
             self.runtime.graceful_shutdown_with_timeout(self.config.graceful_shutdown_timeout);

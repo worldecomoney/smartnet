@@ -15,6 +15,7 @@ use smartnet_mesh::{
     sync_gate::SyncGate,
     ws::{serve, MeshServer, ServerConfig},
 };
+use smartnet_validator::keystore_util::KeystoreMaterial;
 use std::{
     collections::VecDeque,
     net::SocketAddr,
@@ -32,11 +33,27 @@ pub fn install_tls() {
 }
 
 /// A deterministic test identity: key byte 31 = `seed`, network id 1.
+///
+/// The fixture is encrypted to bytes and loaded as [`KeystoreMaterial`], so the test identity
+/// follows the same no-naked-key-in-RAM contract as production.
 pub fn test_identity(seed: u8) -> Identity {
     let mut bytes = [0u8; 32];
     bytes[31] = seed;
     let key = k256::ecdsa::SigningKey::from_slice(&bytes).expect("valid scalar");
-    Identity::new(key, 1)
+    let dir = tempfile::tempdir().expect("test tempdir");
+    let mut rng = rand_08::rngs::OsRng;
+    alloy_signer_local::PrivateKeySigner::encrypt_keystore(
+        dir.path(),
+        &mut rng,
+        key.to_bytes(),
+        b"pw",
+        Some("key.json"),
+    )
+    .expect("encrypt test keystore");
+    let encrypted = std::fs::read(dir.path().join("key.json")).expect("read test keystore");
+    let material =
+        KeystoreMaterial::from_encrypted_bytes(encrypted, b"pw".to_vec()).expect("test material");
+    Identity::new(material, 1)
 }
 
 /// The client (initiator) identity used across mesh tests.
@@ -59,7 +76,7 @@ pub fn client_allowlist() -> Vec<alloy_primitives::Address> {
 /// mesh allowlist). `port` is the entry's mesh port (only matters for self-skip).
 pub fn client_peer_line(port: u16) -> String {
     format!(
-        r#"{{"key_id":"{:#x}","url":"","ip":"127.0.0.1","port_range":{port},"active":true,"valid":true}}"#,
+        r#"{{"address":"{:#x}","url":"","ip":"127.0.0.1","port_range":{port},"active":true,"valid":true}}"#,
         client_identity().address()
     )
 }

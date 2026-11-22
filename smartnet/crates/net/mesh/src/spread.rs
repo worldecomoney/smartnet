@@ -152,7 +152,11 @@ impl Spreader {
         for error in &parsed.errors {
             warn!(target: "smartnet::mesh", path = %self.config.peers_file.display(), %error, "mesh peer line skipped");
         }
-        parsed.peers.into_iter().filter(|peer| peer.is_target(self.config.self_port)).collect()
+        parsed
+            .peers
+            .into_iter()
+            .filter(|peer| peer.is_target(self.config.self_port, self.config.identity.address()))
+            .collect()
     }
 
     /// Dials every passed target **now** instead of lazily on first spread. Boot needs
@@ -242,13 +246,9 @@ impl Spreader {
 mod tests {
     use super::*;
     use crate::identity::Identity;
-    use k256::ecdsa::SigningKey;
 
     fn test_identity() -> Arc<Identity> {
-        let mut bytes = [0u8; 32];
-        bytes[31] = 1;
-        let key = SigningKey::from_slice(&bytes).expect("valid scalar");
-        Arc::new(Identity::new(key, 1))
+        Arc::new(crate::identity::test_identity(1))
     }
 
     #[test]

@@ -27,20 +27,21 @@ alloy-primitives = { workspace = true, features = ["serde"] }
 k256 = { workspace = true, features = ["ecdsa"] }
 getrandom.workspace = true
 
-# Node identity keystore: encrypted Ethereum JSON v3 decrypt (the one shared loader).
-# `alloy-signer-local` provides `PrivateKeySigner::decrypt_keystore` (scrypt/AES-128-CTR),
-# same format geth and the validator's `smartnet keystore` writer produce.
-alloy-signer-local = { workspace = true, features = ["keystore"] }
+# Node identity keystore: the ONE decrypt function lives in `smartnet-validator`.
+smartnet-validator.workspace = true
 eyre.workspace = true
 
 # logging / errors
 tracing.workspace = true
 thiserror.workspace = true
+smartnet-fs-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-# Keystore test fixture builder encrypts a key with OsRng.
+# Keystore test fixture builder encrypts a key with OsRng; decryption always uses the
+# shared `smartnet_validator::keystore_util::load_secret_from_keystore`.
+alloy-signer-local = { workspace = true, features = ["keystore"] }
 rand_08 = { package = "rand", version = "0.8" }
 # Tests build reqwest clients; the workspace `rustls-no-provider` reqwest needs a
 # process-default crypto provider installed first (the node binary does this in `main`).

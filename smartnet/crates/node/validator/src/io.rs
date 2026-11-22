@@ -11,7 +11,7 @@
 //! the pure wire encoders the node's implementation needs, so the validator and the node cannot
 //! disagree about how a `balanceOf` call looks.
 
-use alloy_primitives::{Address, Bytes, TxHash, U256};
+use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
 use alloy_rpc_types_eth::{
     simulate::{SimulatePayload, SimulatedBlock},
     Block, BlockNumberOrTag, Transaction, TransactionRequest,
@@ -38,6 +38,15 @@ pub trait ValidatorIo: Send + Sync {
 
     /// The node's chain id, cross-checked against the validator config.
     async fn chain_id(&self) -> Result<u64>;
+
+    /// Enabled validator addresses from the node-owned registry (`get_val_all` reduced to
+    /// `status: true`). The validator never opens `validators.jsonl`; the node answers here.
+    fn enabled_validators(&self) -> Vec<Address>;
+
+    /// The chair for `(block_hash, ts, purpose)` from the node-owned registry. The validator
+    /// uses this to know whether it is the chair for the slot it is about to seal; plain RPC
+    /// nodes expose the same node-side query without running a validator.
+    fn get_val_chair(&self, block_hash: B256, ts: u64, purpose: &str) -> Option<Address>;
 
     /// Fetch a block by number/tag.
     async fn block_by_number(&self, tag: BlockNumberOrTag) -> Result<Option<Block<Transaction>>>;

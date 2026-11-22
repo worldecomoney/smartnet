@@ -12,18 +12,22 @@ use crate::{
 use alloy_primitives::{Address, U256};
 use calibri_lite_consensus::pre_consensus::SMARTNET_FIXED_GAS_PRICE_WEI;
 use clap::Subcommand;
-use eyre::{eyre, Result};
+use eyre::{eyre, Context as _, Result};
 use smartnet_chainspec::{Chain, ChainSpec, EthChainSpec, EthereumHardforks, Hardforks};
+use smartnet_config::config::PruneConfig;
 use smartnet_db::{open_db, DatabaseBackend, DatabaseEnv};
-use smartnet_provider::ProviderFactory;
 use smartnet_evm::eth::spec::{DisableBlockRewards, EthExecutorSpec};
+use smartnet_fs_util::runtime_paths::{
+    home_dir_from_config, resolve_data_file, resolve_runtime_path, HOME_DIR_KEY,
+};
 use smartnet_node_api::{NodePrimitives, NodeTypes, NodeTypesWithDBAdapter};
 use smartnet_node_builder::{NodeBuilder, WithLaunchContext};
-use smartnet_config::config::PruneConfig;
 use smartnet_node_core::args::DatabaseArgs;
 use smartnet_node_ethereum::{consensus::EthBeaconConsensus, EthEvmConfig, EthereumNode};
+use smartnet_provider::ProviderFactory;
 use smartnet_rpc_server_types::RpcModuleValidator;
-use smartnet_tracing::{FileWorkerGuard, Layers};
+use smartnet_tracing::Layers;
+use smartnet_validator::{config::load_validator_config, keystore_util::KeystoreMaterial};
 use std::{
     fmt,
     net::IpAddr,
@@ -31,6 +35,10 @@ use std::{
     sync::Arc,
 };
 use tracing::{info, warn};
+
+/// Role keys that make the node mesh-only: RPC is off and the `HTTP_*` bind keys are optional.
+/// Keep this as the one list to extend when another non-RPC role lands (`BRIDGE` will join `SEAL`).
+const RPC_DISABLED_ROLE_KEYS: &[&str] = &["SEAL"];
 
 /// Maps a VERBOSITY rank (0-4) to a tracing log-level filter string.
 ///
@@ -79,6 +87,13 @@ fn tracing_filter_from_config(explicit: Option<&Path>) -> Option<String> {
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct OperatorConfigOverlay {
+    /// Validator registry file (`VAL_FILE` when keyed) — `~`-expanded, absolute. When the key
+    /// is missing/blank, the shared scaffold finds `validators.jsonl` locally or in
+    /// `~/.smartnet`. The node gate and the chair both load from it.
+    val_file: Option<PathBuf>,
+    /// Node-level keystore selector (`COINBASE`): picks one encrypted key file when `KEY_PATH`
+    /// holds several. It is not an identity, fee receiver, or consensus input.
+    coinbase: Option<Address>,
     datadir_path: Option<PathBuf>,
     http_port: Option<u16>,
     http_addr: Option<IpAddr>,
@@ -112,7 +127,8 @@ pub(crate) struct OperatorConfigOverlay {
     mesh_port: Option<u16>,
     /// Mesh listen address (`MESH_ADDR`, optional key): absent = `0.0.0.0` (all interfaces).
     mesh_addr: Option<IpAddr>,
-    /// Mesh peer file (`MESH_PEERS_FILE`, optional key; `~`-expanded to absolute).
+    /// Mesh peer file (`MESH_PEERS_FILE` when keyed; `~`-expanded to absolute). When the key is
+    /// missing/blank, the shared scaffold finds `mainnet.jsonl` locally or in `~/.smartnet`.
     mesh_peers_file: Option<PathBuf>,
     /// Max mesh `WebSocket` message size in MB (`MESH_MAX_MSG_MB`, optional key).
     /// Unset = 32 MB; `0` is rejected.
@@ -145,21 +161,6 @@ fn strip_quotes(s: &str) -> &str {
     }
 }
 
-/// Expand a leading `~`. `HOME` unset is an error — never silently keep the literal `~/…`
-/// and never fall back to the current working directory.
-fn expand_home(p: &str) -> eyre::Result<PathBuf> {
-    if let Some(rest) = p.strip_prefix('~') {
-        let home = std::env::var("HOME").map_err(|_| {
-            eyre::eyre!(
-                "config path {p:?} starts with `~` but HOME is not set — use an absolute path \
-                 instead (no built-in fallback path exists)"
-            )
-        })?;
-        return Ok(PathBuf::from(home).join(rest.trim_start_matches('/')));
-    }
-    Ok(PathBuf::from(p))
-}
-
 /// Parse one config value, naming the key on failure so a bad value is never mistaken
 /// for a missing one.
 fn parse_key<T: std::str::FromStr>(key: &str, value: &str) -> eyre::Result<T>
@@ -170,7 +171,6 @@ where
         .parse::<T>()
         .map_err(|e| eyre::eyre!("config {key} has an invalid value {value:?}: {e}"))
 }
-
 
 /// Strip a trailing `#` comment from a raw config line.
 ///
@@ -196,10 +196,9 @@ fn strip_comment(line: &str) -> &str {
                 }
             }
             b'"' if !in_single => in_double = !in_double,
-            b'#' if !in_single && !in_double
-                && (i == 0 || b[i - 1].is_ascii_whitespace()) => {
-                    return &line[..i];
-                }
+            b'#' if !in_single && !in_double && (i == 0 || b[i - 1].is_ascii_whitespace()) => {
+                return &line[..i];
+            }
             _ => {}
         }
         i += 1;
@@ -207,13 +206,55 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
+/// Keystore comes before init, everywhere: a node, an import, or `smartnet init` must never
+/// look at the data directory until the operator's key is present and readable. This is a
+/// check only — it never creates or repairs a keystore; that is `smartnet keystore`'s job.
+pub(crate) fn ensure_keystore_ready(config_path: &Path) -> eyre::Result<()> {
+    let cfg = load_validator_config(config_path).with_context(|| {
+        format!(
+            "keystore is not ready in config {} — run `smartnet keystore` before init",
+            config_path.display()
+        )
+    })?;
+    let password_file = cfg.password_file.as_deref().ok_or_else(|| {
+        eyre!(
+            "PASSWORD_FILE is not set in {} — run `smartnet keystore` before init",
+            config_path.display()
+        )
+    })?;
+    let coinbase = smartnet_fs_util::keystore_selector::coinbase_from_config(config_path)
+        .with_context(|| format!("invalid COINBASE in config {}", config_path.display()))?;
+    KeystoreMaterial::load(&cfg.key_dir, password_file, coinbase).with_context(|| {
+        format!(
+            "KEY_PATH {} has no usable keystore (check COINBASE if set) — run `smartnet keystore` before init",
+            cfg.key_dir.display()
+        )
+    })?;
+    Ok(())
+}
+
 pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigOverlay> {
     let raw = std::fs::read_to_string(path)?;
     let mut cfg = OperatorConfigOverlay::default();
     // Every problem found is collected so an unedited config reports all of them in one
-    // error instead of making the operator play whack-a-mole.
-    let mut seen: Vec<&'static str> = Vec::new();
+    // error instead of making the operator play whack-a-mole. `VAL_FILE` is node-owned:
+    // the node's registry module is the only parser of the registry path.
     let mut problems: Vec<String> = Vec::new();
+    let home_dir = match home_dir_from_config(&raw) {
+        Ok(base) => Some(base),
+        Err(err) => {
+            problems.push(format!("{err:#}"));
+            None
+        }
+    };
+    cfg.val_file = match smartnet_node_ethereum::validator_registry::parse_val_file(&raw) {
+        Ok(val_file) => Some(val_file),
+        Err(err) => {
+            problems.push(format!("{err:#}"));
+            None
+        }
+    };
+    let mut seen: Vec<&'static str> = Vec::new();
 
     // Join multi-line TOML arrays: `KEY = [\n  …,\n]` becomes one logical line.
     let mut lines: Vec<String> = Vec::new();
@@ -230,6 +271,23 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
         lines.push(stripped);
     }
 
+    // A mesh-only role makes the RPC bind keys optional and overrides `RPC_SERVER`: validators
+    // (and, later, bridges) talk over the mesh and must never open the HTTP listener by accident.
+    let mut rpc_disabled_by_role = false;
+    for role in RPC_DISABLED_ROLE_KEYS {
+        for line in &lines {
+            let Some((key, value)) = line.split_once('=') else { continue };
+            if key.trim() != *role {
+                continue;
+            }
+            match parse_key::<bool>(role, value) {
+                Ok(true) => rpc_disabled_by_role = true,
+                Ok(false) => {}
+                Err(err) => problems.push(format!("{err:#}")),
+            }
+        }
+    }
+
     for line in &lines {
         let line = line.trim();
         if line.is_empty() || !line.contains('=') {
@@ -242,14 +300,15 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
             continue;
         }
 
-        // The validator section lives in this same file and is parsed by `smartnet-validator`
-        // (`SEAL`, `ALLOW_EMPTY`, keystore paths, heartbeat, caps). The node overlay must
-        // recognize these keys so they are not reported as unknown, but it owns none of them:
-        // the validator's own parser validates them (fail-closed) and the merged daemon reads
-        // them at boot.
+        // This same file also carries node-owned `VAL_FILE` and `COINBASE` (parsed here for every
+        // role) plus the validator section (`SEAL`, `ALLOW_EMPTY`, keystore paths, heartbeat,
+        // caps). The node overlay recognizes them all so they are not reported as unknown; the
+        // validator section itself is validated by `smartnet-validator` at boot.
         if matches!(
             key,
-            "SEAL" |
+            HOME_DIR_KEY |
+                "VAL_FILE" |
+                "SEAL" |
                 "ALLOW_EMPTY" |
                 "KEY_PATH" |
                 "PASSWORD_FILE" |
@@ -269,6 +328,7 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
             "DATADIR_PATH" => "DATADIR_PATH",
             "HTTP_PORT" => "HTTP_PORT",
             "HTTP_ADDR" => "HTTP_ADDR",
+            "COINBASE" => "COINBASE",
             "RPC_SERVER" => "RPC_SERVER",
             "RPC_MEMPOOL" => "RPC_MEMPOOL",
             "RPC_NODEINFO" => "RPC_NODEINFO",
@@ -300,9 +360,12 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
         };
         seen.push(name);
 
-        // A key that is present but blank is a problem in its own right — there is no
-        // built-in default to fall back to.
+        // A present but blank value is a problem except for config-owned data files: blank
+        // means "not keyed", so they use the same local → ~/.smartnet scaffold as a missing key.
         if strip_quotes(value).trim().is_empty() {
+            if name == "MESH_PEERS_FILE" || name == "COINBASE" {
+                continue;
+            }
             problems.push(format!(
                 "config `{name}` is empty — set a value (SmartNet ships no built-in default)"
             ));
@@ -310,9 +373,19 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
         }
 
         match name {
-            "DATADIR_PATH" => cfg.datadir_path = Some(expand_home(strip_quotes(value))?),
+            "DATADIR_PATH" => {
+                if let Some(base) = home_dir.as_ref() {
+                    cfg.datadir_path = Some(resolve_runtime_path(base, strip_quotes(value))?);
+                }
+            }
             "HTTP_PORT" => cfg.http_port = Some(parse_key(name, value)?),
             "HTTP_ADDR" => cfg.http_addr = Some(parse_key(name, value)?),
+            // Node-level keystore selector for any role: validated here so a bad address fails
+            // boot; the actual file selection is done by `smartnet-fs-util`.
+            "COINBASE" => {
+                cfg.coinbase =
+                    smartnet_fs_util::keystore_selector::parse_coinbase_value(strip_quotes(value))?;
+            }
             "RPC_SERVER" => cfg.rpc_server = Some(parse_key(name, value)?),
             // Optional (absent = off, keeping existing configs booting — same pattern as
             // VERBOSITY/MESH_*). The registry hard-blocks `txpool` unless this is true.
@@ -347,12 +420,19 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
             "MESH_ADDR" => cfg.mesh_addr = Some(parse_key(name, value)?),
             "MESH_MAX_MSG_MB" => cfg.mesh_max_msg_mb = Some(parse_key(name, value)?),
             "NODE_HEARTBEAT" => cfg.heartbeat_ms = Some(parse_key(name, value)?),
-            "MESH_PEERS_FILE" => match expand_home(strip_quotes(value)) {
-                Ok(path) => cfg.mesh_peers_file = Some(path),
-                // Collected (not `?`): a `~` with HOME unset must join the full problem
-                // report instead of aborting the load before the other keys are checked.
-                Err(err) => problems.push(format!("config `{name}`: {err}")),
-            },
+            "MESH_PEERS_FILE" => {
+                if let Some(base) = home_dir.as_ref() {
+                    match resolve_data_file(
+                        "mainnet.jsonl",
+                        base,
+                        Some(Path::new(strip_quotes(value))),
+                    ) {
+                        Ok(path) => cfg.mesh_peers_file = Some(path),
+                        // Collected (not `?`): a bad value joins the full problem report.
+                        Err(err) => problems.push(format!("config `{name}`: {err}")),
+                    }
+                }
+            }
             "CROSS_BLOCK_CACHE_SIZE" => cfg.cross_block_cache_size = Some(parse_key(name, value)?),
             "VERBOSITY" => {
                 let rank = strip_quotes(value)
@@ -377,7 +457,22 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
         }
     }
 
-    // Config only, no built-in defaults: every key the node reads must be present. A typo
+    if rpc_disabled_by_role {
+        cfg.rpc_server = Some(false);
+    }
+
+    // Config-owned data files may be omitted: the shared scaffold then looks in the launch
+    // directory and HOME_DIR_PATH, in that order. Neither is an operator-supplied CLI argument.
+    if cfg.mesh_peers_file.is_none() &&
+        let Some(base) = home_dir.as_ref()
+    {
+        match resolve_data_file("mainnet.jsonl", base, None) {
+            Ok(path) => cfg.mesh_peers_file = Some(path),
+            Err(err) => problems.push(format!("config `MESH_PEERS_FILE` / mainnet.jsonl: {err}")),
+        }
+    }
+
+    // Config only, no built-in defaults: every other key the node reads must be present. A typo
     // surfaces here as a missing key rather than silently keeping a Rust-side default
     // (`Ipv4Addr::LOCALHOST`, port 8545, …).
     //
@@ -387,17 +482,23 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
     // values exits with a distinct code naming `smartnet init`).
     const REQUIRED: &[&str] = &[
         "DATADIR_PATH",
-        "HTTP_PORT",
-        "HTTP_ADDR",
         "GPO_DEFAULT_SUGGESTED_FEE",
         "CROSS_BLOCK_CACHE_SIZE",
         "MESH_PORT",
         "MESH_ADDR",
     ];
-    let missing: Vec<&str> = REQUIRED.iter().copied().filter(|k| !seen.contains(k)).collect();
+    // HTTP bind keys belong to the plain node only. A mesh-only role (SEAL now, BRIDGE later)
+    // has no RPC listener, so requiring its address would reject a valid validator config.
+    const RPC_REQUIRED: &[&str] = &["HTTP_PORT", "HTTP_ADDR"];
+    let mut required: Vec<&str> = REQUIRED.to_vec();
+    if !rpc_disabled_by_role {
+        required.extend_from_slice(RPC_REQUIRED);
+    }
+    let missing: Vec<&str> = required.into_iter().filter(|k| !seen.contains(k)).collect();
     if !missing.is_empty() {
         problems.push(format!(
-            "missing required key(s): {} (template: smartnet/example.config.toml)",
+            "missing required key(s): {} (RPC bind keys are required only for a plain node; \
+             template: smartnet/example.config.toml)",
             missing.join(", ")
         ));
     }
@@ -405,33 +506,26 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
     // Value sanity checks: an insane value aborts startup instead of silently falling
     // through to a default. A bad config must never produce a node running against the
     // wrong chain, an unreachable port, or an under-pinned gas price.
-    if let Some(datadir) = cfg.datadir_path.as_ref()
-        && !datadir.is_absolute() {
-            problems.push(format!(
-                "DATADIR_PATH is relative ({}) — an absolute path is required; resolving it \
-                 against the current working directory would be a hidden default",
-                datadir.display()
-            ));
-        }
     {
         let (name, port) = ("HTTP_PORT", cfg.http_port);
         if port == Some(0) {
             problems.push(format!("{name} is 0 — that port would not be reachable"));
         }
     }
-    if let Some(fee) = cfg.default_suggested_fee
-        && fee.is_zero() {
-            problems.push(
-                "GPO_DEFAULT_SUGGESTED_FEE is 0 — an under-pinned gas price produces \
+    if let Some(fee) = cfg.default_suggested_fee &&
+        fee.is_zero()
+    {
+        problems.push(
+            "GPO_DEFAULT_SUGGESTED_FEE is 0 — an under-pinned gas price produces \
                  unexecutable transactions"
-                    .to_string(),
-            );
-        }
+                .to_string(),
+        );
+    }
     // The mesh is always on: `MESH_PORT` and `MESH_ADDR` are required and the port must be
     // a reachable one (>= 1024). The RPC is the optional half of the pair — it can be off
     // while the mesh stays up (injection is in-process, no socket). The listener port must
-    // not collide with any other listener, and the peer file must be absolute — a
-    // cwd-relative path would silently change meaning with the launch directory.
+    // not collide with any other listener; the peer file is absolute whether it came from
+    // the config key or the scaffold.
     if cfg.heartbeat_ms == Some(0) {
         problems.push(
             "NODE_HEARTBEAT is 0 — must be at least 1 (it is the ONE node cadence: \
@@ -462,14 +556,6 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
             }
         }
     }
-    if let Some(file) = cfg.mesh_peers_file.as_ref()
-        && !file.is_absolute() {
-            problems.push(format!(
-                "MESH_PEERS_FILE is relative ({}) — an absolute path is required (use \
-                 `~/.smartnet/mainnet.jsonl`; there is no cwd fallback)",
-                file.display()
-            ));
-        }
     if cfg.cross_block_cache_size == Some(0) {
         problems.push(
             "CROSS_BLOCK_CACHE_SIZE is 0 — set the cross-block execution cache size in MB"
@@ -520,7 +606,8 @@ pub(crate) fn read_chain_identity_from_db(
         // The required-key check reports a missing `DATADIR_PATH` on its own.
         return Ok(None);
     };
-    let db_args = DatabaseArgs { engine: overlay.db_engine.unwrap_or_default(), ..DatabaseArgs::default() };
+    let db_args =
+        DatabaseArgs { engine: overlay.db_engine.unwrap_or_default(), ..DatabaseArgs::default() };
     let db_path = {
         let mut datadir_args = operator_datadir_args(datadir.clone());
         datadir_args.engine = db_args.engine;
@@ -566,7 +653,6 @@ pub struct CliApp<
     cli: Cli<Spec, Ext, Rpc, SubCmd>,
     runner: Option<CliRunner>,
     layers: Option<Layers>,
-    guard: Option<FileWorkerGuard>,
 }
 
 impl<C, Ext, Rpc, SubCmd> CliApp<C, Ext, Rpc, SubCmd>
@@ -578,7 +664,7 @@ where
     SubCmd: ExtendedCommand + Subcommand + fmt::Debug,
 {
     pub(crate) fn new(cli: Cli<C, Ext, Rpc, SubCmd>) -> Self {
-        Self { cli, runner: None, layers: Some(Layers::new()), guard: None }
+        Self { cli, runner: None, layers: Some(Layers::new()) }
     }
 
     /// Sets the runner for the CLI commander.
@@ -622,10 +708,9 @@ where
     ) -> Result<()>
     where
         N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>
-
-        // The RLP import decodes and writes the Ethereum shapes this CLI ships with —
-        // the chain file holds `smartnet_ethereum_primitives::Block` and nothing else.
-        + NodeTypes<Primitives = smartnet_ethereum_primitives::EthPrimitives>,
+            // The RLP import decodes and writes the Ethereum shapes this CLI ships with —
+            // the chain file holds `smartnet_ethereum_primitives::Block` and nothing else.
+            + NodeTypes<Primitives = smartnet_ethereum_primitives::EthPrimitives>,
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
         C::ChainSpec: EthChainSpec + DisableBlockRewards + EthExecutorSpec,
     {
@@ -634,12 +719,11 @@ where
             None => CliRunner::try_with_runtime_config(smartnet_tasks::RuntimeConfig::default())?,
         };
 
-        // Resolve log verbosity from the shared config before tracing — including when
-        // `--config` is absent (the canonical default path is the same one the commands use).
+        // Resolve log verbosity from the shared config before tracing using the same global
+        // rule as every command: explicit `--config` verbatim, else cwd → ~/.smartnet search.
         // `VERB` is the single node+validator level and wins over the legacy `VERBOSITY` rank.
         if let Some(filter) = tracing_filter_from_config(self.cli.config_path.as_deref()) {
-            self.cli.logs.log_stdout_filter = filter.clone();
-            self.cli.logs.log_file_filter = filter;
+            self.cli.logs.log_stdout_filter = filter;
         }
 
         self.init_tracing(&runner)?;
@@ -655,7 +739,7 @@ where
     /// See [`Cli::init_tracing`] for more information.
     pub fn init_tracing(&mut self, runner: &CliRunner) -> Result<()> {
         if let Some(layers) = self.layers.take() {
-            self.guard = self.cli.init_tracing(runner, layers)?;
+            self.cli.init_tracing(runner, layers)?;
         }
 
         Ok(())
@@ -677,10 +761,9 @@ where
     Ext: clap::Args + fmt::Debug + Default,
     Rpc: RpcModuleValidator,
     N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>
-
-    // The RLP import decodes and writes the Ethereum shapes this CLI ships with — the
-    // chain file holds `smartnet_ethereum_primitives::Block` and nothing else.
-    + NodeTypes<Primitives = smartnet_ethereum_primitives::EthPrimitives>,
+        // The RLP import decodes and writes the Ethereum shapes this CLI ships with — the
+        // chain file holds `smartnet_ethereum_primitives::Block` and nothing else.
+        + NodeTypes<Primitives = smartnet_ethereum_primitives::EthPrimitives>,
     SubCmd: ExtendedCommand + Subcommand + fmt::Debug,
     N::ChainSpec: EthChainSpec + EthereumHardforks + DisableBlockRewards + EthExecutorSpec,
 {
@@ -694,11 +777,9 @@ where
             runner.block_on(async move { command.execute::<N>(&cfg_path, rt).await })
         }
         Some(Commands::Ext(command)) => {
-            let cfg_path = match cli.config_path {
-                Some(p) => p,
-                None => crate::interface::default_config_path()?,
-            };
-            command.execute(runner, cfg_path)
+            // Pass the explicit `--config` through unchanged; the extension applies the same
+            // global rule as `init`, `import` and node boot when it is absent.
+            command.execute(runner, cli.config_path)
         }
         Some(Commands::Import(command)) => {
             let cfg_path = match cli.config_path {
@@ -715,6 +796,9 @@ where
                 ));
             }
             let overlay = load_operator_overlay(&cfg_path)?;
+            // Keystore first: the mesh identity and the validator read the same KEY_PATH.
+            // Only after that may the chain identity / datadir be inspected.
+            ensure_keystore_ready(&cfg_path)?;
             // Exactly one datadir, from the config file — the same boot sequence as a node
             // run (`smartnet init` must have written the chain identity first).
             let datadir = overlay.datadir_path.clone().ok_or_else(|| {
@@ -776,6 +860,12 @@ where
             // `memory_block_buffer_target` 0 keeps the save target at the head.
             node_cmd.engine.persistence_backpressure_threshold = 5120; // validate(): > threshold
             node_cmd.engine.memory_block_buffer_target = 0;
+            // The registry path is resolved by the overlay: `VAL_FILE` when keyed, otherwise
+            // the local → ~/.smartnet scaffold. The import's seal gate loads that exact file.
+            let val_file = overlay
+                .val_file
+                .clone()
+                .expect("validators.jsonl is resolved by load_operator_overlay");
             let runtime = runner.runtime();
             runner.run_command_until_exit(move |ctx| async move {
                 // THE IMPORT RUNS FIRST, against the bare database: no engine, no mesh,
@@ -818,11 +908,7 @@ where
                     // closure, so it is gone before the node opens the database.
                     tokio::task::spawn_blocking(move || {
                         smartnet_node_ethereum::import::run_import(
-                            &factory,
-                            &evm,
-                            base,
-                            window,
-                            &file,
+                            &factory, &evm, base, window, &file, &val_file,
                         )
                     })
                     .await??
@@ -843,6 +929,9 @@ where
                 None => crate::interface::default_config_path()?,
             };
             let overlay = load_operator_overlay(&cfg_path)?;
+            // Keystore first: check KEY_PATH before the database/datadir is touched, so a
+            // missing key reports `smartnet keystore` instead of hiding behind `smartnet init`.
+            ensure_keystore_ready(&cfg_path)?;
             // Mempool entry floor (operator key `MIN_TO_TXPOOL_ENTRY`, default
             // `DEFAULT_MIN_TO_TXPOOL_ENTRY_WEI` = 0.02 WEM): the knownWallet/minBalance gate
             // the RPC tx entry applies. Entry-only by design — never on the signed-block
@@ -998,9 +1087,9 @@ where
 /// Consumers implement this trait for their custom subcommands to define
 /// how they should be executed.
 pub trait ExtendedCommand {
-    /// Execute the extension command with the provided CLI runner and the resolved
-    /// operator-config path (`--config` or the default `~/.smartnet/config.toml`).
-    fn execute(self, runner: CliRunner, cfg_path: PathBuf) -> Result<()>;
+    /// Execute the extension command with the provided CLI runner and the explicit
+    /// `--config` path, if one was given. The command resolves it with the global rule.
+    fn execute(self, runner: CliRunner, cfg_path: Option<PathBuf>) -> Result<()>;
 }
 
 /// Tests touch **only** the shipped template `smartnet/example.config.toml`, and only by
@@ -1024,6 +1113,43 @@ mod tests {
         // A bare apostrophe must not be mistaken for an opening quote
         assert_eq!(strip_comment("KEY = 5 # we don't need this"), "KEY = 5 ");
         assert_eq!(strip_comment(r#"KEY = 'a # b'"#), r#"KEY = 'a # b'"#);
+    }
+
+    /// Keystore is a hard precondition before any datadir/init work: an empty `KEY_PATH` must
+    /// say `smartnet keystore`, not `smartnet init`.
+    #[test]
+    fn keystore_check_refuses_to_proceed_without_a_key() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join("keystore")).unwrap();
+        std::fs::write(home.join("pw.txt"), "pw\n").unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "HOME_DIR_PATH = \"{}\"\nKEY_PATH = \"keystore\"\nPASSWORD_FILE = \"pw.txt\"\nSEAL = true\n",
+                home.display()
+            ),
+        )
+        .unwrap();
+
+        let err = ensure_keystore_ready(&config).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("KEY_PATH"), "got: {msg}");
+        assert!(msg.contains("smartnet keystore"), "got: {msg}");
+
+        std::fs::write(
+            &config,
+            format!(
+                "HOME_DIR_PATH = \"{}\"\nKEY_PATH = \"\"\nPASSWORD_FILE = \"pw.txt\"\nSEAL = true\n",
+                home.display()
+            ),
+        )
+        .unwrap();
+        let err = ensure_keystore_ready(&config).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("KEY_PATH"), "got: {msg}");
+        assert!(msg.contains("smartnet keystore"), "got: {msg}");
     }
 
     /// `VERB` is the process-wide level for both the node and the merged validator.
@@ -1099,11 +1225,14 @@ mod tests {
         let raw = std::fs::read_to_string(&template)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", template.display()));
         for key in [
+            HOME_DIR_KEY,
+            "VAL_FILE",
             "DATADIR_PATH",
             "HTTP_PORT",
             "HTTP_ADDR",
             "RPC_SERVER",
-                "GPO_DEFAULT_SUGGESTED_FEE",
+            "COINBASE",
+            "GPO_DEFAULT_SUGGESTED_FEE",
             "CROSS_BLOCK_CACHE_SIZE",
             "MESH_PORT",
             "MESH_ADDR",
@@ -1130,6 +1259,11 @@ mod tests {
         let cfg = load_operator_overlay(&template)
             .expect("the shipped template must boot with its shipped values");
         assert!(cfg.datadir_path.is_some(), "DATADIR_PATH must be set");
+        assert!(cfg.val_file.is_some(), "VAL_FILE must be set");
+        if let Ok(home) = std::env::var("HOME") {
+            let expected = std::path::Path::new(&home).join(".smartnetX/validators.jsonl");
+            assert_eq!(cfg.val_file.as_deref(), Some(expected.as_path()));
+        }
         // The template carries no `CHAINID` / `VALIDATORS` — no key, no fallback: the
         // database is the single source of truth for both (written by `smartnet init`, read
         // back at every boot). `DB_ENGINE` ships commented out and defaults to `fjall` when
@@ -1165,6 +1299,38 @@ mod tests {
         }
     }
 
+    /// `COINBASE` is a node-level keystore selector: a plain node (`SEAL = false`) parses it
+    /// and validates the address; it never gates the validator or changes identity.
+    #[test]
+    fn coinbase_is_a_node_level_selector_even_for_plain_nodes() {
+        const ADDR: &str = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8";
+        let template =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../example.config.toml");
+        let raw = std::fs::read_to_string(&template).unwrap();
+        let plain = raw.replace("SEAL = true", "SEAL = false");
+        let dir = tempfile::tempdir().unwrap();
+
+        let ok = dir.path().join("coinbase-ok.toml");
+        std::fs::write(
+            &ok,
+            format!(
+                "{plain}\nHTTP_PORT = 8545\nHTTP_ADDR = \"127.0.0.1\"\nCOINBASE = \"{ADDR}\"\n"
+            ),
+        )
+        .unwrap();
+        let cfg = load_operator_overlay(&ok).expect("plain node must accept COINBASE");
+        assert_eq!(cfg.coinbase, Some(ADDR.parse().expect("valid address")));
+
+        let bad = dir.path().join("coinbase-bad.toml");
+        std::fs::write(
+            &bad,
+            format!("{plain}\nHTTP_PORT = 8545\nHTTP_ADDR = \"127.0.0.1\"\nCOINBASE = \"nope\"\n"),
+        )
+        .unwrap();
+        let err = load_operator_overlay(&bad).expect_err("invalid COINBASE must fail");
+        assert!(format!("{err:?}").contains("COINBASE"), "got: {err:?}");
+    }
+
     /// The heartbeat is mandatory once present: 0 would stop validator beats, so it is
     /// rejected rather than silently disabling them.
     #[test]
@@ -1184,6 +1350,32 @@ mod tests {
         std::fs::write(&path, patched).unwrap();
         let err = load_operator_overlay(&path).expect_err("NODE_HEARTBEAT = 0 must be rejected");
         assert!(format!("{err:?}").contains("NODE_HEARTBEAT"), "got: {err:?}");
+    }
+
+    /// `VAL_FILE` may be omitted: the node-owned registry resolver applies the same local →
+    /// `HOME_DIR_PATH` scaffold as every other config-owned data file.
+    #[test]
+    fn val_file_uses_the_scaffold_when_not_keyed() {
+        let template =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../example.config.toml");
+        let raw = std::fs::read_to_string(&template).unwrap();
+        let without =
+            raw.lines().filter(|line| !line.starts_with("VAL_FILE")).collect::<Vec<_>>().join("\n");
+
+        let root = tempfile::tempdir().unwrap();
+        let home_dir = root.path().join("home");
+        std::fs::create_dir_all(home_dir.join(".smartnetX")).unwrap();
+        let installed = home_dir.join(".smartnetX/validators.jsonl");
+        std::fs::write(&installed, "{}").unwrap();
+        let home = home_dir.to_string_lossy().to_string();
+
+        let resolved = smartnet_node_ethereum::validator_registry::parse_val_file_with(
+            &without,
+            Some(root.path()),
+            Some(&home),
+        )
+        .expect("scaffolded registry");
+        assert_eq!(resolved, installed);
     }
 
     /// `MESH_MAX_MSG_MB` is optional (unset = the 32 MB protocol default) but a present
@@ -1221,6 +1413,68 @@ mod tests {
         assert!(format!("{err:?}").contains("MESH_HEARTBEAT"), "got: {err:?}");
     }
 
+    /// Mesh-only roles make the HTTP bind keys optional and force RPC off: a validator config
+    /// with no `HTTP_PORT`/`HTTP_ADDR` boots, even when `RPC_SERVER=true` is left in the file.
+    #[test]
+    fn mesh_only_role_does_not_require_http_keys() {
+        let template =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../example.config.toml");
+        let raw = std::fs::read_to_string(&template).unwrap();
+        let no_http: String = raw
+            .lines()
+            .filter(|line| {
+                let key = strip_comment(line).trim();
+                !key.starts_with("HTTP_PORT") &&
+                    !key.starts_with("HTTP_ADDR") &&
+                    !key.starts_with("RPC_SERVER")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("validator-no-rpc.toml");
+        std::fs::write(&path, format!("{no_http}\nSEAL = true\nRPC_SERVER = true\n")).unwrap();
+
+        let cfg = load_operator_overlay(&path).expect("SEAL=true must not require HTTP bind keys");
+        assert!(cfg.http_port.is_none(), "HTTP_PORT is optional for a validator");
+        assert!(cfg.http_addr.is_none(), "HTTP_ADDR is optional for a validator");
+        assert_eq!(cfg.rpc_server, Some(false), "a mesh-only role forces RPC off");
+    }
+
+    /// A plain node (all mesh-only roles off) still needs its HTTP bind keys.
+    #[test]
+    fn plain_node_still_requires_http_keys() {
+        let template =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../example.config.toml");
+        let raw = std::fs::read_to_string(&template).unwrap();
+        let plain: String = raw
+            .lines()
+            .map(|line| {
+                if strip_comment(line).trim().starts_with("SEAL =") {
+                    "SEAL = false"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let no_http: String = plain
+            .lines()
+            .filter(|line| {
+                let key = strip_comment(line).trim();
+                !key.starts_with("HTTP_PORT") && !key.starts_with("HTTP_ADDR")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain-node-no-http.toml");
+        std::fs::write(&path, no_http).unwrap();
+
+        let err = load_operator_overlay(&path).expect_err("a plain node must require HTTP keys");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("HTTP_PORT"), "got: {msg}");
+        assert!(msg.contains("HTTP_ADDR"), "got: {msg}");
+    }
+
     /// `RPC_MEMPOOL` and `RPC_NODEINFO` are optional: when absent the overlay stays `None` and
     /// the command path applies the `false` default (see `DefaultRpcServerArgs`).
     #[test]
@@ -1244,5 +1498,4 @@ mod tests {
         assert!(cfg.rpc_mempool.is_none(), "RPC_MEMPOOL is optional");
         assert!(cfg.nodeinfo.is_none(), "RPC_NODEINFO is optional");
     }
-
 }

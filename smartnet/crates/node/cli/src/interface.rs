@@ -15,28 +15,22 @@ use crate::{
 use clap::{Parser, Subcommand};
 use smartnet_chainspec::{ChainSpec, EthChainSpec, Hardforks};
 use smartnet_db::DatabaseEnv;
-use smartnet_evm::eth::spec::{DisableBlockRewards, EthExecutorSpec};
 use smartnet_ethereum_primitives::EthPrimitives;
+use smartnet_evm::eth::spec::{DisableBlockRewards, EthExecutorSpec};
 use smartnet_node_api::{NodePrimitives, NodeTypes};
 use smartnet_node_builder::{NodeBuilder, WithLaunchContext};
 use smartnet_node_core::{args::LogArgs, version::version_metadata};
 use smartnet_rpc_server_types::{DefaultRpcModuleValidator, RpcModuleValidator};
-use smartnet_tracing::{FileWorkerGuard, Layers};
+use smartnet_tracing::Layers;
 use std::{ffi::OsString, fmt, future::Future, marker::PhantomData, path::PathBuf, sync::Arc};
-use tracing::info;
 
-/// Default node config file path: `$HOME/.smartnet/config.toml`.
+/// Resolve the node config path using the global rule: an explicit `--config` is used as-is;
+/// without it, search `./config.toml` then `~/.smartnet/config.toml`.
 ///
-/// `HOME` unset is an error — there is no fallback to the current working directory and no
-/// built-in config location. Pass `--config <path>` explicitly instead.
+/// This is a thin wrapper over the validator crate's resolver so the node and every merged
+/// command (`keystore`, `seedTx`, `ping`) apply exactly the same rule.
 pub fn default_config_path() -> eyre::Result<PathBuf> {
-    let home = std::env::var("HOME").map_err(|_| {
-        eyre::eyre!(
-            "HOME is not set, so the default config path ~/.smartnet/config.toml cannot be \
-             resolved — pass `--config /path/to/config.toml` (no built-in fallback path exists)"
-        )
-    })?;
-    Ok(PathBuf::from(home).join(".smartnet").join("config.toml"))
+    smartnet_validator::resolve_config_path(None)
 }
 
 /// The main `SmartNet` CLI interface.
@@ -51,10 +45,12 @@ pub struct Cli<
     SubCmd: Subcommand + fmt::Debug = NoSubCmd,
 > {
     /// Operator configuration file. Datadir, chain identity (database), ports and RPC are all
-    /// read from it; place this flag before subcommands, e.g.
-    /// `smartnet --config /path/config.toml init ...`.
-    /// Defaults to `~/.smartnet/config.toml` if not specified.
-    #[arg(long = "config", value_name = "FILE")]
+    /// read from it. Global: it may appear before or after a subcommand, e.g.
+    /// `smartnet --config /path/config.toml init ...` or
+    /// `smartnet keystore /path/key --config /path/config.toml`.
+    /// When omitted, the global rule searches `./config.toml` then `~/.smartnet/config.toml`.
+    /// When present, the given file is used directly — no search or fallback.
+    #[arg(long = "config", value_name = "FILE", global = true)]
     pub config_path: Option<PathBuf>,
 
     /// Optional subcommand. When omitted, `smartnet` starts the node using `--config`.
@@ -128,10 +124,9 @@ where
     ) -> eyre::Result<()>
     where
         N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>
-
-        // The RLP import (see `run_commands_with`) decodes and writes the Ethereum
-        // shapes this CLI ships with; the EVM config is built from the chain spec.
-        + NodeTypes<Primitives = EthPrimitives>,
+            // The RLP import (see `run_commands_with`) decodes and writes the Ethereum
+            // shapes this CLI ships with; the EVM config is built from the chain spec.
+            + NodeTypes<Primitives = EthPrimitives>,
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
         C::ChainSpec: DisableBlockRewards + EthExecutorSpec,
     {
@@ -163,9 +158,8 @@ where
     ) -> eyre::Result<()>
     where
         N: CliNodeTypes<Primitives: NodePrimitives<BlockHeader: HeaderMut>, ChainSpec: Hardforks>
-
-        // Same bounds as `run_with_components` — the import runs inside that path.
-        + NodeTypes<Primitives = EthPrimitives>,
+            // Same bounds as `run_with_components` — the import runs inside that path.
+            + NodeTypes<Primitives = EthPrimitives>,
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
         C::ChainSpec: DisableBlockRewards + EthExecutorSpec,
     {
@@ -174,61 +168,14 @@ where
         app.run_with_components(components, launcher)
     }
 
-    /// Subdirectory name under the data dir's `logs/` for file logging (from init genesis;
-    /// otherwise straight from the database — the single source of truth for the chain id).
-    pub fn log_chain_directory_name(&self) -> eyre::Result<String> {
-        match &self.command {
-            Some(Commands::Init(cmd)) => {
-                // `init` is the single genesis exception: the label follows the genesis chain id.
-                let spec = cmd.chain_spec().expect("init has genesis");
-                Ok(EthChainSpec::chain(spec.as_ref()).to_string())
-            }
-            // Node run and `import`: both boot the node against the configured datadir, so
-            // the label follows the chain id the same way (database only, no fallback).
-            None | Some(Commands::Import(_)) => {
-                let cfg_path = match self.config_path.clone() {
-                    Some(p) => p,
-                    None => crate::interface::default_config_path()?,
-                };
-                // Node run: once bootstrapped, the chain id is the global accessor; before the
-                // bootstrap (this label is chosen during CLI setup) it is read straight from the
-                // database. No config fallback: `config.toml` is never a chain-identity source.
-                let overlay = crate::app::load_operator_overlay(&cfg_path)?;
-                if smartnet_file_tier::network_settings_initialised() {
-                    return Ok(smartnet_file_tier::get_chain_id().to_string());
-                }
-                let db_chain_id =
-                    crate::app::read_chain_identity_from_db(&overlay)?.unwrap_or_default().chain_id;
-                db_chain_id.map(|id| id.to_string()).ok_or_else(|| {
-                    eyre::eyre!(
-                        "no chain id: the database carries none (initialise with `smartnet init \
-                         <genesis>`); cannot label the log directory"
-                    )
-                })
-            }
-            Some(Commands::Ext(_)) => Ok("extension".to_string()),
-        }
-    }
-
     /// Initializes tracing with the configured options.
     ///
-    /// If file logging is enabled, this function returns a guard that must be kept alive to ensure
-    /// that all logs are flushed to disk.
-    ///
-    /// If an OTLP endpoint is specified, it will export traces and logs to the configured
-    /// collector.
-    pub fn init_tracing(
-        &mut self,
-        runner: &CliRunner,
-        layers: Layers,
-    ) -> eyre::Result<Option<FileWorkerGuard>> {
+    /// All logs go to the screen; file logging was removed by operator order.
+    pub fn init_tracing(&mut self, runner: &CliRunner, layers: Layers) -> eyre::Result<()> {
         let _ = runner;
         // Enable reload support if debug RPC namespace is available
         let enable_reload = self.command.as_ref().is_some_and(|c| c.debug_namespace_enabled());
-        let file_guard = self.logs.init_tracing_with_layers(layers, enable_reload)?;
-        info!(target: "smartnet::cli", "Initialized tracing, debug log directory: {}", self.logs.log_file_directory);
-
-        Ok(file_guard)
+        self.logs.init_tracing_with_layers(layers, enable_reload)
     }
 }
 
@@ -266,7 +213,11 @@ pub enum Commands<C: ChainSpecParser, SubCmd: Subcommand + fmt::Debug = NoSubCmd
 pub enum NoSubCmd {}
 
 impl crate::app::ExtendedCommand for NoSubCmd {
-    fn execute(self, _runner: CliRunner, _cfg_path: std::path::PathBuf) -> eyre::Result<()> {
+    fn execute(
+        self,
+        _runner: CliRunner,
+        _cfg_path: Option<std::path::PathBuf>,
+    ) -> eyre::Result<()> {
         match self {}
     }
 }
@@ -302,10 +253,15 @@ mod tests {
     }
 
     #[test]
-    fn default_config_path() {
-        let path = crate::interface::default_config_path().unwrap();
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(path, std::path::PathBuf::from(home).join(".smartnet/config.toml"));
+    fn default_config_path_uses_the_global_rule() {
+        // The wrapper must agree with the single resolver used by every command. Whether the
+        // found file is local or installed depends on the test machine, so compare outcomes.
+        match smartnet_validator::resolve_config_path(None) {
+            Ok(expected) => assert_eq!(crate::interface::default_config_path().unwrap(), expected),
+            Err(err) => {
+                assert!(crate::interface::default_config_path().is_err(), "got: {err}");
+            }
+        }
     }
 
     #[test]

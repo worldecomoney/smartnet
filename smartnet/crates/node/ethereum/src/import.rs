@@ -341,6 +341,7 @@ pub fn run_import<P, Evm>(
     file_tier_base: std::path::PathBuf,
     changeset_window: u64,
     file: &Path,
+    val_file: &Path,
 ) -> eyre::Result<bool>
 where
     P: ProviderNodeTypes,
@@ -360,22 +361,22 @@ where
     let _importing = ImportingGuard;
     IMPORTING.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // The authority for check 2 is the RAM registry, loaded once here: an import run
-    // never boots the validator, so nothing else would load it. Fail closed — without a
-    // readable `validators.jsonl` holding a `status: true` validator no block can be
-    // accepted, and the file's signer list is legacy (never consulted).
-    let registry_path = smartnet_validator::validators::default_validators_file();
-    smartnet_validator::validators::load_validators(&registry_path).map_err(|err| {
+    // The authority for check 2 is the RAM registry, loaded once here from the path the
+    // operator named in `VAL_FILE`: an import run never boots the validator, so nothing
+    // else would load it. Fail closed — without a readable registry holding a
+    // `status: true` validator no block can be accepted.
+    crate::validator_registry::load_validators(val_file).map_err(|err| {
         eyre::eyre!(
-            "validators.jsonl unreadable ({}) : {err} — no block can be accepted (fail closed)",
-            registry_path.display()
+            "validator registry unreadable ({}) : {err} — no block can be accepted (fail closed)",
+            val_file.display()
         )
     })?;
-    let enabled = smartnet_validator::validators::enabled_set();
+    let enabled = crate::validator_registry::enabled_set();
     if enabled.is_empty() {
         return Err(eyre::eyre!(
-            "validators.jsonl holds no `status: true` validator — no block can be accepted \
-             (fail closed); the genesis signer list is legacy and is not used"
+            "validator registry at {} holds no `status: true` validator — no block can be \
+             accepted (fail closed); the genesis signer list is legacy and is not used",
+            val_file.display()
         ));
     }
 

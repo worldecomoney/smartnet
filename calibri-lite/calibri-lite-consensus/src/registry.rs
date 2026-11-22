@@ -3,8 +3,8 @@
 //! One JSON object per line, mirroring the `mainnet.jsonl`
 //! peer-file shape: tolerant line parsing (a malformed line is skipped with a
 //! reported error, one bad line never disables the rest), blank lines and `#`
-//! comments ignored, file re-read on every call so membership changes need no
-//! restart.
+//! comments ignored. The file is loaded once at bootstrap from the path named
+//! by the operator's `VAL_FILE` key; there is no built-in location.
 //!
 //! ```text
 //! {"address":"0x...","status":true}
@@ -28,20 +28,10 @@
 use alloy_primitives::Address;
 use std::{
     io,
-    path::{Path, PathBuf},
+    path::Path,
     sync::RwLock,
 };
 use tracing::warn;
-
-/// Default registry file: `$HOME/.smartnet/validators.jsonl` (same home as
-/// `bridges.json`). `HOME` unset yields an empty path — callers treat that as
-/// "file missing" (fail closed).
-pub fn default_validators_file() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home).join(".smartnet").join("validators.jsonl"),
-        None => PathBuf::new(),
-    }
-}
 
 /// One registry record: the address plus its tri-state status.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,10 +130,9 @@ fn parse_address(s: &str) -> Option<Address> {
 pub fn load_validators(path: &Path) -> Result<(Vec<ValidatorRecord>, Vec<String>), io::Error> {
     let content = std::fs::read_to_string(path)?;
     let parsed = parse_validators(&content);
-    // Hold it in RAM for the life of the process (user-in.md #3): bootstrap loads ONCE
-    // and every later question is answered from memory — the file is never re-opened.
-    // The first successful load wins: a later load can never silently replace a running
-    // registry.
+    // Hold it in RAM for the life of the process (user-in.md #3): each explicit bootstrap
+    // load replaces the array and every later question is answered from memory — the file
+    // is never re-opened by a chair/seal query.
     *VALIDATORS.write().expect("validators registry lock poisoned") = parsed.0.clone();
     Ok(parsed)
 }
@@ -274,13 +263,5 @@ mod tests {
             .expect_err("missing file must be an error (fail closed)");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert!(load_enabled_validators(Path::new("/nonexistent/validators.jsonl")).is_err());
-    }
-
-    #[test]
-    fn default_path_lives_in_smartnet_home() {
-        let p = default_validators_file();
-        if std::env::var_os("HOME").is_some() {
-            assert!(p.ends_with(".smartnet/validators.jsonl"), "{p:?}");
-        }
     }
 }

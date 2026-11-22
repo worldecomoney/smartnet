@@ -54,8 +54,7 @@ impl LinkState {
     /// failed yet is worth one rumor — the queue holds it until the connect + handshake
     /// lands).
     fn is_active(&self) -> bool {
-        self.connected.load(Ordering::Acquire)
-            || self.started.elapsed() < ws::RECONNECT_MAX
+        self.connected.load(Ordering::Acquire) || self.started.elapsed() < ws::CONNECT_GRACE
     }
 
     /// A **live** connection — no grace window. What the status line reports as a
@@ -194,7 +193,10 @@ async fn link_task(
         {
             Ok(()) => return, // pool dropped the sender (peer removed / process exit)
             Err(err) => {
-                debug!(target: "smartnet::mesh", %ip, port, %err, "mesh link down — reconnecting");
+                // The listener is up; a listed peer simply is not online yet. That is a
+                // normal waiting state in the closed list — retry quietly at debug level.
+                // The status line already reports `0 nodes connected`; no WARN here.
+                debug!(target: "smartnet::mesh", %ip, port, %err, "mesh peer not reachable yet — retrying");
                 // One handshake try per boot: a failed dial/handshake counts as this
                 // link's boot chance (`peer_tip` 0 raises no max), so the readiness
                 // gate moves on instead of waiting out its timeout on an absent or

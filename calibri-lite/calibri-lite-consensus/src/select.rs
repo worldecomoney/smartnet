@@ -20,6 +20,8 @@
 use alloy_primitives::{hex, keccak256, Address, B256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::registry::get_val_all;
+
 // ---------------------------------------------------------------------------
 // Purpose
 // ---------------------------------------------------------------------------
@@ -158,8 +160,9 @@ pub fn select_chair_and_quorum(
 /// "who is the chair for this slot". **Pure math — no async, no I/O per call** (operator,
 /// 2026-11-19).
 ///
-/// 1. the validator registry is loaded from `validators.jsonl` **with statuses**, once
-///    (first load wins; later calls answer from RAM);
+/// 1. the validator registry was loaded at bootstrap from the operator's `VAL_FILE`
+///    path (with statuses); this function only reads that RAM array — no I/O, no path
+///    guessing;
 /// 2. only `status: true` records take part in the calculation — a `status: false`
 ///    record can never become chair (fail closed: no enabled validator ⇒ `None`);
 /// 3. **1-validator detour**: with exactly one enabled validator that validator IS the
@@ -170,18 +173,9 @@ pub fn select_chair_and_quorum(
 /// `purpose` is `""`/`"chair"`, `"bridge"` or `"audit"`; anything else fails closed
 /// with **no chair**.
 pub fn get_val_chair(block_hash: B256, ts: u64, purpose: &str) -> Option<Address> {
-    use crate::registry::{default_validators_file, get_val_all, load_validators};
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    static LOADED: AtomicBool = AtomicBool::new(false);
-    if !LOADED.load(Ordering::SeqCst) {
-        // Step 1 — the registry, statuses included. The file is read once per process;
-        // a missing/unreadable file leaves the array empty, which fails closed below.
-        let _ = load_validators(&default_validators_file());
-        LOADED.store(true, Ordering::SeqCst);
-    }
-
     // Step 2 — `status: true` only (`is_enabled` is exactly `status == Some(true)`).
+    // The RAM array is filled by the explicit `VAL_FILE` load at bootstrap; without it
+    // the set is empty and this fails closed.
     let enabled: Vec<Address> =
         get_val_all().into_iter().filter(|r| r.is_enabled()).map(|r| r.address).collect();
 

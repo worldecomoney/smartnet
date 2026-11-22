@@ -73,17 +73,21 @@ use tracing::{debug, info, warn};
 /// The only accepted `WebSocket` path.
 pub const MESH_PATH: &str = "/mesh";
 /// Time allowed for the `WebSocket` upgrade and the first `HELLO_PING` frame —
-/// one-time, on connect (the client sends its HELLO immediately after the upgrade).
-pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(300);
+/// one-time, on connect. The handshake signs a fresh HELLO, and signing decrypts the
+/// scrypt keystore transiently; that decryption is the dominant cost and must fit here.
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default per-operation timeout: one rumor exchange, one pong wait, one-shot helpers.
-/// Budget for engine inject + RLP roundtrip — measured exchanges are ms-scale, so 1 s
-/// is a wide margin over a ~1 s (soon ~100 ms) block cadence.
-pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(1_000);
+/// A freshly queued rumor can wait for the link's connect + HELLO before its exchange
+/// starts, so this budget must cover one transient keystore decryption too.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// First reconnect delay after a link drops; doubles up to [`RECONNECT_MAX`].
 pub const RECONNECT_MIN: Duration = Duration::from_millis(50);
+/// Grace for a link that has not completed its first connect: a rumor may be queued
+/// while the transient HELLO decryption is still running. Kept separate from the
+/// reconnect backoff — that backoff is short, but a handshake is not.
+pub const CONNECT_GRACE: Duration = Duration::from_secs(10);
 /// Ceiling for the reconnect backoff delay. Kept short so a broken link comes back fast
-/// (the mesh is always on; a peer is expected to be reachable again shortly). Also the
-/// first-connect grace for a young link worth queueing one rumor on.
+/// (the mesh is always on; a peer is expected to be reachable again shortly).
 pub const RECONNECT_MAX: Duration = Duration::from_millis(600);
 /// Rumors one persistent link may have in flight at once: the client announces up to
 /// this many before waiting for acks, so a burst pipelines over the single connection
@@ -248,7 +252,7 @@ impl MeshServer {
         // bytes (the accept path wraps the raw stream in `PreAuthGuard`); a positive
         // verification lifts that cap for the rest of the session.
         if let Err(err) = self.handshake(&sink, &mut stream, peer, limit).await {
-            debug!(target: "smartnet::mesh", %peer, %err, "mesh identity handshake failed");
+            warn!(target: "smartnet::mesh", %peer, %err, "mesh identity handshake failed");
             let _ = sink.lock().await.close().await;
             return;
         }
@@ -817,7 +821,7 @@ impl MeshServer {
     where
         S: futures::Sink<WsMessage, Error = WsError> + Unpin + ?Sized,
     {
-        // The inbound allowlist is the peer file's `key_id` addresses, re-read so
+        // The inbound allowlist is the peer file's `address` identities, re-read so
         // membership changes apply without a restart.
         let allowlist = match load_peers(&self.peers_file) {
             Ok(parsed) => allowlist_addresses(&parsed),
@@ -1820,9 +1824,10 @@ where
 }
 
 /// Logs the active mesh transport once at startup.
-pub fn log_listening(port: u16, peers_file: &std::path::Path, rpc: &str) {
+pub fn log_listening(bind_addr: std::net::IpAddr, port: u16, peers_file: &std::path::Path, rpc: &str) {
     info!(
         target: "smartnet::mesh",
+        %bind_addr,
         port,
         peers_file = %peers_file.display(),
         rpc,

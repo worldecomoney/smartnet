@@ -36,6 +36,7 @@ smartnet-chain-state.workspace = true
 smartnet-file-tier.workspace = true
 smartnet-trie-common.workspace = true
 smartnet-chainspec.workspace = true
+smartnet-fs-util.workspace = true
 smartnet-revm = { workspace = true, features = ["std"] }
 smartnet-rpc-eth-types.workspace = true
 smartnet-engine-primitives = { workspace = true, features = ["std"] }

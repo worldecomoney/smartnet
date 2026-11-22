@@ -88,6 +88,12 @@ pub enum InitStorageError {
         /// Actual genesis hash.
         storage_hash: B256,
     },
+    /// A genesis carrying `private_key` is forbidden: fail explicitly, never strip it silently.
+    #[error("genesis must not contain private_key (found at {path})")]
+    GenesisContainsPrivateKey {
+        /// JSON path of the forbidden key; never its value.
+        path: String,
+    },
     /// Provider error.
     #[error(transparent)]
     Provider(#[from] ProviderError),
@@ -103,6 +109,61 @@ impl From<DatabaseError> for InitStorageError {
     fn from(error: DatabaseError) -> Self {
         Self::Provider(ProviderError::Database(error))
     }
+}
+
+/// Genesis is never allowed to carry a private key. Both the parsed accounts and the verbatim
+/// raw spec are checked: a contradiction is a fatal error, never a silent strip/filter. The
+/// error names only the JSON path, never the key value.
+fn ensure_no_private_key_in_genesis(
+    genesis: &Genesis,
+    genesis_raw: Option<&[u8]>,
+) -> Result<(), InitStorageError> {
+    if let Some((address, _)) =
+        genesis.alloc.iter().find(|(_, account)| account.private_key.is_some())
+    {
+        return Err(InitStorageError::GenesisContainsPrivateKey {
+            path: format!("alloc.{address:#x}.private_key"),
+        });
+    }
+
+    let Some(raw) = genesis_raw else {
+        return Ok(());
+    };
+    let value: serde_json::Value = serde_json::from_slice(raw).map_err(|e| {
+        InitStorageError::Provider(ProviderError::Database(DatabaseError::Other(format!(
+            "genesis spec does not parse for private_key scan: {e}"
+        ))))
+    })?;
+    if let Some(path) = find_json_key(&value, "private_key", "") {
+        return Err(InitStorageError::GenesisContainsPrivateKey { path });
+    }
+    Ok(())
+}
+
+fn find_json_key(value: &serde_json::Value, key: &str, path: &str) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (name, child) in map {
+                let child_path =
+                    if path.is_empty() { name.clone() } else { format!("{path}.{name}") };
+                if name == key {
+                    return Some(child_path);
+                }
+                if let Some(found) = find_json_key(child, key, &child_path) {
+                    return Some(found);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                if let Some(found) = find_json_key(child, key, &format!("{path}[{index}]")) {
+                    return Some(found);
+                }
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 /// Write the genesis block if it has not already been written
@@ -137,8 +198,8 @@ where
 ///
 /// `genesis_raw`: the verbatim bytes of the genesis file the operator fed to `init` (stored
 /// byte-for-byte in the `GENESIS_SPEC` row — the database keeps the network's self-declared
-/// record without losing any key the parser does not read). `None` when the spec was built
-/// programmatically.
+/// record without losing any key the parser does not read). A `private_key` anywhere in that
+/// record is rejected before any write. `None` when the spec was built programmatically.
 pub fn init_genesis_with_settings<PF>(
     factory: &PF,
     genesis_storage_settings: StorageSettings,
@@ -170,6 +231,7 @@ where
     let chain = factory.chain_spec();
 
     let genesis = chain.genesis();
+    ensure_no_private_key_in_genesis(genesis, genesis_raw.as_deref())?;
     let hash = chain.genesis_hash();
 
     // Get the genesis block number from the chain spec
@@ -1042,7 +1104,7 @@ mod tests {
         test_utils::{create_test_provider_factory_with_chain_spec, MockNodeTypesWithDB},
         AuxDbProviderFactory, ProviderFactory,
     };
-    use alloy_genesis::Genesis;
+    use alloy_genesis::{Genesis, GenesisAccount};
     use smartnet_chainspec::{dev_chain_spec, Chain, ChainSpec, MAINNET};
     use smartnet_db::DatabaseEnv;
     use smartnet_db_api::{
@@ -1176,5 +1238,44 @@ mod tests {
         let result = init_genesis_with_settings(&factory, settings, None);
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn reject_genesis_with_private_key_in_alloc() {
+        let spec = Arc::new(ChainSpec {
+            chain: Chain::from_id(1),
+            genesis: Genesis {
+                alloc: BTreeMap::from([(
+                    Address::with_last_byte(1),
+                    GenesisAccount {
+                        private_key: Some(B256::with_last_byte(1)),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            },
+            hardforks: Default::default(),
+            paris_block_and_final_difficulty: None,
+            deposit_contract: None,
+            ..Default::default()
+        });
+        let factory = create_test_provider_factory_with_chain_spec(spec);
+
+        let err = init_genesis_with_settings(&factory, StorageSettings::v1(), None).unwrap_err();
+        assert!(
+            matches!(err, InitStorageError::GenesisContainsPrivateKey { .. }),
+            "genesis private_key must fail explicitly: {err:?}"
+        );
+    }
+
+    #[test]
+    fn reject_raw_genesis_with_private_key_anywhere() {
+        let raw = br#"{"alloc":{"0x0000000000000000000000000000000000000001":{"private_key":"0xdeadbeef"}}}"#;
+        let err = ensure_no_private_key_in_genesis(&Genesis::default(), Some(raw)).unwrap_err();
+        assert!(
+            matches!(err, InitStorageError::GenesisContainsPrivateKey { ref path } if path.contains("private_key")),
+            "raw genesis private_key must fail explicitly: {err:?}"
+        );
+        assert!(!format!("{err}").contains("deadbeef"), "error must not carry the key value");
     }
 }

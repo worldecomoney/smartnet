@@ -54,7 +54,7 @@ per-class block caps (`MAX_*_PER_BLOCK`, `64` / `32` / `1` / `2`).
 
 | Key | Meaning |
 |-----|---------|
-| `KEY_PATH` | Directory for encrypted keystores — an absolute path under `~/.smartnet/`, e.g. `~/.smartnet/validator/secure` (`~` expands via `HOME`; relative paths are rejected). **The directory is the source of truth**: it must hold EXACTLY ONE file — that file is the node/validator key |
+| `KEY_PATH` | Directory for encrypted keystores — an absolute path under `~/.smartnet/`, e.g. `~/.smartnet/validator/secure` (`~` expands via `HOME`; relative paths are rejected). **The directory is the source of truth**: without `COINBASE` it must hold EXACTLY ONE file; with `COINBASE`, exactly one matching UTC-suffixed file is selected and other files are ignored |
 | `KEY_FILE` | **Legacy, ignored** — boot never consults it; the keystore is the unique file in `KEY_PATH` (kept only so older configs parse) |
 | `PASSWORD_FILE` | **Mandatory full path** to the password file, e.g. `~/.smartnet/validator/pw.txt` (relative paths are rejected). The password is ALWAYS a file: boot reads it to decrypt, `smartnet keystore` reads the SAME file to encrypt. Blank/absent = config error; there is no terminal prompt anywhere. Set it by hand — no command writes config |
 | `ALLOW_EMPTY` | `true` / `false` — seal empty block when txpool empty (required; `false` = don't) |
@@ -176,31 +176,33 @@ identity); the validator merely uses this same keyset. The command lives on the 
 binary:
 
 ```bash
-smartnet keystore --key ~/.smartnet/validator/key --config ~/.smartnet/config.toml
+smartnet keystore [RAW_PRIVATE_KEY_FILE] --config ~/.smartnet/config.toml
+# or
+smartnet --config ~/.smartnet/config.toml keystore [RAW_PRIVATE_KEY_FILE]
 ```
 
-`--key` points at a plaintext private-key file (64 hex characters, `0x` optional, either case,
-whitespace tolerated) — the key itself is never a command-line argument (shell history and `ps`
-are leak vectors, only the file path is). There is no random-key generator and no other import
-path: generate the key material however you like, put it in a file, hand `keystore` the file.
-There is **no `--password`**: the password is always config's `PASSWORD_FILE` (mandatory full
-path), and the same file is what boot decrypts with.
+The raw-key path is optional: when given, it points at a plaintext private-key file (64 hex
+characters, `0x` optional, either case, whitespace tolerated); when omitted, a fresh key is
+generated. The key itself is never a command-line argument (shell history and `ps` are leak
+vectors, only the file path is). There are **no `--key` or `--password` flags**: `KEY_PATH` and
+`PASSWORD_FILE` come from the named config, and the same password file is what boot decrypts
+with.
 
 The protocol, in order:
 
 1. Read `KEY_PATH` and `PASSWORD_FILE` from config (both mandatory full paths).
-2. Read the key and derive the address.
-3. Name the keystore `UTC--{timestamp}.{nanos}Z--{lowercase address}` (geth-style, no `0x`),
-   always.
-4. Write the encrypted keystore at `KEY_PATH`, **replacing** an existing one at that name —
-   this is the key-change flow: run the same command again with a new key. An old keystore
-   file under a different name is left alone (and the command then warns that `KEY_PATH`
-   holds more than one file — boot requires exactly one, so remove the stale one).
-5. **Delete the source key file.** Only after 4 succeeded; if it failed, the plaintext key
+2. Read/derive the key and its address.
+3. Name the keystore `UTC--{timestamp}.{nanos}Z--{lowercase address}` (geth-style, no `0x`).
+4. Write the encrypted keystore into `KEY_PATH`, refusing to overwrite a non-empty key dir.
+   Key replacement is an operator action: clear `KEY_PATH` first.
+5. **Delete the source key file** only after step 4 succeeded; if it failed, the plaintext key
    is left in place because it is your only copy.
 
-**config.toml is NEVER written** by this command (or any command): boot resolves the key
-as `KEY_PATH`'s unique file, so nothing stored in config can go stale.
+**config.toml is NEVER written** by this command (or any command). Boot uses exactly one file in
+`KEY_PATH`; when several keys must coexist, the optional node-level `COINBASE` selects the one
+whose UTC filename carries that address. Every other combination (zero files, several files with
+no `COINBASE`, a mismatched `COINBASE`, zero or multiple matches) is a fatal error. With no
+`COINBASE`, the address is derived from the decrypted key for internal use only.
 
 Production run (and the mesh identity) read the password from `PASSWORD_FILE` in the
 config — create that file by hand before the first boot.
@@ -243,8 +245,9 @@ longer merged into the wallet HTTP/WS transports; `RPC_UNIFIED_VALIDATOR_JSONRPC
   steering requires `--finalize --head <hash>` (plus optional `--safe` / `--finalized`);
   hashes without `--finalize` are refused.
 
-**Key import lives on the node binary**: `smartnet keystore --key <file>` (see "Create /
-replace keystore" above) — every node needs a keypair, so it is not a validator command.
+**Key import lives on the node binary**: `smartnet keystore [RAW_PRIVATE_KEY_FILE] --config CONFIG`
+(see "Create / replace keystore" above) — every node needs a keypair, so it is not a validator
+command.
 
 **Removed:** `run-once`, `--node-url`, `--coinbase`, `--secret-key`, `--secret-key-file`.
 

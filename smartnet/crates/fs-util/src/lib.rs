@@ -1,6 +1,9 @@
 //! Wrapper for `std::fs` methods
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
+
+pub mod keystore_selector;
+pub mod runtime_paths;
 use flate2::{write::GzEncoder, Compression};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{

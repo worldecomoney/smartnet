@@ -4498,6 +4498,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7676374caaee8a325c9e7a2ae557f216c5563a171d6997b0ef8a65af35147700"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4510,6 +4521,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83a0692ec44e4cf1ef28ca317f14f8f07da2d95ec3fa01f86e4467b725e60917"
 dependencies = [
  "digest 0.10.7",
+ "hmac",
+ "password-hash",
+ "sha2",
 ]
 
 [[package]]
@@ -5775,6 +5789,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f9e24d2b632954ded8ab2ef9fea0a0c769ea56ea98bddbafbad22caeeadf45d"
 dependencies = [
  "hmac",
+ "password-hash",
  "pbkdf2 0.11.0",
  "salsa20",
  "sha2",
@@ -6791,6 +6806,8 @@ dependencies = [
 name = "smartnet-fs-util"
 version = "3.7.2"
 dependencies = [
+ "alloy-primitives",
+ "eyre",
  "flate2",
  "serde",
  "serde_json",
@@ -6813,7 +6830,9 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "smartnet-fs-util",
  "smartnet-tls-provider",
+ "smartnet-validator",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -7019,6 +7038,7 @@ dependencies = [
  "smartnet-evm",
  "smartnet-evm-ethereum",
  "smartnet-file-tier",
+ "smartnet-fs-util",
  "smartnet-mesh",
  "smartnet-network-api",
  "smartnet-node-api",
@@ -8016,6 +8036,7 @@ dependencies = [
 name = "smartnet-validator"
 version = "2.1.0"
 dependencies = [
+ "aes",
  "alloy-consensus",
  "alloy-eips 2.0.4",
  "alloy-network",
@@ -8030,15 +8051,23 @@ dependencies = [
  "calibri-lite-consensus",
  "chrono",
  "clap",
+ "ctr",
+ "eth-keystore",
  "eyre",
+ "hmac",
  "k256",
+ "pbkdf2 0.11.0",
  "rand 0.8.6",
  "reqwest",
  "rpassword",
+ "scrypt",
  "serde",
  "serde_json",
+ "sha2",
+ "sha3 0.10.9",
  "smartnet-chainspec",
  "smartnet-db",
+ "smartnet-fs-util",
  "smartnet-payload-types",
  "smartnet-provider",
  "smartnet-timing",
@@ -8047,6 +8076,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.23",
  "url",
+ "zeroize",
 ]
 
 [[package]]

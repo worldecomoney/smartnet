@@ -3,15 +3,23 @@
 # Override with: smartnet --config /path/to/config.toml
 #
 # Required keys (a missing/empty/unparseable value aborts startup with an error that lists
-# all problems at once and names the key): DATADIR_PATH, HTTP_PORT, HTTP_ADDR,
-# CROSS_BLOCK_CACHE_SIZE, MESH_PORT, MESH_ADDR,
-# GPO_DEFAULT_SUGGESTED_FEE — plus the validator-section keys listed below when SEAL = true.
+# all problems at once and names the key): HOME_DIR_PATH, DATADIR_PATH, CROSS_BLOCK_CACHE_SIZE,
+# MESH_PORT, MESH_ADDR, GPO_DEFAULT_SUGGESTED_FEE — plus HTTP_PORT and HTTP_ADDR for a plain
+# node only (SEAL/BRIDGE roles are mesh-only and do not run RPC) — plus the validator-section
+# keys listed below when SEAL = true.
+# HOME_DIR_PATH is the ONLY absolute path in this file. Its leading `~/` is substituted once
+# against $HOME. DATADIR_PATH, KEY_PATH, PASSWORD_FILE, MESH_PEERS_FILE and VAL_FILE are all
+# relative to it: runtime path = HOME_DIR_PATH + <key value>.
+# Config-owned *.json(l) files (VAL_FILE, MESH_PEERS_FILE) may be omitted: the scaffold then
+# looks in the launch directory first, then HOME_DIR_PATH/, and errors if neither holds the
+# file. They are never arguments to `smartnet`.
 # Everything else is optional and carries its documented default. This file ships complete
 # values for the current chain, so it boots as-is once the keystore exists: run
-# `smartnet keystore --key <keyfile> --password <pwfile>` once before the first boot
-# (it writes the encrypted keystore into `KEY_PATH` — ANY filename. Boot GATHERS the
-# single file sitting there: exactly one file, or the node refuses to start. The mesh
-# identity loads from that same keystore). Review every value for your deployment.
+# `smartnet --config /path/to/config.toml keystore [RAW_PRIVATE_KEY_FILE]` before the first boot
+# (it writes the encrypted keystore into `KEY_PATH` under a `UTC--…--<address>` name and deletes
+# the raw source; this config file is NEVER edited). Boot uses exactly one encrypted file: either
+# the single gathered file, or the one `COINBASE` selects among several. Every node role loads its
+# mesh identity from that same keystore. Review every value for your deployment.
 # The MESH_* keys are REQUIRED — the mesh is always on, so MESH_PORT (>= 1024) and
 # MESH_ADDR must be set and a bind failure aborts the boot. The RPC is the optional half
 # of the pair: it can be off while the mesh stays up. NODE_HEARTBEAT below drives every
@@ -20,15 +28,28 @@
 #
 # Nothing operator-specific lives in the Rust code: if it is a value, it is a key here.
 
+# The single runtime root. `~/` is expanded once against $HOME; all other path keys below are
+# relative to this directory (no other `~`, no absolute values, no CWD resolution).
+HOME_DIR_PATH = "~/.smartnetX/"
+
 # Optional log verbosity rank (VERB, 0-3): 0=errors only, 1=info, 2=debug, 3=trace.
 # Emits the given level and everything more severe. Optional — leave blank for the default
 VERB = 1
 
+# --- node identity (all roles) ------------------------------------------------
+# Optional NODE-LEVEL keystore selector — a helper only, not an identity, fee receiver, or
+# consensus input. Set it when KEY_PATH holds several encrypted keys: boot picks the one whose
+# UTC filename ends in this address and ignores the others. Any node may set it.
+# Valid states are exactly two: (1) COINBASE set and exactly one matching file exists among any
+# number of others; (2) COINBASE absent and KEY_PATH holds exactly one file. Everything else is
+# a fatal error. When COINBASE is absent, the address is derived from the decrypted private key
+# for internal use — it is never written back to this config.
+# COINBASE = "0x<address-of-one-encrypted-key>"
+
 # --- storage ----------------------------------------------------------------
-# Absolute path to the chain data and runtime files. No default, no current-working-
-# directory resolution. `~` (and `~/…`) expand to $HOME when HOME is set; otherwise an
-# absolute path is required. Example uses the conventional ~/.smartnet location.
-DATADIR_PATH = "~/.smartnet/data"
+# Chain data directory, relative to HOME_DIR_PATH (here: ~/.smartnetX/data). Absolute values
+# and `~` are rejected — HOME_DIR_PATH owns both.
+DATADIR_PATH = "data"
 
 # Storage engine selector — the only engine knob, validated at startup.
 # Optional key — absent = "fjall", and fjall is the ONLY engine: the historical
@@ -52,13 +73,16 @@ CROSS_BLOCK_CACHE_SIZE = 128
 # switch on: the mesh carries blocks, `smartnet import` carries a whole chain.
 
 # --- RPC --------------------------------------------------------------------
+# PLAIN NODE ONLY. A plain node starts RPC from HTTP_PORT/HTTP_ADDR (or RPC_SERVER when set).
+# Mesh-only roles (SEAL now, BRIDGE later) never start RPC: these keys are optional there and
+# RPC_SERVER is forced off, so a validator config needs no HTTP bind address at all.
 
-# Bind addresses and ports — no silent fallback to 127.0.0.1 / 0.0.0.0 / 8545
-# RPC on/off switch (true|false). Absent = legacy behavior (HTTP_PORT/HTTP_ADDR enable RPC);
-# present = explicit, overrides the implicit port-derived switch.
-RPC_SERVER = true
-HTTP_PORT = 8545
-HTTP_ADDR = "127.0.0.1"
+# Bind addresses and ports — no silent fallback to 127.0.0.1 / 0.0.0.0 / 8545.
+# RPC on/off switch (true|false). Absent = HTTP_PORT/HTTP_ADDR enable RPC; present = explicit.
+# !!! Stays in here for now, but can be replaced later with RPC_ADDR and RPC_PORT !!!
+#RPC_SERVER = true
+#HTTP_PORT = 8545
+#HTTP_ADDR = "127.0.0.1"
 
 
 #RPC_MEMPOOL = false
@@ -88,14 +112,18 @@ GPO_DEFAULT_SUGGESTED_FEE = 238095238095
 MESH_PORT = 41700
 
 # Mesh listen address — where the MESH_PORT listener binds. Required. "0.0.0.0" = all
-# interfaces; set a specific interface address to restrict the listener.
+# interfaces; set a specific interface address to restrict the listener. This is bind-only:
+# peer entries still carry the address other nodes dial (127.0.0.1 for a single host).
 MESH_ADDR = "0.0.0.0"
 
 # Mesh peer file — one JSON object per line, re-read on every spread (membership changes
-# need no restart). Missing file = outbound gossip off (logged once); the inbound listener
-# still runs. `~` expands via HOME. Example entry / shipped sample: smartnet/example.mainnet.jsonl
-#   {"key_id":"node-a","url":"","ip":"127.0.0.1","port_range":41811,"active":true,"valid":true}
-MESH_PEERS_FILE = "~/.smartnet/mainnet.jsonl"
+# need no restart). Relative to HOME_DIR_PATH (here: ~/.smartnetX/mainnet.jsonl). When absent
+# or blank, the scaffold looks for ./mainnet.jsonl then HOME_DIR_PATH/mainnet.jsonl; neither
+# holding the file is a startup error. Absolute values and `~` are rejected.
+# `address` is the peer's 0x Ethereum identity (legacy `key_id` is still accepted).
+# Sample:
+#   {"address":"0x24bf191a358c09e79b9ead2d8999d08590b5af31","url":"","ip":"127.0.0.1","port_range":41811,"active":true,"valid":true}
+MESH_PEERS_FILE = "mainnet.jsonl"
 
 # Max size of a single mesh WebSocket frame, in megabytes — covers the largest rumor the
 # transport will move in one message (a full block RLP or a large tx batch). Optional: unset
@@ -119,6 +147,13 @@ NODE_HEARTBEAT = 500
 
 # --- VALIDATOR -------------------------------------------------------
 
+# The one validator registry file. Read at bootstrap into RAM; the node's block gate and
+# the chair both use it. Relative to HOME_DIR_PATH (here: ~/.smartnetX/validators.jsonl).
+# When absent or blank, the scaffold looks for ./validators.jsonl then
+# HOME_DIR_PATH/validators.jsonl; neither means an error. It is never a CLI argument.
+VAL_FILE = "validators.jsonl"
+
+# Mesh-only role: with SEAL = true the RPC listener is off and the HTTP_* keys are optional.
 SEAL = true
 
 ALLOW_EMPTY = false
@@ -139,23 +174,20 @@ MAX_ERC_20_PER_BLOCK = 32
 MAX_CONTRACTS_PER_BLOCK = 1
 MAX_NFT_PER_BLOCK = 2
 
-# Absolute path to the directory holding the encrypted keystore. Use a path under
-# `~/.smartnet/`, e.g. ~/.smartnet/validator/secure
-KEY_PATH = "~/.smartnet/keystore"
+# Directory holding the encrypted keystore, relative to HOME_DIR_PATH (here:
+# ~/.smartnetX/keystore). Absolute values and `~` are rejected here — only HOME_DIR_PATH
+# may be absolute or start with `~/`.
+KEY_PATH = "keystore"
 
-# Keystore filename under KEY_PATH. Written by `smartnet keystore --key … --password …`;
-# The keystore lives in `KEY_PATH` under ANY filename — nothing here names it: boot
-# gathers the single file in that directory and refuses to start unless there is exactly
-# one (never generates a key for you). Create it before the first boot:
-#   smartnet keystore --key <private-key-file> --password <password-file>
-# File read for the keystore password. `""` means "prompt on the terminal" (no built-in
-# password path exists in the code). When set, use a path under `~/.smartnet/`,
-# e.g. ~/.smartnet/pw.txt (`~` expands to $HOME). The headless mesh-identity load
-# requires a password file — an interactive prompt is not available at boot.
-PASSWORD_FILE = "~/.smartnet/pw.txt"
-
-# Fee receiver for sealed blocks. Replace with your own address; zero address is rejected.
-#COINBASE = "0x<your-validator-address>"
+# The keystore lives in `KEY_PATH` under a `UTC--…--<address>` filename — no literal key path is
+# configured. The node-level `COINBASE` above selects one among several; without it there must be
+# exactly one file. This file is never edited to record a filename.
+# Create it before the first boot (the raw-key file is optional; without it a key is generated):
+#   smartnet --config /path/to/config.toml keystore [RAW_PRIVATE_KEY_FILE]
+# File read for the keystore password, relative to HOME_DIR_PATH (here: ~/.smartnetX/pw.txt).
+# `""` means "prompt on the terminal" (no built-in path exists in the code). The headless
+# mesh-identity load requires a password file — an interactive prompt is unavailable at boot.
+PASSWORD_FILE = "pw.txt"
 
 # --- txpool tx lifetimes (TTL-POOL.md) --------------------------------------
 # QUEUED (future-nonce) txs expire after this many seconds: the pool maintenance sweep

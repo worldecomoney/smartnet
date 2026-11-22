@@ -82,6 +82,14 @@ where
         Ok(self.chain_id)
     }
 
+    fn enabled_validators(&self) -> Vec<Address> {
+        crate::validator_registry::enabled_set()
+    }
+
+    fn get_val_chair(&self, block_hash: B256, ts: u64, purpose: &str) -> Option<Address> {
+        crate::validator_registry::get_val_chair(block_hash, ts, purpose)
+    }
+
     async fn block_by_number(
         &self,
         tag: BlockNumberOrTag,

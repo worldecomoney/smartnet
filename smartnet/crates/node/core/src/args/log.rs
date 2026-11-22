@@ -1,16 +1,11 @@
 //! clap [Args](clap::Args) for logging configuration.
 
-use crate::dirs::{LogsDir, PlatformPath};
 use clap::{ArgAction, Args, ValueEnum};
 use smartnet_tracing::{
-    tracing_subscriber::filter::Directive, FileInfo, FileWorkerGuard, LayerInfo, Layers, LogFormat,
-    SmartnetTracer, Tracer,
+    tracing_subscriber::filter::Directive, LayerInfo, Layers, LogFormat, SmartnetTracer, Tracer,
 };
 use std::{fmt, fmt::Display, sync::OnceLock};
 use tracing::{level_filters::LevelFilter, Level};
-
-/// Constant to convert megabytes to bytes
-const MB_TO_BYTES: u64 = 1024 * 1024;
 
 const PROFILER_TRACING_FILTER: &str = "debug";
 
@@ -28,33 +23,6 @@ pub struct LogArgs {
     /// The filter to use for logs written to stdout.
     #[arg(long = "log.stdout.filter", value_name = "FILTER", global = true, default_value_t = DefaultLogArgs::get_global().log_stdout_filter.clone())]
     pub log_stdout_filter: String,
-
-    /// The format to use for logs written to the log file.
-    #[arg(long = "log.file.format", value_name = "FORMAT", global = true, default_value_t = DefaultLogArgs::get_global().log_file_format)]
-    pub log_file_format: LogFormat,
-
-    /// The filter to use for logs written to the log file.
-    #[arg(long = "log.file.filter", value_name = "FILTER", global = true, default_value_t = DefaultLogArgs::get_global().log_file_filter.clone())]
-    pub log_file_filter: String,
-
-    /// The path to put log files in.
-    #[arg(long = "log.file.directory", value_name = "PATH", global = true, default_value_t)]
-    pub log_file_directory: PlatformPath<LogsDir>,
-
-    /// The prefix name of the log files.
-    #[arg(long = "log.file.name", value_name = "NAME", global = true, default_value_t = DefaultLogArgs::get_global().log_file_name.clone())]
-    pub log_file_name: String,
-
-    /// The maximum size (in MB) of one log file.
-    #[arg(long = "log.file.max-size", value_name = "SIZE", global = true, default_value_t = DefaultLogArgs::get_global().log_file_max_size)]
-    pub log_file_max_size: u64,
-
-    /// The maximum amount of log files that will be stored. If set to 0, background file logging
-    /// is disabled.
-    ///
-    /// Default: 5 for `node` command, 0 for non-node utility subcommands.
-    #[arg(long = "log.file.max-files", value_name = "COUNT", global = true)]
-    pub log_file_max_files: Option<usize>,
 
     /// Write logs to journald.
     #[arg(long = "log.journald", global = true, default_value_t = DefaultLogArgs::get_global().journald)]
@@ -99,28 +67,6 @@ pub struct LogArgs {
 }
 
 impl LogArgs {
-    /// The default number of log files for the `node` subcommand.
-    pub const DEFAULT_MAX_LOG_FILES_NODE: usize = 5;
-
-    /// Returns the effective maximum number of log files.
-    ///
-    /// If `log_file_max_files` was explicitly set, returns that value.
-    /// Otherwise returns 0 (file logging disabled).
-    ///
-    /// Note: Callers should apply the node-specific default (5) before calling
-    /// `init_tracing` if the command is the `node` subcommand.
-    pub fn effective_log_file_max_files(&self) -> usize {
-        self.log_file_max_files.unwrap_or(0)
-    }
-
-    /// Applies the default `log_file_max_files` value for the `node` subcommand
-    /// if not explicitly set by the user.
-    pub const fn apply_node_defaults(&mut self) {
-        if self.log_file_max_files.is_none() {
-            self.log_file_max_files = Some(Self::DEFAULT_MAX_LOG_FILES_NODE);
-        }
-    }
-
     /// Creates a [`LayerInfo`] instance.
     fn layer_info(&self, format: LogFormat, filter: String, use_color: bool) -> LayerInfo {
         LayerInfo::new(
@@ -131,20 +77,10 @@ impl LogArgs {
         )
     }
 
-    /// File info from the current log options.
-    fn file_info(&self) -> FileInfo {
-        FileInfo::new(
-            self.log_file_directory.clone().into(),
-            self.log_file_name.clone(),
-            self.log_file_max_size * MB_TO_BYTES,
-            self.effective_log_file_max_files(),
-        )
-    }
-
     /// Initializes tracing with the configured options from cli args.
     ///
-    /// Returns the file worker guard if a file worker was configured.
-    pub fn init_tracing(&self) -> eyre::Result<Option<FileWorkerGuard>> {
+    /// All logs go to the screen; file logging was removed by operator order.
+    pub fn init_tracing(&self) -> eyre::Result<()> {
         self.init_tracing_with_layers(Layers::new(), false)
     }
 
@@ -156,13 +92,11 @@ impl LogArgs {
     /// # Arguments
     /// * `layers` - Pre-configured layers to include
     /// * `enable_reload` - If true, enables runtime log level changes
-    ///
-    /// Returns the file worker guard if a file worker was configured.
     pub fn init_tracing_with_layers(
         &self,
         layers: Layers,
         enable_reload: bool,
-    ) -> eyre::Result<Option<FileWorkerGuard>> {
+    ) -> eyre::Result<()> {
         let mut tracer = SmartnetTracer::new();
 
         let stdout = self.layer_info(self.log_stdout_format, self.log_stdout_filter.clone(), true);
@@ -172,18 +106,12 @@ impl LogArgs {
             tracer = tracer.with_journald(self.journald_filter.clone());
         }
 
-        if self.effective_log_file_max_files() > 0 {
-            let info = self.file_info();
-            let file = self.layer_info(self.log_file_format, self.log_file_filter.clone(), false);
-            tracer = tracer.with_file(file, info);
-        }
-
         if self.samply {
             let config = self.layer_info(LogFormat::Terminal, self.samply_filter.clone(), false);
             tracer = tracer.with_samply(config);
         }
 
-        tracer.with_reload(enable_reload).init_with_layers(layers)
+        tracer.with_reload(enable_reload).init_with_layers(layers).map(|_| ())
     }
 }
 
@@ -194,10 +122,6 @@ impl LogArgs {
 pub struct DefaultLogArgs {
     log_stdout_format: LogFormat,
     log_stdout_filter: String,
-    log_file_format: LogFormat,
-    log_file_filter: String,
-    log_file_name: String,
-    log_file_max_size: u64,
     journald: bool,
     journald_filter: String,
     samply: bool,
@@ -225,30 +149,6 @@ impl DefaultLogArgs {
     /// Set the default stdout log filter.
     pub fn with_log_stdout_filter(mut self, v: String) -> Self {
         self.log_stdout_filter = v;
-        self
-    }
-
-    /// Set the default file log format.
-    pub const fn with_log_file_format(mut self, v: LogFormat) -> Self {
-        self.log_file_format = v;
-        self
-    }
-
-    /// Set the default file log filter.
-    pub fn with_log_file_filter(mut self, v: String) -> Self {
-        self.log_file_filter = v;
-        self
-    }
-
-    /// Set the default log file name.
-    pub fn with_log_file_name(mut self, v: String) -> Self {
-        self.log_file_name = v;
-        self
-    }
-
-    /// Set the default max log file size in MB.
-    pub const fn with_log_file_max_size(mut self, v: u64) -> Self {
-        self.log_file_max_size = v;
         self
     }
 
@@ -288,10 +188,6 @@ impl Default for DefaultLogArgs {
         Self {
             log_stdout_format: LogFormat::Terminal,
             log_stdout_filter: String::new(),
-            log_file_format: LogFormat::Terminal,
-            log_file_filter: "debug".to_string(),
-            log_file_name: "smartnet.log".to_string(),
-            log_file_max_size: 200,
             journald: false,
             journald_filter: "error".to_string(),
             samply: false,

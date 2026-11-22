@@ -1,10 +1,9 @@
 //! Command dispatch; the merged daemon beat calls the same seal paths.
 
 use crate::{
-    config::{expand_home, load_validator_config, ValidatorConfig},
-    keystore_util::{load_secret_from_keystore, resolve_password_for_run},
+    config::{load_validator_config, ValidatorConfig},
+    keystore_util::KeystoreMaterial,
     outcome::{format_rpc_error, from_eyre, is_node_unreachable, ValidatorStatus},
-    run_once::signer_address,
     seed_tx::{seed_tx, SeedTxArgs},
     Cli,
 };
@@ -13,8 +12,8 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_engine::ForkchoiceState;
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use eyre::{Context as _, Result};
-use k256::ecdsa::SigningKey;
 use serde_json::json;
+use smartnet_fs_util::runtime_paths::{home_dir_from_config, resolve_runtime_path};
 use std::path::PathBuf;
 use tracing::debug;
 use url::Url;
@@ -30,7 +29,7 @@ pub(crate) async fn run(cli: Cli) -> ValidatorStatus {
                 .to_string(),
         },
         Some(crate::Commands::Keystore(ref keystore)) => {
-            crate::import::keystore_import_cmd(&cli, &keystore.key, &keystore.password)
+            crate::import::keystore_import_cmd(&cli, keystore.private_key_file.as_deref())
         }
         Some(crate::Commands::SeedTx) => seed_tx_cmd().await,
         Some(crate::Commands::Ping(ref ping)) => ping_cmd(ping).await,
@@ -49,7 +48,7 @@ pub(crate) const OPS_RPC_TIMEOUT_MS: u64 = 30_000;
 async fn seed_tx_cmd() -> ValidatorStatus {
     // Recipient = derived from the private key (SEED_TX_TO is gone from the config — the
     // merged flow derives it from the keystore identity).
-    let secret_key = match load_signing_key(None).await {
+    let key = match load_signing_key(None).await {
         Ok(k) => k,
         Err(s) => return s,
     };
@@ -66,10 +65,10 @@ async fn seed_tx_cmd() -> ValidatorStatus {
             };
         }
     };
-    let to = signer_address(&secret_key);
+    let to = key.address();
     match seed_tx(&SeedTxArgs {
         node_url: OWN_NODE_URL.to_string(),
-        secret_key,
+        key,
         to,
         // Payload values are the merged flow's defaults (the old SEED_TX_VALUE_WEI /
         // SEED_TX_GAS_LIMIT config keys are gone).
@@ -215,15 +214,18 @@ fn forkchoice_state_for_ping(
     })
 }
 
-/// Load the signing key from the config's keystore (`KEY_PATH`, the key GATHERED — any
-/// filename, exactly one file — + `PASSWORD_FILE`); `cfg` = `None` means: load the widowed config from `--config`/default.
-async fn load_signing_key(cfg: Option<&ValidatorConfig>) -> Result<SigningKey, ValidatorStatus> {
+/// Load the encrypted keystore + password buffers from config (`KEY_PATH`, one gathered file or
+/// one picked by the node-level `COINBASE` selector, + mandatory `PASSWORD_FILE`). `cfg = None`
+/// means: load the config from `--config`/default. No decrypted key is retained.
+async fn load_signing_key(
+    cfg: Option<&ValidatorConfig>,
+) -> Result<KeystoreMaterial, ValidatorStatus> {
     let cfg = match cfg {
         Some(c) => c.clone(),
         None => {
             let cfg_path = match std::env::var("SMARTNET_CONFIG_PATH") {
                 Ok(p) => PathBuf::from(p),
-                Err(_) => crate::default_validator_config_path().map_err(from_eyre)?,
+                Err(_) => crate::resolve_config_path(None).map_err(from_eyre)?,
             };
             match load_validator_config(&cfg_path) {
                 Ok(c) => c,
@@ -231,9 +233,17 @@ async fn load_signing_key(cfg: Option<&ValidatorConfig>) -> Result<SigningKey, V
             }
         }
     };
-    let password = resolve_password_for_run(cfg.password_file.as_deref()).map_err(from_eyre)?;
-    let path = cfg.keystore_path().map_err(from_eyre)?;
-    load_secret_from_keystore(&path, &password)
+    let password_file = cfg.password_file.as_deref().ok_or_else(|| {
+        from_eyre(eyre::eyre!("PASSWORD_FILE is required in config — headless boot never prompts"))
+    })?;
+    let cfg_path = match std::env::var("SMARTNET_CONFIG_PATH") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => crate::resolve_config_path(None).map_err(from_eyre)?,
+    };
+    // Node-level selector, not a validator field: it only picks the encrypted key file.
+    let coinbase =
+        smartnet_fs_util::keystore_selector::coinbase_from_config(&cfg_path).map_err(from_eyre)?;
+    KeystoreMaterial::load(&cfg.key_dir, password_file, coinbase).map_err(from_eyre)
 }
 
 /// Chain id straight from the database (the single source of truth): reads `DATADIR_PATH`
@@ -242,10 +252,11 @@ async fn load_signing_key(cfg: Option<&ValidatorConfig>) -> Result<SigningKey, V
 fn db_chain_id() -> Result<Option<u64>> {
     let cfg_path = match std::env::var("SMARTNET_CONFIG_PATH") {
         Ok(p) => PathBuf::from(p),
-        Err(_) => crate::default_validator_config_path()?,
+        Err(_) => crate::resolve_config_path(None)?,
     };
     let raw = std::fs::read_to_string(&cfg_path)
         .with_context(|| format!("read config {}", cfg_path.display()))?;
+    let home_dir = home_dir_from_config(&raw)?;
     let mut datadir: Option<PathBuf> = None;
     let mut engine: Option<String> = None;
     for line in raw.lines() {
@@ -257,7 +268,7 @@ fn db_chain_id() -> Result<Option<u64>> {
         let key = parts.next().unwrap_or("").trim();
         let value = parts.next().unwrap_or("").trim().trim_matches('"');
         match key {
-            "DATADIR_PATH" => datadir = Some(expand_home(value)?),
+            "DATADIR_PATH" => datadir = Some(resolve_runtime_path(&home_dir, value)?),
             "DB_ENGINE" => engine = Some(value.to_string()),
             _ => {}
         }
@@ -273,8 +284,8 @@ fn db_chain_id() -> Result<Option<u64>> {
         Some("fjall") | None => datadir.join("fjall").join("db"),
         Some("redb") => datadir.join("redb").join("db"),
         Some(other) => {
-                eyre::bail!("unsupported DB_ENGINE {other:?}");
-            }
+            eyre::bail!("unsupported DB_ENGINE {other:?}");
+        }
     };
     if smartnet_db::is_database_empty(&db_dir) {
         return Ok(None);

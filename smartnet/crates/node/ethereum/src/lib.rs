@@ -30,5 +30,8 @@ pub mod import;
 /// The merged validator's in-process node interface (`SEAL = true`).
 pub mod validator;
 
+/// Node-owned validator registry (`VAL_FILE`, `get_val_all`, `get_val_chair`).
+pub mod validator_registry;
+
 /// Mesh service — closed-list all-to-all gossip over `POST /rumor` (replaces devp2p).
 pub(crate) mod mesh;

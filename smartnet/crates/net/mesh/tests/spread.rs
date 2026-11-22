@@ -24,7 +24,7 @@ use tokio::net::TcpListener;
 /// client-side allowlist requires the responder to authenticate).
 fn peer_line(identity: &Identity, port: u16, active: bool, valid: bool) -> String {
     format!(
-        r#"{{"key_id":"{:#x}","url":"","ip":"127.0.0.1","port_range":{port},"active":{active},"valid":{valid}}}"#,
+        r#"{{"address":"{:#x}","url":"","ip":"127.0.0.1","port_range":{port},"active":{active},"valid":{valid}}}"#,
         identity.address()
     )
 }
@@ -73,8 +73,8 @@ async fn fanout_reaches_active_peers_only() {
         &[
             peer_line(&id_a, live_a.port(), true, true),
             peer_line(&id_b, live_b.port(), true, true),
-            // The dead entry needs some identity — any address works (never connected).
-            peer_line(&client_identity(), dead.port(), true, true),
+            // The dead entry needs a distinct identity — self entries are skipped.
+            peer_line(&common::server_identity(), dead.port(), true, true),
             peer_line(&id_inactive, inactive.port(), false, true),
             peer_line(&id_invalid, invalid.port(), true, false),
             peer_line(&client_identity(), self_port, true, true), // self
@@ -202,7 +202,7 @@ async fn dead_peer_releases_the_gate_on_its_first_handshake_try() {
     install_tls();
     let dead = dead_addr().await;
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = write_peers(&dir, &[peer_line(&client_identity(), dead.port(), true, true)]);
+    let path = write_peers(&dir, &[peer_line(&common::server_identity(), dead.port(), true, true)]);
 
     let gate = SyncGate::new();
     let spreader = Spreader::new(

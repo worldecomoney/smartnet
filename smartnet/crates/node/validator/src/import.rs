@@ -1,19 +1,18 @@
 //! `keystore` subcommand — the only way a key enters the validator.
 //!
-//! `smartnet keystore --key <PRIVATE_KEY_FILE> --password <PW_FILE>` turns an operator's
-//! plaintext key file into an encrypted keystore **in `KEY_PATH`**. The protocol, in order:
+//! `smartnet keystore [RAW_PRIVATE_KEY_FILE] --config CONFIG` writes an encrypted keystore into
+//! `KEY_PATH`. `KEY_PATH` and `PASSWORD_FILE` come from the resolved config; there are no
+//! `--key`/`--password` flags. `--config` is used verbatim; without it the global rule searches
+//! `./config.toml` then `~/.smartnet/config.toml`. With no raw-key file, a fresh key is generated.
 //!
-//! 1. Derive the address from the key (optional `0x`, any case accepted). The key never appears as
-//!    a CLI argument value (shell-history/`ps` leak vector) — only the *file path* does.
+//! 1. Read/generate the key. When a file is named, derive its address (optional `0x`, any case).
+//!    The key never appears as a CLI argument value — only the *file path* does.
 //! 2. Name the keystore `UTC--{timestamp}.{nanos}Z--{lowercase address, no 0x}`. That name is this
-//!    command's own business: **nothing in the node ever names a key file** — boot GATHERS the
-//!    single file sitting in `KEY_PATH` (`keystore_util::get_encrypted_key`), so any name works.
-//! 3. Refuse to write when `KEY_PATH` already holds a file — **no overwrite, no
-//!    auto-deletion** (the same analogy as `smartnet init` refusing a non-empty data dir):
-//!    clearing the path is the operator's job, so a key change starts with an empty dir.
+//!    command's own business: boot GATHERS the single file in `KEY_PATH`, so any name works.
+//! 3. Refuse to write when `KEY_PATH` already holds a file — **no overwrite, no auto-deletion**.
+//!    Clearing the path is the operator's job; a key change starts with an empty dir.
 //! 4. Write the encrypted keystore into the now-empty `KEY_PATH`.
-//! 5. **Only then** delete the plaintext source. If any earlier step failed, the source key is
-//!    left alone — it is the operator's only copy and a failed import must not eat it.
+//! 5. **Only then** delete a named plaintext source. A failure earlier leaves it alone.
 //!
 //! **`config.toml` is never edited** (user-in #2): `KEY_FILE` is gone from the schema, so there is
 //! nothing left here to keep in sync — the keystore is found by gathering `KEY_PATH` at boot.
@@ -23,6 +22,7 @@ use std::path::Path;
 use alloy_primitives::Address;
 use eyre::{bail, Context, Result};
 use k256::ecdsa::SigningKey;
+use rand_08::rngs::OsRng;
 use tracing::info;
 
 use crate::{
@@ -72,11 +72,7 @@ fn lowercase_address(address: Address) -> String {
     format!("{address:#x}")
 }
 
-pub(crate) fn keystore_import_cmd(
-    cli: &Cli,
-    private_key_file: &Path,
-    password_file: &Path,
-) -> ValidatorStatus {
+pub(crate) fn keystore_import_cmd(cli: &Cli, private_key_file: Option<&Path>) -> ValidatorStatus {
     let cfg_path = match cli.resolved_config() {
         Ok(p) => p,
         Err(e) => return from_eyre(e),
@@ -86,15 +82,20 @@ pub(crate) fn keystore_import_cmd(
         Err(e) => return from_eyre(e),
     };
 
-    let secret = match std::fs::read_to_string(private_key_file)
-        .with_context(|| format!("read private key file {}", private_key_file.display()))
-    {
-        Ok(s) => s,
-        Err(e) => return from_eyre(e),
-    };
-    let secret = match parse_private_key(&secret) {
-        Ok(k) => k,
-        Err(e) => return from_eyre(e),
+    let secret = match private_key_file {
+        Some(path) => {
+            let raw = match std::fs::read_to_string(path)
+                .with_context(|| format!("read private key file {}", path.display()))
+            {
+                Ok(s) => s,
+                Err(e) => return from_eyre(e),
+            };
+            match parse_private_key(&raw) {
+                Ok(k) => k,
+                Err(e) => return from_eyre(e),
+            }
+        }
+        None => SigningKey::random(&mut OsRng),
     };
     let address = signer_address(&secret);
     let address_lower = lowercase_address(address);
@@ -103,7 +104,7 @@ pub(crate) fn keystore_import_cmd(
     // `KEY_PATH` and never read back by name: boot gathers whatever single file is there.
     let key_file = utc_keystore_filename(address);
 
-    let password = match resolve_password_for_init(Some(password_file)) {
+    let password = match resolve_password_for_init(cfg.password_file.as_deref()) {
         Ok(p) => p,
         Err(e) => return from_eyre(e),
     };
@@ -126,24 +127,26 @@ pub(crate) fn keystore_import_cmd(
         }
     }
 
-
     // Step 3 — the encrypted keystore.
     if let Err(e) = init_keystore_at(&cfg.key_dir, &key_file, &secret, &password) {
         return from_eyre(e);
     }
 
-    // Step 4 — only now is the plaintext key redundant. A failure here is reported loudly:
-    // the keystore is already correct (config.toml was never touched), so the operator just
-    // deletes the file.
-    if let Err(e) = std::fs::remove_file(private_key_file).with_context(|| {
-        format!(
-            "imported, but could not delete the source key {} — delete it manually",
-            private_key_file.display()
-        )
-    }) {
+    // Step 5 — only now is a named plaintext key redundant. A generated key has no source
+    // file. A deletion failure is reported loudly: the keystore is already correct.
+    if let Some(path) = private_key_file &&
+        let Err(e) = std::fs::remove_file(path).with_context(|| {
+            format!(
+                "imported, but could not delete the source key {} — delete it manually",
+                path.display()
+            )
+        })
+    {
         return from_eyre(e);
     }
 
+    let source = private_key_file
+        .map_or_else(|| "generated".to_string(), |path| format!("deleted {}", path.display()));
     info!(
         target: "smartnet_validator",
         event = "KEYSTORE_OK",
@@ -151,9 +154,12 @@ pub(crate) fn keystore_import_cmd(
         key_dir = %cfg.key_dir.display(),
         key_file = %key_file,
         config = %cfg_path.display(),
-        password_file = %password_file.display(),
-        source_deleted = %private_key_file.display(),
-        "private key imported: encrypted keystore written, config updated, source file deleted"
+        password_file = cfg
+            .password_file
+            .as_ref()
+            .map_or_else(|| "prompt".to_string(), |p| p.display().to_string()),
+        source = %source,
+        "encrypted keystore written; config.toml untouched"
     );
     ValidatorStatus::Ok
 }
@@ -226,17 +232,17 @@ mod tests {
         let cfg_path = dir.join("config.toml");
         let source = dir.join("private_key.txt");
         std::fs::write(&source, KEY_HEX).expect("write source key");
+        // The password path comes from this config; no CLI flag exists for it.
+        let password_file = dir.join("password.txt");
+        std::fs::write(&password_file, "test-password").expect("write password");
         let config_before = format!(
-            "KEY_PATH = \"{}\"\nPASSWORD_FILE = \"\"\nSEAL = true\n",
-            dir.join("keys").display()
+            "HOME_DIR_PATH = \"{}\"\nKEY_PATH = \"keys\"\nPASSWORD_FILE = \"password.txt\"\nSEAL = true\n",
+            dir.display()
         );
         std::fs::write(&cfg_path, &config_before).expect("write config");
 
-        // Run the real command once — password file already holds the password.
-        let password_file = dir.join("password.txt");
-        std::fs::write(&password_file, "test-password").expect("write password");
         let cli = crate::Cli { command: None, config: Some(cfg_path.clone()), dump_payload: None };
-        let status = keystore_import_cmd(&cli, &source, &password_file);
+        let status = keystore_import_cmd(&cli, Some(&source));
         assert!(matches!(status, ValidatorStatus::Ok), "keystore import must succeed: {status:?}");
 
         // Source is gone, the keystore is in KEY_PATH, and `config.toml` is untouched.
@@ -247,14 +253,12 @@ mod tests {
 
         let cfg = load_validator_config(&cfg_path).expect("config reloads");
         // GATHERED, never named: the single file in KEY_PATH, whatever it is called.
-        let gathered =
-            crate::keystore_util::get_encrypted_key(&cfg.key_dir).expect("exactly one keystore");
-        assert!(
-            gathered.file_name().is_some(),
-            "gathered path must name a file: {gathered:?}"
-        );
+        let gathered = crate::keystore_util::get_encrypted_key(&cfg.key_dir, None)
+            .expect("exactly one keystore");
+        assert!(gathered.file_name().is_some(), "gathered path must name a file: {gathered:?}");
         // The keystore really does hold this key, and is encrypted, not plaintext.
-        let loaded = load_secret_from_keystore(&gathered, "test-password")
+        let raw = std::fs::read(&gathered).expect("read keystore bytes");
+        let loaded = load_secret_from_keystore(&raw, b"test-password")
             .unwrap_or_else(|e| panic!("keystore reads back: {e:?}"));
         assert_eq!(lowercase_address(signer_address(&loaded)), KEY_ADDRESS);
         let on_disk = std::fs::read_to_string(&gathered).expect("read json");
@@ -270,7 +274,7 @@ mod tests {
             "0x1111111111111111111111111111111111111111111111111111111111111111",
         )
         .expect("write third key");
-        let status = keystore_import_cmd(&cli, &source3, &password_file);
+        let status = keystore_import_cmd(&cli, Some(&source3));
         let message = format!("{status:?}");
         assert!(
             !matches!(status, ValidatorStatus::Ok),
@@ -289,11 +293,70 @@ mod tests {
             config_before,
             "config.toml must NEVER be edited, not even on a refused key change"
         );
-        let gathered =
-            crate::keystore_util::get_encrypted_key(&cfg.key_dir).expect("exactly one keystore");
-        let loaded = load_secret_from_keystore(&gathered, "test-password")
+        let gathered = crate::keystore_util::get_encrypted_key(&cfg.key_dir, None)
+            .expect("exactly one keystore");
+        let raw = std::fs::read(&gathered).expect("read unchanged keystore bytes");
+        let loaded = load_secret_from_keystore(&raw, b"test-password")
             .unwrap_or_else(|e| panic!("unchanged keystore reads back: {e:?}"));
         assert_eq!(lowercase_address(signer_address(&loaded)), KEY_ADDRESS);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An explicit `--config` is used verbatim: no scaffolding to cwd or `~/.smartnet`.
+    #[test]
+    fn keystore_uses_an_explicit_config_without_scaffolding() {
+        let cli = crate::Cli {
+            command: None,
+            config: Some(std::env::temp_dir().join("smartnet-no-such-config.toml")),
+            dump_payload: None,
+        };
+        let status = keystore_import_cmd(&cli, None);
+        let message = format!("{status:?}");
+        assert!(matches!(status, ValidatorStatus::Failed { .. }), "got: {message}");
+        assert!(
+            message.contains("read config"),
+            "the named file must be tried directly: {message}"
+        );
+        assert!(
+            !message.contains("searched"),
+            "explicit paths must not trigger scaffolding: {message}"
+        );
+    }
+
+    /// No positional key file: a fresh private key is generated and encrypted with the
+    /// password named by the config, with no source file to delete.
+    #[test]
+    fn keystore_without_a_raw_key_generates_one() {
+        let dir =
+            std::env::temp_dir().join(format!("smartnet-val-import-gen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let cfg_path = dir.join("config.toml");
+        let password_file = dir.join("password.txt");
+        std::fs::write(&password_file, "generated-password").expect("write password");
+        let config_before = format!(
+            "HOME_DIR_PATH = \"{}\"\nKEY_PATH = \"keys\"\nPASSWORD_FILE = \"password.txt\"\nSEAL = true\n",
+            dir.display()
+        );
+        std::fs::write(&cfg_path, &config_before).expect("write config");
+
+        let cli = crate::Cli { command: None, config: Some(cfg_path.clone()), dump_payload: None };
+        let status = keystore_import_cmd(&cli, None);
+        assert!(matches!(status, ValidatorStatus::Ok), "generated-key import failed: {status:?}");
+
+        assert_eq!(
+            std::fs::read_to_string(&cfg_path).expect("config back"),
+            config_before,
+            "config.toml must never be edited"
+        );
+        let gathered = crate::keystore_util::get_encrypted_key(&dir.join("keys"), None)
+            .expect("exactly one keystore");
+        let raw = std::fs::read(&gathered).expect("read generated keystore bytes");
+        let loaded = load_secret_from_keystore(&raw, b"generated-password")
+            .unwrap_or_else(|e| panic!("generated keystore must decrypt: {e:?}"));
+        assert_ne!(lowercase_address(signer_address(&loaded)), KEY_ADDRESS);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

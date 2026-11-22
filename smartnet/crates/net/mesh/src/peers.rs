@@ -3,14 +3,14 @@
 //! Schema (kept compatible with `go-mesh-real`'s `mainnet.jsonl`):
 //!
 //! ```json
-//! {"key_id":"node-a","url":"","ip":"127.0.0.1","port_range":30888,"active":true,"valid":true}
+//! {"address":"0x...","url":"","ip":"127.0.0.1","port_range":30888,"active":true,"valid":true}
 //! ```
 //!
 //! - `ip` + `port_range` is where we open the `WebSocket` mesh connection
 //!   (`ws://ip:port_range/mesh`).
-//! - `key_id` is the verified Ethereum address (`0x…`, 20 bytes) — the identity
-//!   allowlist a peer must back with a signed `HELLO`; `url` is unused (defaults to
-//!   empty).
+//! - `address` is the verified Ethereum address (`0x…`, 20 bytes) — the identity allowlist a peer
+//!   must back with a signed `HELLO`; `key_id` is accepted as a legacy alias. `url` is unused
+//!   (defaults to empty).
 //! - `active && valid` gates sending; our own entry (same listen port) is skipped as self.
 //! - Blank lines and `#` comments are ignored; a malformed line is skipped with a warning (reported
 //!   by [`parse_peers`]) — one bad line must not disable the whole mesh.
@@ -18,6 +18,7 @@
 
 use alloy_primitives::Address;
 use serde::Deserialize;
+use smartnet_fs_util::runtime_paths::resolve_data_file;
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -28,9 +29,10 @@ use tracing::warn;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PeerEntry {
     /// The peer's verified Ethereum address (`0x…`) — the identity allowlist a peer
-    /// must back with a signed `HELLO`. A legacy/label value parses to no address and
-    /// cannot be authenticated.
-    #[serde(default)]
+    /// must back with a signed `HELLO`. `key_id` is the legacy field name; both names
+    /// feed this one value. A legacy/label value parses to no address and cannot be
+    /// authenticated.
+    #[serde(default, alias = "address")]
     pub key_id: String,
     /// Unused (reserved), defaults to empty.
     #[serde(default)]
@@ -59,10 +61,14 @@ impl PeerEntry {
 
     /// Whether rumors should be sent to this entry: `active && valid`, not ourselves.
     ///
-    /// Self-identity is by **listen port** — every node in the mesh must use a distinct
-    /// `MESH_PORT` (see `smartnet/example.mainnet.jsonl`).
-    pub const fn is_target(&self, self_port: u16) -> bool {
-        self.active && self.valid && self.port_range != self_port
+    /// Self-identity is both the listen port and the node identity address. The port catches
+    /// a normal `MESH_PORT` mismatch; the address also prevents a node with a misconfigured
+    /// port from dialing its own keystore identity.
+    pub fn is_target(&self, self_port: u16, self_address: Address) -> bool {
+        self.active
+            && self.valid
+            && self.port_range != self_port
+            && self.address() != Some(self_address)
     }
 
     /// This entry's `key_id` parsed as the verified Ethereum address it now carries.
@@ -75,17 +81,28 @@ impl PeerEntry {
     }
 }
 
-/// Default peer file when `MESH_PEERS_FILE` is unset: `$HOME/.smartnet/mainnet.jsonl`.
+/// Bare-mesh fallback when `MESH_PEERS_FILE` is unset: `./mainnet.jsonl`, then
+/// `~/.smartnet/mainnet.jsonl`.
 ///
-/// `HOME` unset yields an empty path — `Spreader` reports it as a missing file once and
-/// outbound gossip stays off (inbound still works).
+/// Configured nodes resolve the key against `HOME_DIR_PATH` in `load_operator_overlay`, so this
+/// is only for direct mesh users with no node config. If neither location exists, the error is
+/// logged and an empty path is returned — outbound gossip stays off, inbound still works.
 pub fn default_peers_file() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home).join(".smartnet").join("mainnet.jsonl"),
-        None => {
+    let Some(home) = std::env::var_os("HOME") else {
+        warn!(
+            target: "smartnet::mesh",
+            "HOME is not set and MESH_PEERS_FILE is unset — outbound mesh gossip disabled"
+        );
+        return PathBuf::new();
+    };
+    let base = PathBuf::from(home).join(".smartnet");
+    match resolve_data_file("mainnet.jsonl", &base, None) {
+        Ok(path) => path,
+        Err(err) => {
             warn!(
                 target: "smartnet::mesh",
-                "HOME is not set and MESH_PEERS_FILE is unset — outbound mesh gossip disabled"
+                %err,
+                "no MESH_PEERS_FILE and mainnet.jsonl is not in ./ or ~/.smartnet — outbound mesh gossip disabled"
             );
             PathBuf::new()
         }
@@ -129,21 +146,31 @@ pub fn load_peers(path: &Path) -> Result<ParsedPeers, io::Error> {
 }
 
 /// Builds the inbound-`HELLO` allowlist from a peer file: the addresses of entries whose
-/// `key_id` parses as a `0x` address **and** that are still members (`active && valid` —
-/// the same gate as [`PeerEntry::is_target`]).
+/// identity field parses as a `0x` address **and** that are still members (`active && valid`
+/// — the same gate as [`PeerEntry::is_target`]).
 ///
 /// This is the cheap `DoS` gate order: an inbound `HELLO` whose claimed address is absent
 /// from this list is dropped before any signature recovery. Re-read with the peer file so
 /// membership changes take effect without a restart: marking a peer `valid: false`
 /// (revoked) or `active: false` (paused) removes it from the inbound allowlist on the
-/// next handshake, not just from outbound gossip. Entries with a legacy/label `key_id`
-/// contribute no address (they cannot be authenticated and are refused at the `HELLO`).
+/// next handshake, not just from outbound gossip. Entries with a legacy/label identity
+/// contribute no address and are warned once per allowlist read.
 pub fn allowlist_addresses(parsed: &ParsedPeers) -> Vec<Address> {
     parsed
         .peers
         .iter()
         .filter(|peer| peer.active && peer.valid)
-        .filter_map(PeerEntry::address)
+        .filter_map(|peer| match peer.address() {
+            Some(address) => Some(address),
+            None => {
+                warn!(
+                    target: "smartnet::mesh",
+                    ip = %peer.ip, port = peer.port_range,
+                    "mesh peer has no 0x identity address — excluded from HELLO allowlist"
+                );
+                None
+            }
+        })
         .collect()
 }
 
@@ -211,10 +238,31 @@ mod tests {
         .unwrap();
         assert_eq!(peer.address(), Some(addr.parse::<Address>().unwrap()));
 
+        // The live operator file uses `address`; it is the same identity field.
+        let peer: PeerEntry = serde_json::from_str(&format!(
+            r#"{{"address":"{addr}","ip":"127.0.0.1","port_range":30888}}"#
+        ))
+        .unwrap();
+        assert_eq!(peer.address(), Some(addr.parse::<Address>().unwrap()));
+
         // A legacy label / free-form `key_id` is not an address — no allowlist entry.
         let label: PeerEntry =
             serde_json::from_str(r#"{"key_id":"node-c","ip":"127.0.0.1","port_range":1}"#).unwrap();
         assert_eq!(label.address(), None);
+    }
+
+    #[test]
+    fn self_skip_uses_port_and_identity() {
+        let addr: Address = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8".parse().unwrap();
+        let other: Address = "0x1111111111111111111111111111111111111111".parse().unwrap();
+        let peer: PeerEntry = serde_json::from_str(&format!(
+            r#"{{"address":"{addr}","ip":"127.0.0.1","port_range":41711}}"#
+        ))
+        .unwrap();
+
+        assert!(!peer.is_target(41711, other), "same port is self");
+        assert!(!peer.is_target(65534, addr), "same identity is self");
+        assert!(peer.is_target(65534, other), "different port and identity is a target");
     }
 
     #[test]

@@ -60,6 +60,7 @@ use smartnet_tracing::tracing::{debug, info, warn};
 use smartnet_validator::ValidatorDaemon;
 use std::{
     marker::PhantomData,
+    path::Path,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
@@ -743,7 +744,13 @@ where
     type Consensus = Arc<EthBeaconConsensus<<Node::Types as NodeTypes>::ChainSpec>>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        Ok(build_eth_consensus(ctx.chain_spec()))
+        // The registry path is operator data: read it from `VAL_FILE` in the same config.toml
+        // the node booted with. No directory is inferred from HOME or the binary location.
+        let val_file = match ctx.config().config.as_deref() {
+            Some(config_path) => Some(crate::validator_registry::load_val_file(config_path)?),
+            None => None,
+        };
+        Ok(build_eth_consensus(ctx.chain_spec(), val_file.as_deref()))
     }
 }
 
@@ -773,24 +780,29 @@ where
 /// Calibri-Lite runtime profile is applied (max extraData, the profile detected from
 /// the genesis, the London/Paris shape warnings).
 ///
-/// Shared by the add-ons builder and the standalone RLP import: the import must check
-/// seals exactly the way the live node does, so both call this instead of each
-/// constructing `EthBeaconConsensus` their own way.
-pub fn build_eth_consensus<ChainSpec>(chain_spec: Arc<ChainSpec>) -> Arc<EthBeaconConsensus<ChainSpec>>
+/// `val_file` is the registry path from the operator's `VAL_FILE` key. The registry is
+/// loaded from that file only — the consensus gate never guesses a location. `None` is
+/// only for in-process test builders that carry no config file; it leaves the gate
+/// unloaded (fail closed).
+pub fn build_eth_consensus<ChainSpec>(
+    chain_spec: Arc<ChainSpec>,
+    val_file: Option<&Path>,
+) -> Arc<EthBeaconConsensus<ChainSpec>>
 where
     ChainSpec: EthChainSpec + EthereumHardforks + core::fmt::Debug + Send + Sync + 'static,
 {
-    // The validator registry (`validators.jsonl`, statuses included) is the authority
-    // the validator gate answers from — loaded ONCE at bootstrap so every block this
-    // node sees is gate-checked. A missing file leaves the array empty: the gate then
-    // fails closed for this chain (no enabled validator ⇒ no block validates).
-    let registry_path = calibri_lite_consensus::registry::default_validators_file();
-    if let Err(err) = calibri_lite_consensus::registry::load_validators(&registry_path) {
+    // The node-owned registry (statuses included) is the authority the gate answers from —
+    // loaded ONCE at bootstrap from `VAL_FILE` so every block this node sees is gate-checked.
+    // An unreadable file leaves the array empty: the gate then fails closed for this chain
+    // (no enabled validator ⇒ no block validates).
+    if let Some(registry_path) = val_file
+        && let Err(err) = crate::validator_registry::load_validators(registry_path)
+    {
         warn!(
             target: "smartnet::cli",
             %err,
             path = %registry_path.display(),
-            "validators.jsonl unreadable — the validator gate will fail closed (no block validates)"
+            "validator registry unreadable — the validator gate will fail closed (no block validates)"
         );
     }
 

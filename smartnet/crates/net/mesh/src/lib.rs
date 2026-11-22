@@ -22,8 +22,8 @@
 //!   peers can fetch what was announced.
 //! - **[`inject`]**: local injection + chain reads (`eth_sendRawTransaction`,
 //!   `smartnet_newPayload`, tip, block RLP); this is node import, not mesh wire.
-//! - **[`keystore`]**: the one shared loader that decrypts a node's identity keystore at
-//!   bootstrap (headless, `PASSWORD_FILE`-only, memory-only).
+//! - **[`keystore`]**: thin wrapper around the validator crate's ONE keystore decrypt function;
+//!   builds the node's mesh identity at bootstrap (headless, `PASSWORD_FILE`-only, memory-only).
 //!
 //! Layers:
 //! - [`protocol`]: binary framing and message encoding/decoding.
@@ -37,16 +37,17 @@
 //! - [`spread`]: fanout to the peer file's active targets over the link pool.
 //! - [`inject`]: self-call of the node's local RPC to deliver a received object.
 
-/// Local JSON-RPC injection of a received object into this node.
-pub mod inject;
 /// Layer-2 identity: the signed `HELLO` handshake, digest, and verification.
 pub mod identity;
+/// Local JSON-RPC injection of a received object into this node.
+pub mod inject;
+/// Thin node-identity wrapper over the single shared decrypt function (headless,
+/// `PASSWORD_FILE`-only).
+pub mod keystore;
 /// Persistent per-peer links: one `WebSocket` per peer, reused for every message.
 pub mod link;
 /// Peer-file (`mainnet.jsonl`) parsing and self-skip filtering.
 pub mod peers;
-/// The one shared node-identity keystore loader (headless, `PASSWORD_FILE`-only).
-pub mod keystore;
 /// Pre-authentication read budget — byte cap on a connection until its `HELLO` verifies.
 pub mod preauth;
 /// Binary mesh protocol v1 (envelope, opcodes, announce/get/data).

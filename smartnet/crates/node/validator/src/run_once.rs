@@ -48,6 +48,7 @@ use crate::{
     balances::{observe_sender_state, SenderState},
     block_rlp_wire::warn_block_rlp_wire_envelope,
     io::ValidatorIo,
+    keystore_util::KeystoreMaterial,
     mempool_policy::{
         fold_queued_into_candidates, log_mempool_selection, revise_final_body_for_rejected,
         select_pending_for_block, truncate_pool_to_max_txs,
@@ -65,10 +66,9 @@ use alloy_rpc_types_eth::{
 use alloy_rpc_types_txpool::TxpoolContent;
 use calibri_lite_consensus::pre_consensus::{
     build_vanity_with_meta, calibri_lite_seal_hash,
-    validate_smartnet_proposal, CalibriLiteSealError, SmartNetProposalMeta, SmartNetRuntimeProfile,
+    validate_smartnet_proposal, SmartNetProposalMeta, SmartNetRuntimeProfile,
 };
 use eyre::{Context, Result};
-use k256::ecdsa::SigningKey;
 use smartnet_timing::{fmt_wall, fmt_wall_opt};
 use std::{
     collections::BTreeMap,
@@ -135,14 +135,15 @@ pub(crate) async fn run_once<I: ValidatorIo>(io: &I, args: &RunOnceArgs) -> Vali
     }
 }
 
-// No `Debug`: this struct holds `secret_key`. `k256`/`alloy` redact their own `Debug`, but
-// deriving it here is a latent foot-gun (PRIVATE-KEY.md: decrypted keys never leave memory).
+// No `Debug`: this struct holds the encrypted keystore + password buffers. The address is public;
+// key bytes and password bytes must never be formatted into a log (PRIVATE-KEY.md).
 pub(crate) struct RunOnceArgs {
     /// Validator identity anchor; logging and operator correlation.
     pub coinbase: Address,
     /// On-chain fee recipient (`header.beneficiary`).
     pub fee_receiver: Address,
-    pub secret_key: SigningKey,
+    /// Encrypted keystore + password in RAM. No decrypted `SigningKey` is retained.
+    pub key: KeystoreMaterial,
     /// If set, write final block RLP bytes here (for `smartnet-test-util` probes).
     pub dump_payload: Option<PathBuf>,
     /// Seal when txpool is empty (`ALLOW_EMPTY = true` in config).
@@ -247,28 +248,30 @@ fn log_smartnet_proposal_extra_data(header: &Header, validator_set_len: usize) {
     );
 }
 
-fn sign_calibri_lite_header(
-    mut header: Header,
-    secret: &SigningKey,
-) -> Result<Header, CalibriLiteSealError> {
-    let seal_hash = calibri_lite_seal_hash(&header)?;
+fn sign_calibri_lite_header(mut header: Header, key: &KeystoreMaterial) -> Result<Header> {
+    let seal_hash =
+        calibri_lite_seal_hash(&header).map_err(|e| eyre::eyre!("calibri_lite seal hash: {e}"))?;
     let mut digest = [0u8; 32];
     digest.copy_from_slice(seal_hash.as_slice());
-    let (sig, rec_id) = secret
-        .sign_prehash_recoverable(&digest)
-        .map_err(|_| CalibriLiteSealError::SignatureRecoveryFailed)?;
-    let compact = sig.to_bytes();
 
-    let mut extra = header.extra_data.to_vec();
-    let sig_start = extra.len().saturating_sub(SEAL_SIGNATURE_LEN);
-    if extra.len() < SEAL_SIGNATURE_LEN {
-        return Err(CalibriLiteSealError::MissingSealSignature { extra_data_len: extra.len() });
-    }
-    let tail = &mut extra[sig_start..];
-    tail[..64].copy_from_slice(&compact);
-    tail[64] = rec_id.to_byte();
-    header.extra_data = extra.into();
-    Ok(header)
+    // Decrypt only for this signature; the key is dropped when `with_key` returns.
+    key.with_key(|secret| {
+        let (sig, rec_id) = secret
+            .sign_prehash_recoverable(&digest)
+            .map_err(|_| eyre::eyre!("seal signature recovery failed"))?;
+        let compact = sig.to_bytes();
+
+        let mut extra = header.extra_data.to_vec();
+        let sig_start = extra.len().saturating_sub(SEAL_SIGNATURE_LEN);
+        if extra.len() < SEAL_SIGNATURE_LEN {
+            eyre::bail!("header extra_data has no 65-byte seal: len {}", extra.len());
+        }
+        let tail = &mut extra[sig_start..];
+        tail[..64].copy_from_slice(&compact);
+        tail[64] = rec_id.to_byte();
+        header.extra_data = extra.into();
+        Ok(header)
+    })?
 }
 
 /// Returns true if canonical `latest` reports `want_hash` at `want_number`.
@@ -503,18 +506,10 @@ async fn val_seq_10_prepare<I: ValidatorIo>(
         .wrap_err("latest head")?
         .ok_or_else(|| eyre::eyre!("no latest block from node"))?;
 
-    // The authorized set comes from `validators.jsonl` — the RAM array filled at
-    // bootstrap by `load_validators` — NEVER from the genesis `extraData` signer list.
-    // That list is LEGACY and is not consulted at all (user-in.md #3: "skip genesis
-    // validator entirely"). Fail closed: an empty/unreadable registry means no validator,
-    // so nothing may be sealed. For the chair question itself see
-    // `validators::get_val_chair(B256::ZERO, 0, "")` — with one validator the detour
-    // returns it (sync: the caller passes the block hash that seeds the entropy).
-    let signers: Vec<Address> = crate::validators::get_val_all()
-        .iter()
-        .filter(|record| record.is_enabled())
-        .map(|record| record.address)
-        .collect();
+    // The authorized set is node-owned registry data, returned through `ValidatorIo`.
+    // The validator never opens `validators.jsonl`. The genesis `extraData` list is LEGACY
+    // and is not consulted at all. Fail closed: an empty registry means no validator.
+    let signers: Vec<Address> = io.enabled_validators();
     if signers.is_empty() {
         eyre::bail!(
             "validators.jsonl holds no `status: true` validator (fail closed) — the \
@@ -522,7 +517,7 @@ async fn val_seq_10_prepare<I: ValidatorIo>(
         );
     }
 
-    let signer_addr = signer_address(&args.secret_key);
+    let signer_addr = args.key.address();
     if !signers.contains(&signer_addr) {
         eyre::bail!("secret key address {signer_addr} is not `status: true` in validators.jsonl");
     }
@@ -909,8 +904,8 @@ fn val_seq_70_seal(
 
     let pre_seal_hash = log_pre_seal(&header)?;
 
-    header = sign_calibri_lite_header(header, &args.secret_key)
-        .map_err(|e| eyre::eyre!("seal sign: {e}"))?;
+    header =
+        sign_calibri_lite_header(header, &args.key).map_err(|e| eyre::eyre!("seal sign: {e}"))?;
 
     let (post_seal_hash, recovered) = log_post_seal(&header, signer_addr)
         .map_err(|e| eyre::eyre!("post-seal checkpoint: {e}"))?;
@@ -1173,6 +1168,21 @@ async fn run_once_inner<I: ValidatorIo>(io: &I, args: &RunOnceArgs) -> Result<In
     let sender_state = stage("val_seq_30", val_seq_30_observe_state(io, &txpool)).await?;
     let (next_ts, next_number, runtime, child_hdr) =
         stage("val_seq_40", async { val_seq_40_plan_header(&latest, args.chain_id) }).await?;
+
+    // The node owns the chair query too. With the exact `(parent_hash, timestamp)` this pass
+    // will seal, an idle beat is the right answer when this signer is not the chair — the
+    // node's seal gate would reject a finished block from anyone else.
+    let chair = io.get_val_chair(latest.header.hash, next_ts, "");
+    if chair != Some(signer_addr) {
+        debug!(
+            target: "smartnet_validator",
+            signer = %signer_addr,
+            ?chair,
+            "not the chair for this slot — idle beat"
+        );
+        return Ok(InnerOutcome::NothingToSeal);
+    }
+
     let final_body = stage("val_seq_50", async {
         val_seq_50_select(
             io,
@@ -1235,6 +1245,7 @@ mod tests {
         build_vanity_with_meta, calibri_lite_seal_hash, recover_calibri_lite_signer,
         SmartNetProposalMeta,
     };
+    use k256::ecdsa::SigningKey;
 
     fn secret(key_byte: u8) -> SigningKey {
         SigningKey::from_slice(&[key_byte; 32]).expect("valid secret")
@@ -1254,7 +1265,8 @@ mod tests {
         let header = proposal_header();
         let pre_hash = calibri_lite_seal_hash(&header).unwrap();
 
-        let sealed = sign_calibri_lite_header(header, &key).unwrap();
+        let material = crate::keystore_util::test_material(&key);
+        let sealed = sign_calibri_lite_header(header, &material).unwrap();
 
         // Seal digest excludes the trailing 65-byte signature, so it must be unchanged.
         let post_hash = calibri_lite_seal_hash(&sealed).unwrap();
@@ -1268,8 +1280,9 @@ mod tests {
     #[test]
     fn sign_calibri_lite_header_requires_seal_bytes() {
         let key = secret(7);
+        let material = crate::keystore_util::test_material(&key);
         let header = Header { extra_data: vec![0u8; 31].into(), ..Header::default() };
-        assert!(sign_calibri_lite_header(header, &key).is_err());
+        assert!(sign_calibri_lite_header(header, &material).is_err());
     }
 
     // ---- A5 · M21: canonical-probe classification ----
@@ -1532,6 +1545,14 @@ mod tests {
             Ok(self.chain_id)
         }
 
+        fn enabled_validators(&self) -> Vec<Address> {
+            vec![signer_address(&secret(7)), signer_address(&secret(3))]
+        }
+
+        fn get_val_chair(&self, _block_hash: B256, _ts: u64, _purpose: &str) -> Option<Address> {
+            Some(self.signer())
+        }
+
         async fn block_by_number(&self, tag: BlockNumberOrTag) -> Result<Option<RpcBlock>> {
             self.record("eth_getBlockByNumber");
             let (genesis, genesis_hash) = self.genesis();
@@ -1697,35 +1718,11 @@ mod tests {
         (h, hash)
     }
 
-    /// Fill the RAM registry (user-in.md #3) with every signer these tests seal as.
-    ///
-    /// Content is IDENTICAL for every caller, and the path is per-thread, so concurrent
-    /// loads can never disagree — the genesis `extraData` list is not consulted at all.
-    fn load_test_registry() {
-        let path = std::env::temp_dir().join(format!(
-            "smartnet-test-validators-{}-{:?}.jsonl",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let lines: Vec<String> = [secret(7), secret(3)]
-            .iter()
-            .map(|k| {
-                format!(
-                    "{{\"address\":\"{:#x}\",\"status\":true}}",
-                    signer_address(k)
-                )
-            })
-            .collect();
-        std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write registry");
-        crate::validators::load_validators(&path).expect("load registry");
-        let _ = std::fs::remove_file(&path);
-    }
-
     fn run_once_args(secret_key: SigningKey, allow_empty: bool) -> RunOnceArgs {
         RunOnceArgs {
             coinbase: Address::repeat_byte(0x01),
             fee_receiver: Address::repeat_byte(0x01),
-            secret_key,
+            key: crate::keystore_util::test_material(&secret_key),
             dump_payload: None,
             allow_empty,
             chain_id: 315,
@@ -1768,8 +1765,6 @@ mod tests {
         });
         let io = MockIo::new(315, pool);
         let args = run_once_args(key, false);
-        // The seal path reads the RAM registry (user-in.md #3) — fill it first.
-        load_test_registry();
         let out = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1804,8 +1799,6 @@ mod tests {
         let _ = smartnet_tls_provider::install_default();
         let io = MockIo::new(315, alloy_rpc_types_txpool::TxpoolContent::default());
         let args = run_once_args(secret(7), false);
-        // The seal path reads the RAM registry (user-in.md #3) — fill it first.
-        load_test_registry();
         let out = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

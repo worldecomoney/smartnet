@@ -1,6 +1,7 @@
 //! Operator config file (`KEY=value`, same style as the node operator config).
 
 use eyre::{Context, Result};
+use smartnet_fs_util::runtime_paths::{home_dir_from_config, resolve_runtime_path};
 use std::path::{Path, PathBuf};
 
 use crate::mempool_policy::SelectionCaps;
@@ -44,15 +45,6 @@ pub struct ValidatorConfig {
     pub enabled: bool,
 }
 
-impl ValidatorConfig {
-    /// The ONE encrypted keystore inside `KEY_PATH` — **gathered, never named**
-    /// (user-in #2). `smartnet keystore` may write any filename; anything other than
-    /// exactly one file in `key_dir` is an error exit.
-    pub(crate) fn keystore_path(&self) -> Result<PathBuf> {
-        crate::keystore_util::get_encrypted_key(&self.key_dir)
-    }
-}
-
 fn strip_quotes(s: &str) -> &str {
     let s = s.trim();
     // `len >= 2` is load-bearing: a lone `"` both starts *and* ends the string, and slicing it
@@ -66,35 +58,6 @@ fn strip_quotes(s: &str) -> &str {
     } else {
         s
     }
-}
-
-/// Expand a leading `~`. `HOME` unset is an error — never silently keep the literal `~/…`
-/// (it would resolve against the current working directory) and never fall back to a
-/// built-in path.
-///
-/// Only `~` (bare) and `~/…` expand, both relative to `HOME`. A *named* user —
-/// `~alice/…` — has no portable meaning here, so it is rejected rather than folded into
-/// `$HOME/alice/…`, which would silently resolve to the wrong directory.
-pub fn expand_home(p: &str) -> Result<PathBuf> {
-    if let Some(rest) = p.strip_prefix('~') {
-        let rel = match rest {
-            "" => "",
-            _ => rest.strip_prefix('/').ok_or_else(|| {
-                eyre::eyre!(
-                    "config path {p:?} starts with `~user` — only `~` and `~/…` are expanded \
-                     (relative to HOME); use an absolute path instead"
-                )
-            })?,
-        };
-        let home = std::env::var("HOME").map_err(|_| {
-            eyre::eyre!(
-                "config path {p:?} starts with `~` but HOME is not set — use an absolute path \
-                 instead (no built-in fallback path exists)"
-            )
-        })?;
-        return Ok(if rel.is_empty() { PathBuf::from(home) } else { PathBuf::from(home).join(rel) });
-    }
-    Ok(PathBuf::from(p))
 }
 
 /// Strip a trailing `#` comment from a raw config line.
@@ -122,10 +85,9 @@ fn strip_comment(line: &str) -> &str {
                 }
             }
             b'"' if !in_single => in_double = !in_double,
-            b'#' if !in_single && !in_double
-                && (i == 0 || b[i - 1].is_ascii_whitespace()) => {
-                    return &line[..i];
-                }
+            b'#' if !in_single && !in_double && (i == 0 || b[i - 1].is_ascii_whitespace()) => {
+                return &line[..i];
+            }
             _ => {}
         }
         i += 1;
@@ -133,25 +95,32 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// Load the operator config: `KEY_PATH`, `PASSWORD_FILE`, `NODE_URL`, `COINBASE`,
-/// `CHAINID`,
-/// `INTERVAL`, `ALLOW_EMPTY`, `CANONICAL_PROBE_TIMEOUT_MS`, `CANONICAL_PROBE_INTERVAL_MS`,
-/// `CANONICAL_PROBE_MAX_INTERVAL_MS`, `RPC_TIMEOUT_MS`, `SEED_TX_TO`, `SEED_TX_VALUE_WEI`,
-/// `SEED_TX_GAS_LIMIT`. `VERB` is optional (defaults to 1 = info), and so are the four
-/// per-class caps `MAX_NATIVE_PER_BLOCK` (64), `MAX_ERC_20_PER_BLOCK` (32),
-/// `MAX_CONTRACTS_PER_BLOCK` (1) and `MAX_NFT_PER_BLOCK` (2), and the total-per-pass
-/// budget `TXPOOL_VAL_MAX_TXS` (512).
+/// Load the validator section of the shared node config: `HOME_DIR_PATH` (the single root),
+/// `KEY_PATH`, `PASSWORD_FILE`, `SEAL`, `ALLOW_EMPTY`, `NODE_HEARTBEAT`, the per-class caps and
+/// `TXPOOL_VAL_MAX_TXS`. The two keystore paths are relative to `HOME_DIR_PATH`.
 ///
-/// Config only — every required key has no built-in default and any of them missing aborts
-/// startup. The key list ships in `validator/example.config.toml` (the `make install` source);
-/// the template-drift test keeps the two in step.
-///
-/// Public so the node's mesh service can load the same keystore identity (same
-/// `KEY_PATH`/`PASSWORD_FILE` pair) at boot — one identity, one config, with the
-/// keystore GATHERED from `KEY_PATH` (any filename, exactly one file).
+/// `VAL_FILE` is node-owned and is ignored here. The validator reads no registry file: it
+/// asks the node for the enabled set and the chair through `ValidatorIo`. The keystore
+/// (`KEY_PATH`/`PASSWORD_FILE`) is the node's identity too — the validator only consumes
+/// the key the node hands it.
 pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
+
+    // Every problem found is collected so an unedited config reports all of them in one
+    // error instead of making the operator play whack-a-mole.
+    let mut problems: Vec<String> = Vec::new();
+
+    // `HOME_DIR_PATH` is the only absolute path in the config; KEY_PATH and PASSWORD_FILE are
+    // relative to it. A bad root is one collected problem, and path keys are skipped so the
+    // report does not drown in derived "relative path" noise.
+    let home_dir = match home_dir_from_config(&raw) {
+        Ok(base) => Some(base),
+        Err(err) => {
+            problems.push(format!("{err:#}"));
+            None
+        }
+    };
 
     let mut key_dir: Option<PathBuf> = None;
     let mut heartbeat_ms: Option<u64> = None;
@@ -165,10 +134,7 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
     let mut max_nft_per_block: Option<u64> = None;
     let mut txpool_val_max_txs: Option<usize> = None;
 
-    // Every problem found is collected so an unedited config reports all of them in one
-    // error instead of making the operator play whack-a-mole.
     let mut seen: Vec<&'static str> = Vec::new();
-    let mut problems: Vec<String> = Vec::new();
 
     for line in raw.lines() {
         let line = strip_comment(line).trim();
@@ -185,6 +151,9 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
         let name = match key {
             "KEY_PATH" => "KEY_PATH",
             "PASSWORD_FILE" => "PASSWORD_FILE",
+            // Node-owned keystore selector: recognized here so it is not rejected as unknown,
+            // but parsed and validated by `smartnet-fs-util` for every node role.
+            "COINBASE" => "COINBASE",
             "VERB" => "VERB",
             "MAX_NATIVE_PER_BLOCK" => "MAX_NATIVE_PER_BLOCK",
             "MAX_ERC_20_PER_BLOCK" => "MAX_ERC_20_PER_BLOCK",
@@ -230,7 +199,11 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
         // problem.
         let parsed: Result<()> = (|| {
             match name {
-                "KEY_PATH" => key_dir = Some(expand_home(strip_quotes(value))?),
+                "KEY_PATH" => {
+                    if let Some(base) = home_dir.as_ref() {
+                        key_dir = Some(resolve_runtime_path(base, strip_quotes(value))?);
+                    }
+                }
                 "SEAL" => {
                     seal = Some(
                         parse_bool(strip_quotes(value))
@@ -254,8 +227,10 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
                 }
                 "PASSWORD_FILE" => {
                     let raw_pw = strip_quotes(value);
-                    if !raw_pw.is_empty() {
-                        password_file = Some(expand_home(raw_pw)?);
+                    if !raw_pw.is_empty() &&
+                        let Some(base) = home_dir.as_ref()
+                    {
+                        password_file = Some(resolve_runtime_path(base, raw_pw)?);
                     }
                 }
                 "VERB" => {
@@ -322,10 +297,11 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
     }
 
     // Config only, no built-in defaults: the keystore's keys decide the validator part.
-    // NODE_URL / CHAINID / COINBASE / SEED_TX_* / INTERVAL / ALLOW_EMPTY / CANONICAL_PROBE_* /
-    // RPC_TIMEOUT_MS are REMOVED: the merged validator addresses its own node in-proc (no
-    // HTTP), the chain id comes from the database (single source), the coinbase is derived
-    // from the private key, and the old RPC-era timings are folded into HEARTBEAT_MS.
+    // NODE_URL / CHAINID / SEED_TX_* / INTERVAL / CANONICAL_PROBE_* / RPC_TIMEOUT_MS are REMOVED:
+    // the merged validator addresses its own node in-proc (no HTTP), the chain id comes from the
+    // database (single source), the fee receiver is derived from the private key, and the old
+    // RPC-era timings are folded into HEARTBEAT_MS. COINBASE is a node-level keystore selector,
+    // parsed by `smartnet-fs-util` for every role — not part of this section.
     const REQUIRED: &[&str] = &["KEY_PATH", "PASSWORD_FILE"];
     // The validator section is OPTIONAL and the switch is SEAL: absent or false = the
     // merged validator is simply off (a disabled config with placeholder values — every
@@ -346,23 +322,6 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
     // Value sanity checks: an empty or insane value is reported rather than falling back
     // to a default. A bad config must never produce a validator that runs against the
     // wrong chain, the wrong node, or no keystore.
-    if let Some(dir) = key_dir.as_ref()
-        && !dir.is_absolute() {
-            problems.push(format!(
-                "KEY_PATH is relative ({}) — an absolute path is required; resolving it \
-                 against the current working directory would be a hidden default",
-                dir.display()
-            ));
-        }
-    if let Some(pw) = password_file.as_ref()
-        && !pw.is_absolute() {
-            problems.push(format!(
-                "PASSWORD_FILE is relative ({}) — an absolute path is required (e.g. \
-                 ~/.smartnet/validator/secure/password.txt); resolving it against the current \
-                 working directory would be a hidden default",
-                pw.display()
-            ));
-        }
     if heartbeat_ms == Some(0) {
         problems.push("NODE_HEARTBEAT is 0 — must be at least 1".to_string());
     }
@@ -379,9 +338,9 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
     }
 
     if !enabled {
-        // Disabled = no sealing, but the keystore triple is still returned when present:
-        // the mesh identity (same KEY_PATH/PASSWORD_FILE) loads even on a
-        // non-sealing node. Seal-path consumers still gate on `enabled` before using it.
+        // Disabled = no sealing, but the keystore keys are still returned when present: the
+        // mesh identity (same KEY_PATH/PASSWORD_FILE) loads even on a non-sealing node. The
+        // node-level COINBASE selector is read by `smartnet-fs-util`, not by this section.
         return Ok(ValidatorConfig {
             key_dir: key_dir.unwrap_or_default(),
             password_file,
@@ -436,28 +395,29 @@ fn parse_bool(s: &str) -> Result<bool> {
         "true" | "1" | "yes" | "on" => Ok(true),
         "false" | "0" | "no" | "off" => Ok(false),
         other => {
-                eyre::bail!("expected true/false, got {other}");
-            }
+            eyre::bail!("expected true/false, got {other}");
+        }
     }
 }
 
-/// The config keys the `keystore` command actually uses.
+/// The config keys the `keystore` command actually uses: `HOME_DIR_PATH`, `KEY_PATH` and
+/// `PASSWORD_FILE`. The latter two are relative to the root.
 ///
-/// It makes no RPC call and touches no chain, and it is the one command an operator runs
-/// *before* `COINBASE`/`SEED_TX_TO` have any value — the command is what writes them. So it
-/// reads only what it needs (`KEY_PATH`) and deliberately does not run the full validation
-/// pass; the full pass runs normally at seal time. `PASSWORD_FILE` is never
-/// read here: the command always names the keystore `UTC--…--<address>` itself and the
-/// password path comes from `--password`.
+/// It makes no RPC call and touches no chain, and deliberately does not run the full
+/// validation pass. The password path comes from the named config, never from a CLI flag;
+/// a blank `PASSWORD_FILE` means prompt without creating a file.
 pub(crate) struct ImportConfig {
     pub key_dir: PathBuf,
+    pub password_file: Option<PathBuf>,
 }
 
 pub(crate) fn load_import_config(path: &Path) -> Result<ImportConfig> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
+    let base = home_dir_from_config(&raw)?;
 
     let mut key_path: Option<String> = None;
+    let mut password_file: Option<PathBuf> = None;
 
     for line in raw.lines() {
         let line = strip_comment(line).trim();
@@ -467,24 +427,25 @@ pub(crate) fn load_import_config(path: &Path) -> Result<ImportConfig> {
         let mut parts = line.splitn(2, '=');
         let key = parts.next().unwrap_or("").trim();
         let value = strip_quotes(parts.next().unwrap_or("").trim()).to_string();
-        if key == "KEY_PATH" {
-            key_path = Some(value);
+        match key {
+            "KEY_PATH" => key_path = Some(value),
+            "PASSWORD_FILE" if !value.is_empty() => {
+                password_file = Some(resolve_runtime_path(&base, &value)?);
+            }
+            _ => {}
         }
     }
 
     let key_path = key_path.ok_or_else(|| {
         eyre::eyre!(
             "config {} has no KEY_PATH — keystore needs somewhere to write the keystore \
-             (template: validator/example.config.toml)",
+             (template: smartnet/example.config.toml)",
             path.display()
         )
     })?;
-    let key_dir = expand_home(&key_path)?;
-    if !key_dir.is_absolute() {
-        eyre::bail!("KEY_PATH is relative ({}) — an absolute path is required", key_dir.display());
-    }
+    let key_dir = resolve_runtime_path(&base, &key_path)?;
 
-    Ok(ImportConfig { key_dir })
+    Ok(ImportConfig { key_dir, password_file })
 }
 
 /// Tests touch **only** the shipped template `validator/example.config.toml`, and only by
@@ -494,6 +455,7 @@ pub(crate) fn load_import_config(path: &Path) -> Result<ImportConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smartnet_fs_util::runtime_paths::HOME_DIR_KEY;
 
     /// The template — the shared node template at the workspace root; the only file these
     /// tests are allowed to read.
@@ -517,6 +479,7 @@ mod tests {
             })
         };
         for key in [
+            HOME_DIR_KEY,
             "SEAL",
             "ALLOW_EMPTY",
             "KEY_PATH",
@@ -538,17 +501,42 @@ mod tests {
         );
     }
 
-    /// `~` and `~/…` expand against `HOME`; a *named* user (`~alice/…`) is rejected instead
-    /// of silently folding into `$HOME/alice/…`, which would resolve to the wrong directory.
+    /// `HOME_DIR_PATH` expands a leading `~/` once against `HOME`; a *named* user
+    /// (`~alice/…`) is rejected instead of folding into `$HOME/alice/…`.
     #[test]
-    fn expand_home_expands_tilde_and_rejects_named_user() {
-        if let Ok(home) = std::env::var("HOME") {
-            let home = PathBuf::from(home);
-            assert_eq!(expand_home("~").unwrap(), home);
-            assert_eq!(expand_home("~/keys").unwrap(), home.join("keys"));
-        }
-        let err = expand_home("~alice/keys").expect_err("`~user` must be rejected");
+    fn home_dir_expands_tilde_once_and_rejects_named_user() {
+        use smartnet_fs_util::runtime_paths::home_dir_from_config_with;
+
+        let home = std::env::temp_dir().join("smartnet-home-dir-test");
+        let home_str = home.to_string_lossy().to_string();
+        assert_eq!(
+            home_dir_from_config_with("HOME_DIR_PATH = \"~/keys\"\n", Some(&home_str)).unwrap(),
+            home.join("keys")
+        );
+        assert_eq!(
+            home_dir_from_config_with("HOME_DIR_PATH = \"~/.smartnetX/\"\n", Some(&home_str))
+                .unwrap(),
+            home.join(".smartnetX")
+        );
+        let err = home_dir_from_config_with("HOME_DIR_PATH = \"~alice/keys\"\n", Some(&home_str))
+            .expect_err("`~user` must be rejected");
         assert!(err.to_string().contains("~user"), "got: {err}");
+    }
+
+    /// `VAL_FILE` is node-owned: the validator config neither requires nor parses it. The
+    /// validator asks the node for the registry through `ValidatorIo`.
+    #[test]
+    fn validator_config_does_not_own_val_file() {
+        let base = std::fs::read_to_string(template()).expect("template readable");
+        let without = base
+            .lines()
+            .filter(|line| !line.starts_with("VAL_FILE"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        load_from_str(&without, "val-file-absent").expect("validator needs no VAL_FILE");
+
+        let blank = base.replace("VAL_FILE = ", "VAL_FILE = \"\" # ");
+        load_from_str(&blank, "val-file-blank").expect("blank VAL_FILE is not validator data");
     }
 
     /// The shipped template carries working validator values (its own header states so): an
@@ -637,10 +625,7 @@ mod tests {
     fn enabled_section_requires_keystore_keys() {
         let enabled: String = template_text_uncommented()
             .lines()
-            .filter(|l| {
-                !l.starts_with("KEY_PATH") &&
-                    !l.starts_with("PASSWORD_FILE")
-            })
+            .filter(|l| !l.starts_with("KEY_PATH") && !l.starts_with("PASSWORD_FILE"))
             .collect::<Vec<_>>()
             .join("\n")
             .replace("SEAL = false", "SEAL = true");
@@ -688,6 +673,7 @@ mod tests {
             .filter(|l| !l.starts_with('#'))
             .filter(|l| {
                 [
+                    HOME_DIR_KEY,
                     "SEAL",
                     "ALLOW_EMPTY",
                     "KEY_PATH",
@@ -761,6 +747,16 @@ mod tests {
         assert!(err.to_string().contains("VERB must be 0-3"), "got: {err}");
     }
 
+    /// `COINBASE` is node-level: this section recognizes it so it is not rejected as unknown,
+    /// but does not own or parse it. `smartnet-fs-util` reads it for every node role.
+    #[test]
+    fn coinbase_is_node_owned_not_a_validator_field() {
+        let base = filled_template("VERB = 1");
+        let text = format!("{base}\nCOINBASE = \"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\"\n");
+        let cfg = load_from_str(&text, "coinbase-node-owned").expect("node key must be accepted");
+        assert!(cfg.enabled, "COINBASE must not gate the validator section");
+    }
+
     /// A lone quote must be reported, never a panic: `strip_quotes` used to slice `&s[1..0]`
     /// for `"` / `'` (start > end), taking the whole validator down on an operator's typo.
     #[test]
@@ -798,7 +794,7 @@ mod tests {
     #[test]
     fn every_parse_failure_is_reported_in_one_boot() {
         let cfg = filled_template("VERB = 1")
-            .replace("PASSWORD_FILE =", "PASSWORD_FILE = nonthes")
+            .replace("PASSWORD_FILE =", "PASSWORD_FILE = /etc/passwd")
             .replace("VERB = 1", "VERB = 9");
         let err = load_from_str(&cfg, "many-parse-errors").expect_err("bad values must fail");
         let msg = err.to_string();

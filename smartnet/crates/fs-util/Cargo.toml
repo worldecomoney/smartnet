@@ -11,10 +11,14 @@ description = "Filesystem utilities for SmartNet runtime."
 workspace = true
 
 [dependencies]
+# value objects
+alloy-primitives.workspace = true
+
 # misc
 serde_json = { workspace = true, features = ["std"] }
 serde.workspace = true
 thiserror.workspace = true
+eyre.workspace = true
 flate2.workspace = true
 
 [dev-dependencies]

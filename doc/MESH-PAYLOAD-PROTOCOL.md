@@ -221,9 +221,9 @@ convention, and low-`s` rules.
 1. Parse fixed header: opcode (`0x07` only — a `HELLO_PONG` first is rejected), version,
    network id, sufficient payload length.
 2. Extract the 20-byte initiator address (the claimed sender of this `HELLO_PING`).
-3. **Allowlist check**: the claimed address must be in `mainnet.jsonl` (`key_id` = the
-   `0x` address). Not in file → close immediately, no signature recovery. This is the
-   cheap DoS gate.
+3. **Allowlist check**: the claimed address must be in `mainnet.jsonl` (`address` = the
+   `0x` address; `key_id` is accepted as a legacy alias). Not in file → close immediately,
+   no signature recovery. This is the cheap DoS gate.
 4. **Replay check**: `(initiator, i_nonce)` must not be in the responder's bounded
    replay cache. Seen before → reject (no reply).
 5. Verify signature, recover the signer address, compare to the **initiator** address
@@ -243,12 +243,13 @@ this connection allowed"; payload validity stays at the application layer.
 - Keystore is an encrypted Ethereum JSON v3 file; plaintext key files are refused.
 - Password comes **only** from the configured password file. No terminal prompt at
   bootstrap (headless-safe, no human in the loop on reboot).
-- Decrypted key lives in memory only, decrypted once, never persisted or logged.
+- The process keeps only encrypted keystore bytes and the zeroized password bytes. Each HELLO
+  signature decrypts transiently and drops the key immediately; no naked 32-byte key is retained.
 - Missing, undecryptable, or plaintext key → **fatal**: the boot aborts. A node with no
   verifiable identity does not join the mesh ("broken = no have").
 
-The `key_id` field in `mainnet.jsonl` is the verified `0x` address (no longer a free-form
-label).
+The `address` field in `mainnet.jsonl` is the verified `0x` address (no longer a free-form
+label); `key_id` remains accepted as a legacy alias.
 
 ## Connection flags (AUTH, MODE)
 

@@ -2,8 +2,9 @@
 //!
 //! One-time per connection, right after the `WebSocket` upgrade and before any other frame.
 //! Authenticates the peer (proves control of an Ethereum private key); grants no roles. The
-//! allowlist is the peer file's `key_id` field — an unverified `0x` address; a connection
-//! whose recovered address is not on the list is dropped before any expensive work.
+//! allowlist is the peer file's `address` field (legacy `key_id` alias accepted) — an
+//! unverified `0x` address; a connection whose recovered address is not on the list is
+//! dropped before any expensive work.
 //!
 //! Signing convention (frozen): recoverable secp256k1 over `keccak256(preimage)`, signed
 //! directly (no EIP-191 prefix), 65-byte `r ‖ s ‖ v` with `v ∈ {0,1}`, low-`s` required,
@@ -12,39 +13,43 @@
 use crate::protocol::HelloMessage;
 use alloy_primitives::{keccak256, Address, B256};
 use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
+use smartnet_validator::keystore_util::KeystoreMaterial;
 use std::collections::{HashSet, VecDeque};
 
 /// Domain-separation prefix for the HELLO digest (ASCII, no NUL).
 pub const HELLO_DOMAIN: &[u8] = b"smartnet-mesh-hello-v1";
 
-/// A node's mesh identity: the signing key plus the derived address and network id.
+/// A node's mesh identity: encrypted keystore material plus the derived address and network id.
 ///
-/// The key is held in memory only, decrypted once at bootstrap (see the shared keystore
-/// loader); it is never serialized, logged, or persisted from here.
+/// No decrypted signing key is kept here. Every HELLO signature decrypts from the two in-memory
+/// buffers through the ONE shared function and drops the key immediately. The address is public
+/// and safe to keep.
 #[derive(Clone)]
 pub struct Identity {
-    key: SigningKey,
+    key: KeystoreMaterial,
+    address: Address,
     network_id: u64,
 }
 
 impl std::fmt::Debug for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Identity")
-            .field("address", &format_args!("{:#x}", self.address()))
+            .field("address", &format_args!("{:#x}", self.address))
             .field("network_id", &self.network_id)
-            .finish_non_exhaustive() // the key is deliberately omitted
+            .finish_non_exhaustive() // key material is deliberately omitted
     }
 }
 
 impl Identity {
-    /// Wraps a signing key and the network (chain) id this node speaks for.
-    pub const fn new(key: SigningKey, network_id: u64) -> Self {
-        Self { key, network_id }
+    /// Wraps encrypted keystore material and the network (chain) id this node speaks for.
+    pub const fn new(key: KeystoreMaterial, network_id: u64) -> Self {
+        let address = key.address();
+        Self { key, address, network_id }
     }
 
-    /// This node's Ethereum address (derived from the public key).
-    pub fn address(&self) -> Address {
-        secret_key_address(&self.key)
+    /// This node's Ethereum address (derived from the key once at load time).
+    pub const fn address(&self) -> Address {
+        self.address
     }
 
     /// The network (chain) id carried in every HELLO.
@@ -112,14 +117,19 @@ impl Identity {
     /// Signs a 32-byte digest with our key, returning the 65-byte `r ‖ s ‖ v` encoding
     /// (`v ∈ {0,1}`; k256 produces low-`s` signatures).
     fn sign_digest(&self, digest: &[u8; 32]) -> [u8; 65] {
-        let (signature, rec_id) = self
-            .key
-            .sign_prehash_recoverable(digest)
-            .expect("secp256k1 signing with a valid key cannot fail");
-        let mut out = [0u8; 65];
-        out[..64].copy_from_slice(&signature.to_bytes());
-        out[64] = rec_id.to_byte();
-        out
+        // The material was decrypted once at load, so this repeated decrypt cannot fail unless
+        // memory itself is corrupt. It is dropped immediately after the signature is made.
+        self.key
+            .with_key(|key| {
+                let (signature, rec_id) = key
+                    .sign_prehash_recoverable(digest)
+                    .expect("secp256k1 signing with a valid key cannot fail");
+                let mut out = [0u8; 65];
+                out[..64].copy_from_slice(&signature.to_bytes());
+                out[64] = rec_id.to_byte();
+                out
+            })
+            .expect("keystore material was validated when the identity was loaded")
     }
 }
 
@@ -337,16 +347,29 @@ impl NonceCache {
 }
 
 #[cfg(test)]
+pub(crate) fn test_identity(seed: u8) -> Identity {
+    let mut bytes = [0u8; 32];
+    bytes[31] = seed;
+    let key = SigningKey::from_slice(&bytes).expect("valid scalar");
+    let dir = tempfile::tempdir().expect("test tempdir");
+    let mut rng = rand_08::rngs::OsRng;
+    alloy_signer_local::PrivateKeySigner::encrypt_keystore(
+        dir.path(),
+        &mut rng,
+        key.to_bytes(),
+        b"pw",
+        Some("key.json"),
+    )
+    .expect("encrypt test keystore");
+    let encrypted = std::fs::read(dir.path().join("key.json")).expect("read test keystore");
+    let material = KeystoreMaterial::from_encrypted_bytes(encrypted, b"pw".to_vec())
+        .expect("build test key material");
+    Identity::new(material, 1)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use k256::ecdsa::SigningKey;
-
-    fn test_identity(seed: u8) -> Identity {
-        let mut bytes = [0u8; 32];
-        bytes[31] = seed;
-        let key = SigningKey::from_slice(&bytes).expect("valid scalar");
-        Identity::new(key, 1)
-    }
 
     #[test]
     fn initiator_hello_verifies_against_its_own_address() {

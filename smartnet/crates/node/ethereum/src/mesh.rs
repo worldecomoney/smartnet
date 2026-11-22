@@ -43,11 +43,11 @@ use alloy_rpc_types_engine::ExecutionData;
 use alloy_rpc_types_eth::{BlockNumberOrTag, BlockTransactions};
 use async_trait::async_trait;
 use futures::StreamExt;
-use smartnet_ethereum_primitives::{Block as ConsensusBlock, EthPrimitives};
-use smartnet_transaction_pool::{FullTransactionEvent, TransactionPool};
 use smartnet_chain_state::CanonStateSubscriptions;
+use smartnet_transaction_pool::{FullTransactionEvent, TransactionPool};
 use smartnet_engine_primitives::ConsensusEngineHandle;
 use smartnet_engine_primitives::ethereum::execution_data_from_block_rlp;
+use smartnet_ethereum_primitives::{Block as ConsensusBlock, EthPrimitives};
 use smartnet_mesh::{
     identity::Identity,
     inject::{is_benign_duplicate, Injector},
@@ -65,7 +65,7 @@ use smartnet_node_builder::node::NodeTypes;
 use smartnet_payload_primitives::PayloadTypes;
 use smartnet_rpc_eth_api::{EthApiServer, FullEthApiServer};
 use smartnet_tasks::TaskExecutor;
-use smartnet_validator::{config::load_validator_config, keystore_util::load_identity_from_config};
+use smartnet_validator::{config::load_validator_config, keystore_util::KeystoreMaterial};
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr},
@@ -202,23 +202,25 @@ where
     }
 }
 
-/// Loads the mesh identity from the operator's validator config — the same keystore the
-/// validator uses (`KEY_PATH` + the GATHERED keystore + `PASSWORD_FILE`), decrypted once at boot,
-/// memory-only. Any failure is fatal: the mesh must never boot with a missing or guessed
-/// identity (peers could not authenticate us).
+/// Loads the mesh identity from the node operator config — the same keystore the node uses
+/// (`KEY_PATH` + selected/gathered keystore + `PASSWORD_FILE`). Only the encrypted keystore and
+/// password bytes are kept in RAM; no decrypted private key is retained. Any failure is fatal:
+/// the mesh must never boot with a missing or guessed identity (peers could not authenticate us).
 fn load_mesh_identity(config_path: Option<&Path>, chain_id: u64) -> Result<Identity, String> {
-    let path = config_path
-        .ok_or_else(|| "validator config path missing — mesh identity keystore cannot be loaded".to_string())?;
-    let config =
-        load_validator_config(path).map_err(|err| format!("validator config: {err:#}"))?;
-    let password_file = config
-        .password_file
-        .as_deref()
-        .ok_or_else(|| "PASSWORD_FILE is not set — mesh identity keystore cannot be loaded".to_string())?;
-    // The key is GATHERED from `key_dir` — never named (user-in #2).
-    let key = load_identity_from_config(&config.key_dir, password_file)
+    let path = config_path.ok_or_else(|| {
+        "config path missing — mesh identity keystore cannot be loaded".to_string()
+    })?;
+    let config = load_validator_config(path).map_err(|err| format!("config: {err:#}"))?;
+    let password_file = config.password_file.as_deref().ok_or_else(|| {
+        "PASSWORD_FILE is not set — mesh identity keystore cannot be loaded".to_string()
+    })?;
+    // COINBASE is node-level: it only picks one encrypted file among many; the address is derived
+    // from the key for every role, validator or not, and is never written back to config.
+    let coinbase = smartnet_fs_util::keystore_selector::coinbase_from_config(path)
+        .map_err(|err| format!("COINBASE config: {err:#}"))?;
+    let material = KeystoreMaterial::load(&config.key_dir, password_file, coinbase)
         .map_err(|err| format!("mesh identity keystore: {err:#}"))?;
-    Ok(Identity::new(key, chain_id))
+    Ok(Identity::new(material, chain_id))
 }
 
 /// What [`spawn_mesh_service`] hands back to the boot orchestrator: the mesh ran (always
@@ -294,7 +296,7 @@ where
     // It is not a cadence anyone tunes; the node cadence drives the node's own services.
     let limits = Limits::with_max_msg_mb(ctx.config.rpc.mesh_max_msg_mb);
 
-    // Mesh identity: the validator's keystore, decrypted once — fatal if missing/broken
+    // Mesh identity: the node's keystore, decrypted once — fatal if missing/broken
     // (peers could not authenticate us; the mesh must never boot without an identity).
     let chain_id = smartnet_chainspec::EthChainSpec::chain_id(ctx.config.chain.as_ref());
     let identity = match load_mesh_identity(ctx.config.config.as_deref(), chain_id) {
@@ -348,7 +350,12 @@ where
     {
         let peers_file = peers_file.clone();
         tasks.spawn_critical_task("mesh-ws-server", async move {
-            ws::log_listening(port, &peers_file, "in-process (EthApi + engine)");
+            ws::log_listening(
+                bind_addr,
+                port,
+                &peers_file,
+                "in-process (EthApi + engine)",
+            );
             let server_config = ServerConfig { limits, ..ServerConfig::default() };
             if let Err(err) = serve(listener, server, server_config).await {
                 error!(target: "smartnet::mesh", %err, "mesh WebSocket server exited");

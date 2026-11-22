@@ -10,15 +10,15 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer_local::PrivateKeySigner;
 use eyre::{Context, Result};
-use k256::ecdsa::SigningKey;
 use tracing::info;
 use url::Url;
 
-use crate::run_once::signer_address;
+use crate::keystore_util::KeystoreMaterial;
 
 pub(crate) struct SeedTxArgs {
     pub node_url: String,
-    pub secret_key: SigningKey,
+    /// Encrypted keystore + password in RAM; no decrypted key is retained between calls.
+    pub key: KeystoreMaterial,
     /// `SEED_TX_TO` from config — never a hard-coded recipient.
     pub to: Address,
     /// `SEED_TX_VALUE_WEI` from config — never a hard-coded amount.
@@ -32,11 +32,14 @@ pub(crate) struct SeedTxArgs {
 
 pub(crate) async fn seed_tx(args: &SeedTxArgs) -> Result<()> {
     let url: Url = args.node_url.parse().wrap_err("parse NODE_URL")?;
-    let from = signer_address(&args.secret_key);
-    let signer = PrivateKeySigner::from_bytes(&alloy_primitives::B256::from_slice(
-        &args.secret_key.to_bytes(),
-    ))
-    .wrap_err("build signer from the keystore key")?;
+    let from = args.key.address();
+    // The decrypted key exists only for this one local transaction signing. It is dropped as
+    // soon as the wallet is built; the wallet is dropped once `tx.build` finishes.
+    let signing_key = args.key.decrypt().wrap_err("decrypt keystore for seed tx")?;
+    let signer =
+        PrivateKeySigner::from_bytes(&alloy_primitives::B256::from_slice(&signing_key.to_bytes()))
+            .wrap_err("build signer from the keystore key")?;
+    drop(signing_key);
     let wallet = EthereumWallet::from(signer);
     // HTTP provider only — sign locally, submit via `eth_sendRawTransaction`.
     let client = reqwest::Client::builder()
@@ -68,6 +71,7 @@ pub(crate) async fn seed_tx(args: &SeedTxArgs) -> Result<()> {
         );
 
     let envelope = tx.build(&wallet).await.wrap_err("sign transaction locally")?;
+    drop(wallet);
     let raw = envelope.encoded_2718();
     let pending = provider.send_raw_transaction(&raw).await.wrap_err("eth_sendRawTransaction")?;
     let tx_hash = *pending.tx_hash();
@@ -100,6 +104,7 @@ pub(crate) async fn seed_tx(args: &SeedTxArgs) -> Result<()> {
 mod tests {
     use super::*;
     use alloy_primitives::B256;
+    use k256::ecdsa::SigningKey;
 
     fn args_with_url(node_url: &str) -> SeedTxArgs {
         let b: B256 = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
@@ -108,7 +113,7 @@ mod tests {
         let secret_key = SigningKey::from_slice(b.as_slice()).expect("valid scalar");
         SeedTxArgs {
             node_url: node_url.to_string(),
-            secret_key,
+            key: crate::keystore_util::test_material(&secret_key),
             to: Address::ZERO,
             value_wei: U256::ZERO,
             gas_limit: 21_000,
