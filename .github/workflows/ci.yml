@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    # GitHub default branch is main; there is no remote master branch.
+    branches: [main]
+  # Keep PR CI on every target branch; the reported issue was push-only.
   pull_request:
 
 env:

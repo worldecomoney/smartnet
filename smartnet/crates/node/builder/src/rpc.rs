@@ -454,9 +454,10 @@ struct RpcSetupContext<'a, Node: FullNodeComponents, EthApi: EthApiTypes> {
 }
 
 /// RPC add-ons staged for a deferred bind: modules, `EthApi`, and hooks are built, the
-/// HTTP/WS transport is not yet listening. Boot starts the mesh (and finishes its sync
-/// catch-up) first, then calls [`StagedRpcAddOns::serve`] — engine → mesh → sync →
-/// rumor → RPC — so the node's first external answer is a synced one.
+/// HTTP/WS transport is not yet listening. Boot starts the mesh and waits on its sync
+/// gate first, then calls [`StagedRpcAddOns::serve`] — engine → mesh → sync → rumor →
+/// RPC. A gate timeout is fail-open: the bind is reported as unconfirmed boot catch-up,
+/// never as proof of synchronization.
 pub struct StagedRpcAddOns<'a, Node: FullNodeComponents, EthApi: EthApiTypes, Middleware> {
     setup: RpcSetupContext<'a, Node, EthApi>,
     rpc_middleware: Middleware,
@@ -1061,8 +1062,9 @@ where
     /// Stages the RPC add-ons **without binding the HTTP/WS transport**: modules,
     /// `EthApi`, engine API merge, and hooks are built now;
     /// [`StagedRpcAddOns::serve`] binds later. The boot sequence uses this to start the
-    /// mesh and finish its sync catch-up first (engine → mesh → sync → rumor → RPC), so
-    /// the node's first external RPC answer is a synced one.
+    /// mesh and wait for its sync gate first (engine → mesh → sync → rumor → RPC). If the
+    /// gate times out, boot proceeds with unconfirmed catch-up; RPC availability alone
+    /// is not synchronization.
     ///
     /// `SmartNet` serves `engine_*` on the HTTP/WS transport (`--rpc.unified-validator-jsonrpc`,
     /// default **true**) — that merge happens here too; only the bind is deferred.

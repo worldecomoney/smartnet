@@ -282,9 +282,9 @@ where
                 env.block_env.basefee = 0u64;
             }
         }
-        // The import-only flag rides into the EVM through CfgEnv. The gate in
-        // `EthEvm::transact_raw` preserves and restores this value; on live/sync it is
-        // false, so only the chair's own overdraft gets through, as before.
+        // The import-only flag rides into the EVM through CfgEnv. The kept gate code in
+        // `EthEvm::transact_raw` preserves and restores this value but cannot open here:
+        // `disable_gate_rewards()` is true. This flag is legacy-history replay only.
         env.cfg_env.disable_balance_check = self.import_mode;
         Ok(env)
     }

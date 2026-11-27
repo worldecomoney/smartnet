@@ -17,9 +17,13 @@
 //! The server runs each accepted connection until the peer closes, sends `PONG_DROP`,
 //! or the line goes silent past [`crate::protocol::Limits::silence`]; its read loop stays serial
 //! (framing, seen-checks, one writer per message) while local injects run on bounded
-//! concurrent tasks — each data `PING_OK` is sent when *its* inject completes. A link
-//! client keeps up to [`LINK_WINDOW`] announces in flight on its one connection, so a
-//! burst of rumors is pipelined instead of paying one round-trip per object.
+//! concurrent tasks — each data `PING_OK` is sent when *its* inject completes. Process-wide
+//! inbound and outbound byte semaphores charge every retained frame before inject and
+//! every encoded frame before send, capping mesh payload buffers at 256 MiB (with the
+//! 64 MiB object cache) across every connection; idle readers hold no budget, and the
+//! slot semaphore is taken before spawn so waiters cannot buffer more.
+//! A link client keeps up to [`LINK_WINDOW`] announces in flight on its one connection,
+//! so a burst of rumors is pipelined instead of paying one round-trip per object.
 //!
 //! Only binary frames are accepted. Text frames, JSON, unknown opcodes, wrong versions,
 //! oversized frames, and non-`/mesh` handshake paths are rejected.
@@ -56,7 +60,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
-    sync::{mpsc, oneshot, Semaphore},
+    sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore},
     time::MissedTickBehavior,
 };
 use tokio_tungstenite::{
@@ -104,6 +108,41 @@ pub const NONCE_CACHE_CAP: usize = 4096;
 fn block_inject_gate() -> &'static Semaphore {
     static GATE: OnceLock<Semaphore> = OnceLock::new();
     GATE.get_or_init(|| Semaphore::new(1))
+}
+
+/// Process-wide inbound byte budget. A received frame charges its real size before it is
+/// retained and keeps the reservation through inject; together with the send pool and the
+/// object cache this is the hard 256 MiB ceiling.
+fn mesh_recv_byte_budget() -> &'static Arc<Semaphore> {
+    static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    BUDGET.get_or_init(|| Arc::new(Semaphore::new(protocol::MAX_RECV_BYTES)))
+}
+
+/// Process-wide outbound byte budget. `send_protocol` reserves the encoded frame's real
+/// size before sending, so backpressured sends cannot pile up unbounded frame buffers.
+fn mesh_send_byte_budget() -> &'static Arc<Semaphore> {
+    static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    BUDGET.get_or_init(|| Arc::new(Semaphore::new(protocol::MAX_SEND_BYTES)))
+}
+
+/// Reads one frame, then charges its actual size to the hard byte cap *before* the
+/// payload is retained by the caller. The permit is returned so payload-bearing messages
+/// can hold it through inject; control frames drop it at the end of their handler.
+/// Waiting on the socket never consumes the budget — only buffered payloads do.
+async fn recv_protocol_budgeted<S>(
+    socket: &mut S,
+    limit: usize,
+) -> Result<(Message, OwnedSemaphorePermit), TransportError>
+where
+    S: futures::Stream<Item = Result<WsMessage, WsError>> + Unpin,
+{
+    let (message, frame_len) = recv_protocol(socket, limit).await?;
+    let reserve = mesh_recv_byte_budget()
+        .clone()
+        .acquire_many_owned(u32::try_from(frame_len).expect("clamped mesh frame size"))
+        .await
+        .expect("mesh byte budget closed");
+    Ok((message, reserve))
 }
 
 /// Inbound `WebSocket` server limits.
@@ -229,12 +268,12 @@ impl MeshServer {
     ///
     /// The read loop stays serial (framing, hash/seen checks, immediate short-circuit
     /// acks), but every new object injects on a spawned task bounded by
-    /// [`ServerConfig::limits.concurrent_injects`] — one connection's burst of announces
-    /// doesn't serialize behind a single inject at a time. The exception is the ordered
-    /// catch-up pull: its blocks inject inline (parent first, one at a time) and the
-    /// chain head decides the next fetch. Writes (replies plus inject acks) share one
-    /// sink behind a mutex; each data `PING_OK` is sent after *its* inject completes, so
-    /// delivery reports stay truthful.
+    /// [`ServerConfig::limits.concurrent_injects`]. The slot is taken **before** the task
+    /// is spawned, so payload buffers waiting for a slot cannot pile up behind the
+    /// semaphore. The exception is the ordered catch-up pull: its blocks inject inline
+    /// (parent first, one at a time) and the chain head decides the next fetch. Writes
+    /// (replies plus inject acks) share one sink behind a mutex; each data `PING_OK` is
+    /// sent after *its* inject completes, so delivery reports stay truthful.
     pub async fn handle_connection<S>(
         &self,
         socket: WebSocketStream<S>,
@@ -280,13 +319,15 @@ impl MeshServer {
         let _pull_guard = PullGuard { gate: self.gate.clone(), link: link.clone() };
         loop {
             self.gate.note_pull(&link, pull.is_some());
-            let message = match tokio::time::timeout(
+            // The received frame is charged to the byte cap before its payload is
+            // retained; idle readers waiting on the socket hold no budget.
+            let (message, reservation) = match tokio::time::timeout(
                 config.limits.silence,
-                recv_protocol(&mut stream, limit),
+                recv_protocol_budgeted(&mut stream, limit),
             )
             .await
             {
-                Ok(Ok(message)) => message,
+                Ok(Ok(pair)) => pair,
                 Ok(Err(TransportError::Closed)) => {
                     debug!(target: "smartnet::mesh", %peer, "mesh peer closed");
                     return;
@@ -329,7 +370,17 @@ impl MeshServer {
                 }
                 Message::SyncBlockRlpPong { block_nr, block } => {
                     let (turn, m, p) = self
-                        .serve_pulled_block(&sink, limit, &slots, peer, block_nr, block, mode, pull)
+                        .serve_pulled_block(
+                            &sink,
+                            limit,
+                            &slots,
+                            reservation,
+                            peer,
+                            block_nr,
+                            block,
+                            mode,
+                            pull,
+                        )
                         .await;
                     mode = m;
                     pull = p;
@@ -351,7 +402,8 @@ impl MeshServer {
                     self.serve_tx_counter_request(&sink, limit, peer, tx_hash).await
                 }
                 Message::RumorTxRequestPong { tx_hash, tx } => {
-                    self.serve_tx_counter_reply(&sink, limit, &slots, peer, tx_hash, tx).await
+                    self.serve_tx_counter_reply(&sink, limit, &slots, reservation, peer, tx_hash, tx)
+                        .await
                 }
                 // Strays: the server never announces on an inbound connection, so
                 // keepalive echoes, Layer-2 identity frames (stale after the
@@ -533,13 +585,15 @@ impl MeshServer {
     /// Layer 4 — pulled block (ordered catch-up + stray): the block the ordered pull is
     /// waiting for injects inline (parent first, one at a time) and advances the range
     /// from the injected nr itself; strays inject bounded-concurrent (the global
-    /// single-block gate serializes block injects node-wide).
+    /// single-block gate serializes block injects node-wide). The byte reservation is
+    /// held through inject, including the inline pull path.
     #[allow(clippy::too_many_arguments)] // layer plumbing: mirrors the session loop
     async fn serve_pulled_block<S>(
         &self,
         sink: &Arc<tokio::sync::Mutex<S>>,
         limit: usize,
         slots: &Arc<Semaphore>,
+        byte_permit: OwnedSemaphorePermit,
         peer: SocketAddr,
         block_nr: u64,
         block: alloy_primitives::Bytes,
@@ -629,12 +683,17 @@ impl MeshServer {
                     return (Turn::Next, mode, pull);
                 }
                 self.objects.insert(rumor.clone());
+                // Take the slot in the read loop, before the payload is handed to a task:
+                // a task waiting on the semaphore would still hold its 32 MiB buffer.
+                let Ok(permit) = Arc::clone(slots).acquire_owned().await else {
+                    return (Turn::Next, mode, pull);
+                };
                 let sink = sink.clone();
-                let slots = slots.clone();
                 let rpc = self.rpc.clone();
                 let gate = self.gate.clone();
                 tokio::spawn(async move {
-                    let Ok(_permit) = slots.acquire_owned().await else { return };
+                    let _permit = permit;
+                    let _byte_permit = byte_permit;
                     match Self::inject(rpc.as_ref(), &rumor).await {
                         Err(err) => {
                             warn!(target: "smartnet::mesh", %peer, kind = "block", %err, "local inject failed");
@@ -779,11 +838,14 @@ impl MeshServer {
 
     /// Layer 6 — tx counter-reply: seen-check, then inject bounded-concurrent (tx injects
     /// are not gated by the single-block rule) with a truthful receipt after the inject.
+    /// Both the slot and the byte reservation are taken by the read loop before spawn.
+    #[allow(clippy::too_many_arguments)] // layer plumbing: mirrors the session loop
     async fn serve_tx_counter_reply<S>(
         &self,
         sink: &Arc<tokio::sync::Mutex<S>>,
         limit: usize,
         slots: &Arc<Semaphore>,
+        byte_permit: OwnedSemaphorePermit,
         peer: SocketAddr,
         tx_hash: [u8; 32],
         tx: alloy_primitives::Bytes,
@@ -801,11 +863,14 @@ impl MeshServer {
             return Turn::Next;
         }
         self.objects.insert(rumor.clone());
+        let Ok(permit) = Arc::clone(slots).acquire_owned().await else {
+            return Turn::Next;
+        };
         let sink = sink.clone();
-        let slots = slots.clone();
         let rpc = self.rpc.clone();
         tokio::spawn(async move {
-            let Ok(_permit) = slots.acquire_owned().await else { return };
+            let _permit = permit;
+            let _byte_permit = byte_permit;
             if let Err(err) = Self::inject(rpc.as_ref(), &rumor).await {
                 warn!(target: "smartnet::mesh", %peer, kind = "tx", %err, "local inject failed");
             }
@@ -853,8 +918,8 @@ impl MeshServer {
             }
         };
 
-        let message =
-            tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, recv_protocol(stream, limit))
+        let (message, _budget) =
+            tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, recv_protocol_budgeted(stream, limit))
                 .await
                 .map_err(|_| TransportError::Timeout)??;
 
@@ -1164,7 +1229,8 @@ where
         RumorKind::Tx => {
             send_protocol(socket, &Message::RumorTxPing { tx_hash: rumor.hash }, limit).await?;
             loop {
-                match recv_protocol(socket, limit).await? {
+                let (reply, _budget) = recv_protocol_budgeted(socket, limit).await?;
+                match reply {
                     Message::PongOk => return Ok(()),
                     Message::RumorTxRequestPing { tx_hash } if tx_hash == rumor.hash => {
                         send_protocol(
@@ -1184,7 +1250,8 @@ where
             let block_nr = rumor.block_nr.expect("block rumors carry a block number");
             send_protocol(socket, &Message::RumorBlocksPing { block_nr }, limit).await?;
             loop {
-                match recv_protocol(socket, limit).await? {
+                let (reply, _budget) = recv_protocol_budgeted(socket, limit).await?;
+                match reply {
                     Message::PongOk => return Ok(()),
                     Message::SyncBlockRlpPing { block_nr: requested }
                         if requested == block_nr =>
@@ -1215,9 +1282,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     loop {
-        match recv_protocol(socket, limit).await {
-            Ok(Message::PingOk) | Err(TransportError::Closed) => return Ok(()),
-            Ok(Message::Ping) => send_protocol(socket, &Message::PongOk, limit).await?,
+        match recv_protocol_budgeted(socket, limit).await {
+            Ok((Message::PingOk, _)) | Err(TransportError::Closed) => return Ok(()),
+            Ok((Message::Ping, _)) => send_protocol(socket, &Message::PongOk, limit).await?,
             Ok(_) => {}
             Err(err) => return Err(err),
         }
@@ -1246,9 +1313,10 @@ where
     let outstanding_nonce = hello.initiator_nonce;
     let our_initiator = hello.initiator;
     send_protocol(socket, &Message::HelloPing(hello), limit).await?;
-    let reply = tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, recv_protocol(socket, limit))
-        .await
-        .map_err(|_| TransportError::Timeout)??;
+    let (reply, _budget) =
+        tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, recv_protocol_budgeted(socket, limit))
+            .await
+            .map_err(|_| TransportError::Timeout)??;
     match reply {
         Message::HelloPong(reply) => {
             // Replay defense first (cheap): the echoed initiator nonce must be the one
@@ -1326,9 +1394,10 @@ where
         limit,
     )
     .await?;
-    let reply = tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, recv_protocol(socket, limit))
-        .await
-        .map_err(|_| TransportError::Timeout)??;
+    let (reply, _budget) =
+        tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, recv_protocol_budgeted(socket, limit))
+            .await
+            .map_err(|_| TransportError::Timeout)??;
     match reply {
         Message::ConfigHashPong { mainnet, validators } => {
             if mainnet != local.mainnet {
@@ -1409,8 +1478,8 @@ where
     while our_tip < peer_tip {
         let nr = our_tip + 1;
         send_protocol(socket, &Message::SyncBlockRlpPing { block_nr: nr }, limit).await?;
-        let block = match await_block(socket, limit, nr).await {
-            Ok(block) => block,
+        let (block, block_budget) = match await_block(socket, limit, nr).await {
+            Ok(pair) => pair,
             Err(TransportError::Timeout) => {
                 debug!(target: "smartnet::mesh", %ip, port, nr, "mesh fetch timed out — bootstrap sync stopping");
                 return Ok(BootReport { peer_tip, local_tip: our_tip, caught_up: false });
@@ -1431,6 +1500,8 @@ where
             debug!(target: "smartnet::mesh", %ip, port, nr, %err, "mesh bootstrap inject failed — stopping");
             return Ok(BootReport { peer_tip, local_tip: our_tip, caught_up: false });
         }
+        // The bytes are injected; release the hard-cap reservation before the head read.
+        drop(block_budget);
         send_protocol(socket, &Message::PingOk, limit).await?;
         our_tip = match injector.last_block_nr().await {
             // The head read can transiently lag the canonical event (µs): trust the
@@ -1458,7 +1529,8 @@ where
 {
     tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, async {
         loop {
-            match recv_protocol(socket, limit).await? {
+            let (reply, _budget) = recv_protocol_budgeted(socket, limit).await?;
+            match reply {
                 Message::SyncBlockPong { last_block } => return Ok(last_block),
                 Message::Ping => send_protocol(socket, &Message::PongOk, limit).await?,
                 _ => {}
@@ -1475,15 +1547,16 @@ async fn await_block<S>(
     socket: &mut WebSocketStream<S>,
     limit: usize,
     block_nr: u64,
-) -> Result<Bytes, TransportError>
+) -> Result<(Bytes, OwnedSemaphorePermit), TransportError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, async {
         loop {
-            match recv_protocol(socket, limit).await? {
+            let (reply, budget) = recv_protocol_budgeted(socket, limit).await?;
+            match reply {
                 Message::SyncBlockRlpPong { block_nr: nr, block } if nr == block_nr => {
-                    return Ok(block)
+                    return Ok((block, budget))
                 }
                 Message::Ping => send_protocol(socket, &Message::PongOk, limit).await?,
                 _ => {}
@@ -1636,8 +1709,10 @@ where
                 last_send = Instant::now();
                 inflight.push_back(Inflight { rumor, ack: Some(pending.ack), started: last_send });
             }
-            incoming = recv_protocol(socket, limit) => {
-                match incoming? {
+            incoming = recv_protocol_budgeted(socket, limit) => {
+                // Held to the end of this arm: pushed payloads stay budgeted through inject.
+                let (message, _budget) = incoming?;
+                match message {
                     Message::Ping => {
                         send_protocol(socket, &Message::PongOk, limit).await?;
                         last_send = Instant::now();
@@ -1834,7 +1909,8 @@ async fn ping_inner(
     socket.get_mut().arm();
     send_protocol(&mut socket, &Message::Ping, limit).await?;
     loop {
-        match recv_protocol(&mut socket, limit).await? {
+        let (reply, _budget) = recv_protocol_budgeted(&mut socket, limit).await?;
+        match reply {
             Message::PongOk => {
                 let _ = socket.close(None).await;
                 return Ok(());
@@ -1871,7 +1947,8 @@ async fn fetch_peers_inner(
     socket.get_mut().arm();
     send_protocol(&mut socket, &Message::BootstrapPeersPing, limit).await?;
     loop {
-        match recv_protocol(&mut socket, limit).await? {
+        let (reply, _budget) = recv_protocol_budgeted(&mut socket, limit).await?;
+        match reply {
             Message::BootstrapPeersPong { list_hash, peers } => {
                 if protocol::peer_list_hash(&peers)? != list_hash {
                     return Err(TransportError::Protocol(ProtocolError::Malformed(
@@ -1924,25 +2001,35 @@ where
     S: futures::Sink<WsMessage, Error = WsError> + Unpin + ?Sized,
 {
     let frame = message.encode_with_limit(limit)?;
+    // Reserve the real encoded size (never more than the frame cap) before handing the
+    // buffer to the socket: a slow peer must not let many full-size encodes accumulate.
+    let reserve = mesh_send_byte_budget()
+        .clone()
+        .acquire_many_owned(u32::try_from(frame.len()).expect("clamped mesh frame size"))
+        .await
+        .expect("mesh send budget closed");
     socket.send(WsMessage::Binary(frame.into())).await?;
+    drop(reserve);
     Ok(())
 }
 
 /// Reads one protocol message from any `WebSocket` stream half (whole socket or a
-/// split read half). `WS`-level `PONG` maps to [`Message::PongOk`]; `WS`-level `PING`
-/// is swallowed — tungstenite queues its own `PONG`, flushed on the next write.
-async fn recv_protocol<S>(socket: &mut S, limit: usize) -> Result<Message, TransportError>
+/// split read half), with the raw frame length for byte accounting. `WS`-level `PONG`
+/// maps to [`Message::PongOk`]; `WS`-level `PING` is swallowed — tungstenite queues its
+/// own `PONG`, flushed on the next write.
+async fn recv_protocol<S>(socket: &mut S, limit: usize) -> Result<(Message, usize), TransportError>
 where
     S: futures::Stream<Item = Result<WsMessage, WsError>> + Unpin,
 {
     loop {
         match socket.next().await {
             Some(Ok(WsMessage::Binary(frame))) => {
-                return Ok(Message::decode_with_limit(&frame, limit)?)
+                let len = frame.len();
+                return Ok((Message::decode_with_limit(&frame, limit)?, len))
             }
             Some(Ok(WsMessage::Text(_))) => return Err(TransportError::TextFrame),
             Some(Ok(WsMessage::Ping(_) | WsMessage::Frame(_))) => {}
-            Some(Ok(WsMessage::Pong(_))) => return Ok(Message::PongOk),
+            Some(Ok(WsMessage::Pong(payload))) => return Ok((Message::PongOk, payload.len())),
             Some(Ok(WsMessage::Close(_))) | None => return Err(TransportError::Closed),
             Some(Err(err)) => return Err(TransportError::WebSocket(err)),
         }

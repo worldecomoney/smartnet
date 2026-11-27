@@ -30,6 +30,30 @@ pub mod spec;
 mod env;
 pub(crate) mod spec_id;
 
+/// THE EVM GATE — IMPLEMENTATION KEPT, DISABLED IN THIS BUILD.
+///
+/// Same standing as validator rewards (`disable_block_rewards()`): the rail exists,
+/// SmartNet does not activate it. Returning `true` unconditionally means no chain spec,
+/// config key, RPC call, transaction payload, seal or import path can turn the
+/// balance-check exception on in the node/validator build. The bridge is expected to be a
+/// separate build; only that build may change this opt-out as an explicit activation
+/// decision.
+#[inline]
+pub const fn disable_gate_rewards() -> bool {
+    true
+}
+
+/// The single GATE execution-boundary predicate.
+///
+/// Checked in [`EthEvm::transact_raw`] before any balance-check exception is granted. It is
+/// unconditionally false here: even `caller == beneficiary` plus a historical-replay
+/// `CfgEnv` flag cannot open the gate. The incoming flag itself is a separate import
+/// accommodation and is restored after the transaction.
+#[inline]
+pub fn gate_opens_for(caller: Address, beneficiary: Address) -> bool {
+    !disable_gate_rewards() && caller == beneficiary
+}
+
 /// The Ethereum EVM context type.
 pub type EthEvmContext<DB> = Context<BlockEnv, TxEnv, CfgEnv, DB>;
 
@@ -223,28 +247,27 @@ where
         &mut self,
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        // THE EVM GATE (operator, 2026-11-19 — the one sanctioned execution-layer
-        // exception): the balance check is switched off ONLY for a transaction sent by
-        // the block's beneficiary. The producer sets beneficiary to the chair's wallet;
-        // the field itself is NOT validated against the seal signer on ingest.
-        // That is the mint mimic:
-        // "1 distinct fn that can tx out by chair only ignoring it's own balance,
-        // mimiking minting" — the chair's mandate issuance executes and credits the
-        // bridge even when the chair holds nothing. Every other sender, always, is
-        // balance-checked exactly as before.
+        // THE EVM GATE — IMPLEMENTATION KEPT, DISABLED IN THIS BUILD
+        // (`disable_gate_rewards()` returns `true` unconditionally, like
+        // `disable_block_rewards()`). This node/validator build NEVER opens a balance-check
+        // exception: `tx.caller == block.beneficiary` is evaluated but the opt-out makes
+        // `gate_opens` false, so every sender is balance-checked, always. No config key,
+        // RPC call, payload shape, seal or import path can activate it here.
         //
-        // Deterministic for all time: the sender is recovered from the signature and the
-        // beneficiary is sealed into the header, so every node — import, mesh sync, or a
-        // re-import years later — opens the chair gate for precisely the same transactions.
+        // Kept for the separate bridge build only: if that build explicitly changes the
+        // opt-out, a beneficiary-signed transaction skips revm's upfront cost check (the
+        // caller is floored at `tx.value()`) for that one transaction, then the incoming
+        // flag is restored. That mint-mimic behavior is NOT active in this build.
         //
-        // Historical-data compatibility accommodation, not a claim the tx would be valid
-        // on a modern chain: the import-only EVM config carries `disable_balance_check =
-        // true` in CfgEnv so legacy geth history can be replayed. OR it with the chair
-        // condition, then RESTORE the incoming value — live/sync arrives with false and
-        // keeps byte-identical behavior; import arrives with true and keeps it for every
-        // tx. The flag is re-evaluated per transaction and never leaks across executions.
+        // Historical-data compatibility accommodation, NOT the gate: the import-only EVM
+        // config carries `disable_balance_check = true` in CfgEnv so trusted geth history
+        // can be replayed. OR it with the gate condition, then RESTORE the incoming value —
+        // live/sync arrives with false and keeps byte-identical behavior; import arrives
+        // with true and keeps it for every tx. The flag is re-evaluated per transaction and
+        // never leaks across executions.
+        // Execution boundary: the opt-out is consulted BEFORE any exception is granted.
         let balance_check_disabled = self.cfg.disable_balance_check;
-        let gate_opens = tx.caller == self.block.beneficiary;
+        let gate_opens = gate_opens_for(tx.caller, self.block.beneficiary);
         self.cfg.disable_balance_check = balance_check_disabled || gate_opens;
 
         let result = if self.inspect {

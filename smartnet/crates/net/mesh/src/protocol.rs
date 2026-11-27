@@ -31,23 +31,45 @@ pub const HEADER_LEN: usize = 6;
 /// from the operator config.
 pub const DEFAULT_MAX_MSG_MB: usize = 32;
 
+/// Hard process-wide ceiling for all mesh-held payload bytes (256 MiB). The three
+/// holders are the object cache (64 MiB), inbound frames awaiting inject (160 MiB), and
+/// outbound encoded frames (32 MiB). `MESH_MAX_MSG_MB` is clamped to [`MAX_FRAME_BYTES`],
+/// so no operator value can raise the mesh above this cap.
+pub const MAX_MESH_BYTES: usize = 256 * 1024 * 1024;
+
+/// Object-cache ceiling, mirrored from `store::DEFAULT_MAX_BYTES`.
+pub const MAX_OBJECT_BYTES: usize = 64 * 1024 * 1024;
+/// Outbound encoded-frame budget: one full-size frame at a time, process-wide.
+pub const MAX_SEND_BYTES: usize = 32 * 1024 * 1024;
+/// Largest frame that can be admitted: it must fit the send budget so a single frame
+/// can always be serialized without deadlocking on its own budget.
+pub const MAX_FRAME_BYTES: usize = MAX_SEND_BYTES;
+/// Inbound frame budget: received frames are charged here before their payloads are
+/// retained (idle readers hold none).
+pub const MAX_RECV_BYTES: usize = MAX_MESH_BYTES - MAX_OBJECT_BYTES - MAX_SEND_BYTES;
+
 /// Operator-tunable mesh limits, threaded from config so a memory-hungry knob is never a
 /// hidden constant.
 ///
-/// The values bound the mesh's in-memory footprint on a small (2 GB) box: the largest
-/// term is `max_message_bytes × concurrent_injects` (one connection's inject pool can
-/// hold up to that many bytes of payload data in flight). The shipped defaults keep that
-/// product well under ~256 MiB, leaving the rest of the budget for the DB, the EVM
-/// caches, and the txpool.
+/// The mesh's payload footprint is hard-capped at [`MAX_MESH_BYTES`] (256 MiB)
+/// process-wide, independent of peer count. `ws.rs` charges a received frame's real size
+/// before the payload is retained and holds it through inject, and charges each encoded
+/// frame before send. Together with the 64 MiB object cache the three pools cannot exceed
+/// 256 MiB. Idle readers hold no budget, and the inject slot is taken before spawning, so
+/// waiters cannot pile up payload buffers behind the semaphore. This leaves the rest of a
+/// small (2 GB) box for the DB, the EVM caches, and the txpool.
 ///
 /// Only `MESH_MAX_MSG_MB` is operator-tunable; `MESH_INJECT_SLOTS` and
 /// `MESH_LINK_QUEUE` are hardcoded defaults, not config keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// Maximum encoded protocol frame size, in bytes. `MESH_MAX_MSG_MB` (MB) × 1 MiB.
+    /// Maximum encoded protocol frame size, in bytes. `MESH_MAX_MSG_MB` (MB) × 1 MiB,
+    /// clamped to [`MAX_FRAME_BYTES`] so one frame fits the send pool and the three
+    /// pools stay inside [`MAX_MESH_BYTES`].
     pub max_message_bytes: usize,
-    /// Concurrent local injects per accepted connection. Each holds one data payload,
-    /// so this multiplies the worst-case inject memory by `max_message_bytes`.
+    /// Concurrent local injects per accepted connection. The slot is taken before the
+    /// task is spawned, so it bounds held payloads as well as active injects. Each held
+    /// payload can be up to `max_message_bytes`.
     pub concurrent_injects: usize,
     /// Per-link rumor queue depth — one peer's backlog between spreads and the wire.
     /// Bounded memory on the outbound side.
@@ -78,7 +100,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_message_bytes: DEFAULT_MAX_MSG_MB * 1024 * 1024,
-            concurrent_injects: 64,
+            concurrent_injects: 4,
             link_queue_capacity: 1024,
             keepalive: DEFAULT_KEEPALIVE_INTERVAL,
             silence: DEFAULT_SILENCE_TIMEOUT,
@@ -92,7 +114,7 @@ impl Limits {
     pub fn with_max_msg_mb(max_msg_mb: Option<usize>) -> Self {
         let mut limits = Self::default();
         if let Some(mb) = max_msg_mb {
-            limits.max_message_bytes = mb * 1024 * 1024;
+            limits.max_message_bytes = mb.saturating_mul(1024 * 1024).min(MAX_FRAME_BYTES);
         }
         limits
     }
@@ -733,6 +755,17 @@ fn take_u16(input: &mut &[u8]) -> Result<u16, ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limits_respect_the_hard_256_mib_ceiling() {
+        assert_eq!(Limits::default().concurrent_injects, 4);
+        assert_eq!(crate::store::DEFAULT_MAX_BYTES, MAX_OBJECT_BYTES);
+        assert_eq!(MAX_OBJECT_BYTES + MAX_RECV_BYTES + MAX_SEND_BYTES, MAX_MESH_BYTES);
+        assert_eq!(MAX_FRAME_BYTES, MAX_SEND_BYTES);
+        assert!(u32::try_from(MAX_FRAME_BYTES).is_ok());
+        assert_eq!(Limits::with_max_msg_mb(Some(1024)).max_message_bytes, MAX_FRAME_BYTES);
+        assert_eq!(Limits::with_max_msg_mb(None).max_message_bytes, 32 * 1024 * 1024);
+    }
 
     fn hello() -> HelloMessage {
         HelloMessage {

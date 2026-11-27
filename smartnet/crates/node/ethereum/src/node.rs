@@ -373,8 +373,9 @@ where
             EthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
 
         // Stage the RPC modules WITHOUT binding the transport: the HTTP/WS listener
-        // comes up only after the mesh is synced (engine → mesh → sync → rumor → RPC),
-        // so the node's first external answer is a synced one.
+        // comes up only after the mesh sync gate passes or times out (engine → mesh →
+        // sync → rumor → RPC). A timeout is fail-open, but boot catch-up is then
+        // reported as unconfirmed — RPC availability alone is not sync readiness.
         let staged = self
             .inner
             .prepare_add_ons_with(ctx.clone(), move |container| {
@@ -413,27 +414,33 @@ where
         // answered. The gate receiver below is how boot learns catch-up finished.
         let mesh = crate::mesh::spawn_mesh_service(&ctx, eth_api.clone()).await?;
         let mesh_enabled = mesh.enabled;
-        // The status line's "X nodes connected" reading — taken here because `mesh.ready`
-        // is moved into the sync-gate wait just below; `eth_api` moves into the heartbeat
-        // task further down, so its tip handle is taken here too.
+        // The status line's "X nodes connected / boot catch-up" readings — taken here
+        // because `mesh.ready` is moved into the sync-gate wait just below; `eth_api`
+        // and `boot_sync` move into the heartbeat task further down, so their handles
+        // are taken here too.
         let status_spreader = mesh.spreader.clone();
         let status_api = eth_api.clone();
 
         // Sync gate: wait until every peer link completed a bootstrap exchange, the
         // local tip has reached the highest reported peer tip, and no ordered pull is
         // armed — or the boot timeout fires (warn and proceed: a dead peer must not
-        // brick the RPC).
-        if sync_gate::wait_ready(mesh.ready, sync_gate::BOOT_READY_TIMEOUT).await {
+        // brick the RPC). The boot result is carried into the heartbeat as `boot_sync`;
+        // a timeout stays unconfirmed and is never reported as full synchronization.
+        let boot_sync = if sync_gate::wait_ready(mesh.ready, sync_gate::BOOT_READY_TIMEOUT).await {
             info!(
                 target: "smartnet::mesh",
-                "mesh sync gate passed — binding RPC transport"
+                boot_sync = "confirmed",
+                "mesh sync gate passed — boot catch-up confirmed; binding RPC transport"
             );
+            "confirmed"
         } else {
             warn!(
                 target: "smartnet::mesh",
-                "mesh sync gate timed out — serving RPC without confirmed catch-up"
+                boot_sync = "unconfirmed",
+                "mesh sync gate timed out — serving RPC with unconfirmed catch-up; not fully synced"
             );
-        }
+            "unconfirmed"
+        };
 
         // Fully up: bind the HTTP/WS transport, then start the heartbeat.
         let handle = staged.serve().await?;
@@ -480,10 +487,10 @@ where
                 let mut tick = tokio::time::interval(heartbeat);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 // The second heartbeat (user-in #1b): ONE standard line per
-                // `REPORT_INTERVAL` — `blockNr - X nodes connected`. Nothing else is
-                // throttled: every other event prints as emitted (the verbosity gate
-                // is gone, operator order 2026-11-18). While an import streams it
-                // prints its own line instead.
+                // `REPORT_INTERVAL` — `blockNr - X nodes connected - boot catch-up
+                // confirmed|unconfirmed`. Nothing else is throttled: every other event
+                // prints as emitted (the verbosity gate is gone, operator order
+                // 2026-11-18). While an import streams it prints its own line instead.
                 let mut status_at: Option<Instant> = None;
                 loop {
                     tick.tick().await;
@@ -503,7 +510,8 @@ where
                             target: smartnet_tracing::STATUS_TARGET,
                             block = %tip,
                             nodes,
-                            "blockNr = {tip} - {nodes} nodes connected"
+                            boot_sync,
+                            "blockNr = {tip} - {nodes} nodes connected (boot catch-up {boot_sync})"
                         );
                     }
                 }

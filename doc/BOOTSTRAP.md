@@ -198,7 +198,9 @@ Config hashes are `keccak256` over the raw bytes of both files, recomputed on ev
 
 ## RPC
 
-**Position:** HTTP transport binds after the sync gate passes or times out.
+**Position:** HTTP transport binds after the sync gate passes or times out. The boot
+outcome is reported as `boot_sync=confirmed|unconfirmed` in the status heartbeat; a
+timeout stays unconfirmed and is never reported as full synchronization.
 
 1. Modules are staged without binding at `smartnet/crates/node/ethereum/src/node.rs:375-403`; staging helper `prepare_add_ons_with` at `smartnet/crates/node/builder/src/rpc.rs:1080-1092`.
 2. `staged.eth_api()` is cloned for mesh and heartbeat use (`node.rs:405-420`).
@@ -217,7 +219,9 @@ Config hashes are `keccak256` over the raw bytes of both files, recomputed on ev
 1. Interval comes from `NODE_HEARTBEAT`, default `DEFAULT_HEARTBEAT_MS` (`node.rs:357-359`, `:480-481`).
 2. The validator daemon is loaded inside the task only when `validator_enabled` (`node.rs:449-470`).
 3. "Heartbeat started" log at `node.rs:472-478`.
-4. Each tick runs the validator beat (`:490-492`) and a status line every `REPORT_INTERVAL` (`:493-508`). The status line is suppressed during import (`:494`).
+4. Each tick runs the validator beat (`:490-492`) and a status line every
+   `REPORT_INTERVAL` (`:493-508`) carrying `blockNr - X nodes connected - boot catch-up
+   confirmed|unconfirmed`. The status line is suppressed during import (`:494`).
 
 Mesh keepalive is **not** driven by this node heartbeat. It uses the protocol's own PING/PONG and bounded reconnect (`smartnet/crates/node/ethereum/src/mesh.rs:289-293`; [`MESH-PAYLOAD-PROTOCOL.md`](MESH-PAYLOAD-PROTOCOL.md) § "CURRENT — Layer 1 — Keepalive and generic acks"). `doc/HEARTBEAT.md` is stale where it describes mesh/bridge hooks on the one node heartbeat.
 

@@ -3,8 +3,9 @@
 //! The boot sequence is **engine → mesh → sync → rumor → RPC**: the node waits on this
 //! gate until every outbound link (the peers-file targets) has completed one bootstrap
 //! catch-up exchange, the local tip has reached the highest peer tip any exchange
-//! reported, and no ordered pull is still armed. Only then does the RPC server bind, so
-//! the node's first external answer is a synced one.
+//! reported, and no ordered pull is still armed. A passed gate means bootstrap catch-up
+//! was confirmed; a timeout is fail-open and must be reported as unconfirmed, never as
+//! full synchronization.
 //!
 //! Accounting is best-effort and monotone: tips merge with `max`, reported/pulling sets
 //! are keyed per link, and readiness is sticky (once true it never reverts). Each target

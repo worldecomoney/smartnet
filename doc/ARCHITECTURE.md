@@ -70,7 +70,7 @@ The important branch is that the validator does **not** talk to a separate proce
 4. **Recovery.** `recover_on_boot` decides whether a crash unwind is required. A clean marker from the previous shutdown skips rewind. The `final_protocol` task is registered immediately after recovery so later boot errors still run the full shutdown sequence.
 5. **Components.** Provider, txpool, engine, RPC modules, validator, and mesh are attached.
 6. **Mesh preconnect.** All peer-file targets are dialed once at boot; the config-hash gate runs after HELLO on outbound links.
-7. **Sync gate.** RPC transport binds only after mesh catch-up or the boot timeout.
+7. **Sync gate.** RPC transport binds only after mesh catch-up or the boot timeout; a timeout is reported as unconfirmed boot catch-up, not full synchronization.
 
 Both bootstrap files are hashed as raw disk bytes by `get_real_file_hash()` on every config-gate check. The digest is never cached. No file is written, synced, or pushed by the gate.
 

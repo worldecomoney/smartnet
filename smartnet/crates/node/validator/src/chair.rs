@@ -1,23 +1,23 @@
-//! THE chair mint-mimic — the one distinct fn that can tx out by chair only, ignoring its
-//! own balance (operator, 2026-11-19).
+//! THE chair mint-mimic builder — kept for the separate bridge build, DISABLED here.
 //!
-//! The chair never needs the EVM layer to "mine" funds: against a bridge mandate that is
-//! on-net and verifiable it builds and signs an **ordinary native transaction** to the
-//! bridge's node address — `value` = the mandate's exact amount, `data` = the mandate
-//! payload — and appends it to the block it is sealing. At execution the GATE (see
-//! `EthEvm::transact_raw`: the balance check switched off only for the block sealer's own
-//! transactions) lets it through whatever the chair holds: the recipient is credited and
-//! the chair is never debited below zero — mimicking minting. Every credit therefore
-//! lives on chain as a real transaction record; nothing is added silently.
+//! **Status (2026-11-27):** `disable_gate_rewards()` is unconditionally `true`, so the EVM
+//! GATE in `EthEvm::transact_raw` never opens in this node/validator build. `tx_out` is
+//! kept as a plain signing builder with **no production caller**; it cannot mint, and any
+//! beneficiary-signed overdraft is refused by the ordinary balance check.
 //!
-//! "chair only" is enforced in two mechanical places and never in here: this fn signs
-//! with exactly the key it is given (the chair's), and the gate only opens for the header
-//! beneficiary. `check_seal` proves the block's **seal signer** is the SELECT chair; the
-//! beneficiary equals that chair by producer convention, **not** by a receiving-side
-//! check. The chair itself signs only
-//! against a verified mandate — the mint authority is the chair's approval, nothing else.
-//! Mandate verification / the dedicated receipt input is the design intent of the GATE;
-//! the bridge-side wiring is still pending (`BRIDGE-TODO.md` §3, finding G-3).
+//! Bridge-build intent (not active here): against a bridge mandate that is on-net and
+//! verifiable the chair builds and signs an **ordinary native transaction** to the bridge's
+//! node address — `value` = the mandate's exact amount, `data` = the mandate payload — and
+//! appends it to the block it is sealing. If that build explicitly changes the opt-out, the
+//! GATE would let it through whatever the chair holds: the recipient credited and the chair
+//! never debited below zero — mimicking minting, as a real on-chain transaction record.
+//!
+//! "chair only" would be enforced in two mechanical places, never in here: this fn signs
+//! with exactly the key it is given (the chair's), and the gate would only open for the
+//! header beneficiary. `check_seal` proves the block's **seal signer** is the SELECT chair;
+//! the beneficiary equals that chair by producer convention, **not** by a receiving-side
+//! check. Mandate verification / the dedicated receipt input is the design intent of the
+//! GATE; the bridge-side wiring is still pending (`BRIDGE-TODO.md` §3, finding G-3).
 
 use alloy_consensus::{SignableTransaction, TxEnvelope, TxLegacy};
 use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
@@ -25,15 +25,15 @@ use eyre::Result;
 use k256::ecdsa::SigningKey;
 use smartnet_chainspec::fixed_gas_price_wei;
 
-/// THE fn (operator: "make 1 distinct fn that can tx out by chair only ignoring it's own
-/// balance, mimiking minting") — build and sign one native `value + data` transfer from
-/// the chair: a bridge mandate issuance, the 0.01 WEM authorization, whatever the chair
-/// must say on chain.
+/// The kept bridge builder (operator: "make 1 distinct fn that can tx out by chair only
+/// ignoring it's own balance, mimiking minting") — build and sign one native
+/// `value + data` transfer from the chair: a bridge mandate issuance, the 0.01 WEM
+/// authorization, whatever the chair must say on chain.
 ///
-/// The fn **never consults any balance** — that is its entire point; the gate at
-/// execution settles the money side. The tx is priced at the protocol fixed fee and
-/// carries exactly the intrinsic gas of a plain transfer with this calldata, so nothing
-/// is ever over-paid.
+/// The fn **never consults any balance**; only a bridge build with an enabled gate would
+/// settle the money side at execution. Here it is just a signer. The tx is priced at the
+/// protocol fixed fee and carries exactly the intrinsic gas of a plain transfer with this
+/// calldata, so nothing is ever over-paid.
 ///
 /// Deterministic: the same inputs always sign to the same bytes (RFC 6979), so a rebuilt
 /// broadcast is byte-identical and at most one of two can ever be mined.

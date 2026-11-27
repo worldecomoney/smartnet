@@ -8,7 +8,10 @@ use alloy_eips::{
     eip7002::{WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_PREDEPLOY_CODE},
     eip7685::EMPTY_REQUESTS_HASH,
 };
-use alloy_evm::block::BlockValidationError;
+use alloy_evm::{
+    block::BlockValidationError,
+    eth::{disable_gate_rewards, gate_opens_for},
+};
 use alloy_primitives::{b256, fixed_bytes, keccak256, Bytes, TxKind, B256, U256};
 use smartnet_ethereum_primitives::{Block, BlockBody, Transaction};
 use smartnet_evm::{
@@ -487,121 +490,10 @@ fn test_balance_increment_not_duplicated() {
     }
 }
 
-// [catalog: KEEP — THE gate (bridge mint-mimic, operator 2026-11-19): the block sealer's
-// own transaction executes and credits the recipient even when the sealer's wallet is
-// empty. "1 distinct fn that can tx out by chair only ignoring it's own balance,
-// mimiking minting" — the issuance is a real transaction on chain, the money appears at
-// the bridge address, and the sealer is never debited below zero.]
-#[test]
-fn chair_issuance_executes_despite_empty_wallet() {
-    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
-
-    let chair_key_pair = generators::generate_key(&mut generators::rng());
-    let chair_address = public_key_to_address(*chair_key_pair.verifying_key());
-    let bridge_address = address!("0x00000000000000000000000000000000000000bb");
-
-    // The chair's wallet is EMPTY — the whole point of the gate.
-    let db = CacheDB::new(EmptyDB::default());
-
-    let mut header = chain_spec.genesis_header().clone();
-    header.gas_limit = 1_500_000;
-    // The gate keys on the header beneficiary — the sealer's own wallet.
-    header.beneficiary = chair_address;
-
-    let value = U256::from(ETH_TO_WEI);
-    let tx = sign_tx_with_key_pair(
-        chair_key_pair,
-        Transaction::Legacy(TxLegacy {
-            chain_id: Some(chain_spec.chain.id()),
-            nonce: 0,
-            gas_price: header.base_fee_per_gas.unwrap().into(),
-            gas_limit: 30_000,
-            to: TxKind::Call(bridge_address),
-            value,
-            input: Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF]),
-        }),
-    );
-
-    let provider = EthEvmConfig::new(chain_spec);
-    let executor = provider.batch_executor(db);
-
-    let (state_tx, state_rx) = mpsc::channel();
-    let state_tx_clone = state_tx.clone();
-    executor
-        .execute_with_state_hook(
-            &Block { header, body: BlockBody { transactions: vec![tx], ..Default::default() } }
-                .try_into_recovered()
-                .unwrap(),
-            move |_, state: &EvmState| {
-                if let Some(account) = state.get(&bridge_address) {
-                    let _ = state_tx_clone.send(account.info.balance);
-                }
-            },
-        )
-        .expect("the sealer's issuance must execute despite an empty wallet");
-
-    drop(state_tx);
-    let balances: Vec<U256> = state_rx.try_iter().collect();
-    assert_eq!(
-        *balances.last().expect("the bridge must appear in the state diff"),
-        value,
-        "the bridge is credited the full issuance amount"
-    );
-}
-
-// [catalog: KEEP — THE gate stays closed for everyone else: the very same issuance from
-// any sender that is not the sealer is refused by the balance check, always. This is
-// what makes normal import/sync identical to before — only the sealer's own overdraft
-// is admitted, nothing else changes for any transaction that was valid before.]
-#[test]
-fn the_gate_stays_closed_for_any_other_sender() {
-    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
-
-    let sealer_key_pair = generators::generate_key(&mut generators::rng());
-    let sealer_address = public_key_to_address(*sealer_key_pair.verifying_key());
-    // NOT the sealer: an ordinary sender with no funds.
-    let sender_key_pair = generators::generate_key(&mut generators::rng());
-    let bridge_address = address!("0x00000000000000000000000000000000000000bb");
-
-    let db = CacheDB::new(EmptyDB::default());
-
-    let mut header = chain_spec.genesis_header().clone();
-    header.gas_limit = 1_500_000;
-    header.beneficiary = sealer_address;
-
-    let tx = sign_tx_with_key_pair(
-        sender_key_pair,
-        Transaction::Legacy(TxLegacy {
-            chain_id: Some(chain_spec.chain.id()),
-            nonce: 0,
-            gas_price: header.base_fee_per_gas.unwrap().into(),
-            gas_limit: 30_000,
-            to: TxKind::Call(bridge_address),
-            value: U256::from(ETH_TO_WEI),
-            input: Bytes::new(),
-        }),
-    );
-
-    let provider = EthEvmConfig::new(chain_spec);
-    let mut executor = provider.batch_executor(db);
-    let err = executor
-        .execute_one(
-            &Block { header, body: BlockBody { transactions: vec![tx], ..Default::default() } }
-                .try_into_recovered()
-                .unwrap(),
-        )
-        .expect_err("a non-sealer sender without funds must be refused");
-
-    assert!(
-        format!("{err}").contains("lack of funds"),
-        "the ordinary balance check must stand, got: {err}"
-    );
-}
-
 // [catalog: KEEP — historical RLP import accommodation: legacy geth history carries txs
 // that fail today's value + gas_limit*fee_cap check. Import mode skips ONLY that check;
-// every other validity rule (nonce, base fee, tip) stays on. Sync/default mode still
-// refuses the very same tx — pinned by the test above.]
+// every other validity rule (nonce, base fee, tip) stays on. Sync/default mode keeps the
+// ordinary balance check.]
 #[test]
 fn import_mode_admits_the_legacy_underfunded_tx() {
     let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
@@ -656,23 +548,25 @@ fn import_mode_admits_the_legacy_underfunded_tx() {
     );
 }
 
-// [catalog: KEEP — the chair gate keeps working in import mode (both conditions true):
-// OR-ing the import flag with `caller == beneficiary` must not change the mint-mimic path.]
+// [catalog: KEEP — disabled-boundary proof, NOT a gate test: a beneficiary-signed,
+// mandate-shaped overdraft from an empty wallet is refused during normal block processing.
+// No privileged fallback execution when the GATE opt-out is in force.]
 #[test]
-fn chair_issuance_still_executes_under_import_mode() {
-    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
+fn gate_cannot_issue_during_block_processing() {
+    assert!(disable_gate_rewards(), "GATE must be disabled unconditionally");
 
+    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
     let chair_key_pair = generators::generate_key(&mut generators::rng());
     let chair_address = public_key_to_address(*chair_key_pair.verifying_key());
     let bridge_address = address!("0x00000000000000000000000000000000000000bb");
 
-    let db = CacheDB::new(EmptyDB::default());
-
     let mut header = chain_spec.genesis_header().clone();
     header.gas_limit = 1_500_000;
-    header.beneficiary = chair_address;
+    header.beneficiary = chair_address; // caller == beneficiary, but the gate stays shut
 
-    let value = U256::from(ETH_TO_WEI);
+    assert!(!gate_opens_for(chair_address, chair_address));
+    assert!(!gate_opens_for(chair_address, bridge_address));
+
     let tx = sign_tx_with_key_pair(
         chair_key_pair,
         Transaction::Legacy(TxLegacy {
@@ -681,32 +575,95 @@ fn chair_issuance_still_executes_under_import_mode() {
             gas_price: header.base_fee_per_gas.unwrap().into(),
             gas_limit: 30_000,
             to: TxKind::Call(bridge_address),
-            value,
+            value: U256::from(ETH_TO_WEI),
             input: Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF]),
         }),
     );
 
-    let provider = EthEvmConfig::new(chain_spec).for_import();
-    let executor = provider.batch_executor(db);
-
-    let (state_tx, state_rx) = mpsc::channel();
-    executor
-        .execute_with_state_hook(
+    let provider = EthEvmConfig::new(chain_spec);
+    let mut executor = provider.batch_executor(CacheDB::new(EmptyDB::default()));
+    let err = executor
+        .execute_one(
             &Block { header, body: BlockBody { transactions: vec![tx], ..Default::default() } }
                 .try_into_recovered()
                 .unwrap(),
-            move |_, state: &EvmState| {
-                if let Some(account) = state.get(&bridge_address) {
-                    let _ = state_tx.send(account.info.balance);
-                }
-            },
         )
-        .expect("the chair's issuance must still execute in import mode");
+        .expect_err("a beneficiary overdraft must never issue when GATE is disabled");
 
-    let balances: Vec<U256> = state_rx.try_iter().collect();
-    assert_eq!(
-        *balances.last().expect("the bridge must appear in the state diff"),
-        value,
-        "the chair path is unchanged under import mode"
+    assert!(
+        format!("{err}").contains("lack of funds"),
+        "the ordinary balance check must stand, got: {err}"
     );
+}
+
+// [catalog: KEEP — disabled-boundary proof for historical replay: the import flag is a
+// separate legacy-history accommodation. It never turns on GATE, and a live/replay config
+// without that flag refuses the exact same beneficiary issuance.]
+#[test]
+fn historical_replay_never_activates_gate() {
+    assert!(disable_gate_rewards(), "GATE must be disabled on every execution path");
+
+    let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
+    let chair_key_pair = generators::generate_key(&mut generators::rng());
+    let chair_address = public_key_to_address(*chair_key_pair.verifying_key());
+    let bridge_address = address!("0x00000000000000000000000000000000000000bb");
+
+    let mut header = chain_spec.genesis_header().clone();
+    header.gas_limit = 1_500_000;
+    header.beneficiary = chair_address;
+
+    // Import/replay may carry its own bypass; the gate adds nothing to it, so no
+    // execution path can turn a beneficiary tx into a privileged issuance.
+    for incoming_flag in [false, true] {
+        assert_eq!(incoming_flag || gate_opens_for(chair_address, chair_address), incoming_flag);
+    }
+
+    let build_tx = |key_pair| {
+        sign_tx_with_key_pair(
+            key_pair,
+            Transaction::Legacy(TxLegacy {
+                chain_id: Some(chain_spec.chain.id()),
+                nonce: 0,
+                gas_price: header.base_fee_per_gas.unwrap().into(),
+                gas_limit: 30_000,
+                to: TxKind::Call(bridge_address),
+                value: U256::from(ETH_TO_WEI),
+                input: Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF]),
+            }),
+        )
+    };
+    let live_tx = build_tx(chair_key_pair.clone());
+    let replay_tx = build_tx(chair_key_pair);
+
+    // Live/sync (no import flag): refused even though caller == beneficiary.
+    let err = EthEvmConfig::new(chain_spec.clone())
+        .batch_executor(CacheDB::new(EmptyDB::default()))
+        .execute_one(
+            &Block {
+                header: header.clone(),
+                body: BlockBody { transactions: vec![live_tx], ..Default::default() },
+            }
+            .try_into_recovered()
+            .unwrap(),
+        )
+        .expect_err("replay/sync execution must not issue when GATE is disabled");
+    assert!(
+        format!("{err}").contains("lack of funds"),
+        "disabled GATE cannot be activated by replay execution, got: {err}"
+    );
+
+    // Import mode still replays legacy history through its own flag only; GATE stays off.
+    EthEvmConfig::new(chain_spec)
+        .for_import()
+        .batch_executor(CacheDB::new(EmptyDB::default()))
+        .execute_one(
+            &Block {
+                header,
+                body: BlockBody { transactions: vec![replay_tx], ..Default::default() },
+            }
+            .try_into_recovered()
+            .unwrap(),
+        )
+        .expect("import replay keeps its historical bypass, not a GATE issuance");
+    assert!(disable_gate_rewards(), "import mode must not change the GATE opt-out");
 }

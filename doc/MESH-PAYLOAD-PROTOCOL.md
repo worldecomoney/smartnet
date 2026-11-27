@@ -38,7 +38,18 @@ payload: `length` bytes
 
 - `version` = `1` (`protocol::VERSION`). Bump only on a breaking change; old peers are rejected with `UnsupportedVersion`.
 - `length` **must equal the number of payload bytes that follow it exactly**. It is a deliberate protocol header, not WebSocket framing (WebSocket already gives message boundaries). A mismatch between `length` and the bytes actually present is a hard `LengthMismatch` decode error — the connection is closed, never tolerated.
-- Frame size cap: `Limits::max_message_bytes` (default 32 MiB, `MESH_MAX_MSG_MB`).
+- Frame size cap: `Limits::max_message_bytes` (default 32 MiB, `MESH_MAX_MSG_MB`). Operator
+  values are clamped to `MAX_FRAME_BYTES` (32 MiB) so one frame always fits the send pool.
+- Process-wide memory cap: 256 MiB (`MAX_MESH_BYTES`), split into three bounded pools:
+  - 64 MiB object cache (`store::DEFAULT_MAX_BYTES`) — full rumor bytes kept for `RUMOR_GET`.
+  - 160 MiB inbound (`MAX_RECV_BYTES`) — a received frame's real size is charged before
+    the payload is retained and held through inject; idle readers hold no budget, and
+    inject slots are taken before spawn so waiters cannot buffer.
+  - 32 MiB outbound (`MAX_SEND_BYTES`) — the encoded frame's real size is charged before
+    `send`, so a slow peer cannot accumulate full-size frame buffers.
+
+  The three pools are independent and sum to exactly 256 MiB, so peer count and
+  `MESH_MAX_MSG_MB` cannot push the mesh past the cap.
 - No JSON anywhere on the wire. Fixed binary layouts. Text frames are rejected with `TextFrame`.
 
 ## CURRENT — Layer 1 — Keepalive and generic acks
@@ -305,7 +316,7 @@ Fetch:   A → B: SYNC_BLOCK_RLP_PING { nr }     B → A: SYNC_BLOCK_RLP_PONG { 
 
 - A status report or forward announce arms an ordered pull range `[local_tip + 1 ..= target]`, one fetch in flight, advanced from the injected block number.
 - `mode` flips to `Sync` when the peer reports/announces a height more than one block ahead; it returns to `Rumor` when caught up (`tip >= target`) and the peer is no longer ahead. Inbound sessions initialize to `Rumor`; outbound `bootstrap_sync` is a one-shot ordered pull and does not use `LinkMode`.
-- The completed pull is reported to the boot sync gate. Boot readiness requires every target link to have made one exchange, local tip `>=` the highest reported peer tip, and no pull still armed; the gate times out after 10 s and returns `false` with a warning rather than blocking RPC forever.
+- The completed pull is reported to the boot sync gate. Boot readiness requires every target link to have made one exchange, local tip `>=` the highest reported peer tip, and no pull still armed; the gate times out after 10 s and returns `false` with a warning rather than blocking RPC forever. The heartbeat reports that outcome as `boot_sync=confirmed|unconfirmed`; a timeout is not full synchronization.
 - There is **no reorg or tip-regression detection** in the current code. Only reported/announced heights are compared.
 
 **Single-block rule.** The wire carries one block per `SYNC_BLOCK_RLP_PONG`, and a node-wide single-permit gate injects exactly one block at a time regardless of which path delivered it. No block batches; `LINK_WINDOW` pipelines announcements, not block fetches.
