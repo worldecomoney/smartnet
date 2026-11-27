@@ -40,8 +40,8 @@ use smartnet_consensus::FullConsensus;
 use smartnet_engine_primitives::{ConsensusEngineEvent, ConsensusEngineHandle};
 use smartnet_payload_primitives::PayloadTypes;
 use smartnet_rpc::{
-    AdminApi, DebugApi, EngineEthApi, EthApi, EthApiBuilder, EthBundle, MinerApi, NetApi,
-    OperatorExtensionApi, OtterscanApi, RPCApi, TraceApi, TxPoolApi, Web3Api,
+    DebugApi, EngineEthApi, EthApi, EthApiBuilder, EthBundle, MinerApi, NetApi, OperatorExtensionApi,
+    OtterscanApi, RPCApi, TraceApi, TxPoolApi, Web3Api,
 };
 use smartnet_rpc_api::servers::*;
 use smartnet_rpc_engine_api::merge_engine_extension_rpc;
@@ -423,7 +423,7 @@ impl<N: NodePrimitives> Default for RpcModuleBuilder<N, (), (), (), (), ()> {
 pub struct RpcModuleConfig {
     /// `eth` namespace settings
     eth: EthConfig,
-    /// Mesh peers file used by the `admin` namespace (`admin_nodeInfo`).
+    /// Mesh peers file used by `web3_nodeInfo` (operator key `RPC_NODEINFO`, default off).
     mesh_peers_file: Option<PathBuf>,
     /// Whether the `txpool` namespace may be served (operator key `RPC_MEMPOOL`, default off).
     /// Only meaningful together with the registry allowlist; see
@@ -448,7 +448,7 @@ impl RpcModuleConfig {
         Self { eth, mesh_peers_file: None, txpool_namespace: false, nodeinfo: false }
     }
 
-    /// Sets the mesh peers file used by the `admin` namespace.
+    /// Sets the mesh peers file used by `web3_nodeInfo`.
     pub fn with_mesh_peers_file(mut self, mesh_peers_file: Option<PathBuf>) -> Self {
         self.mesh_peers_file = mesh_peers_file;
         self
@@ -551,7 +551,7 @@ pub struct RpcRegistryInner<Provider, Pool, Network, EthApi: EthApiTypes, EvmCon
     modules: HashMap<SmartnetRpcModule, Methods>,
     /// eth config settings
     eth_config: EthConfig,
-    /// Mesh peers file used by the `admin` namespace (`admin_nodeInfo`).
+    /// Mesh peers file used by `web3_nodeInfo` (operator key `RPC_NODEINFO`, default off).
     mesh_peers_file: Option<PathBuf>,
     /// Whether the `txpool` namespace may be served (operator key `RPC_MEMPOOL`, default off).
     txpool_enabled: bool,
@@ -687,29 +687,9 @@ where
     Provider: BlockReader + ChainSpecProvider<ChainSpec: EthereumHardforks>,
     EvmConfig: ConfigureEvm,
 {
-    /// Instantiates `AdminApi`
-    pub fn admin_api(&self) -> AdminApi<Network, Pool>
-    where
-        Network: Peers,
-        Pool: TransactionPool + Clone + 'static,
-    {
-        AdminApi::new(self.network.clone(), self.pool.clone(), self.mesh_peers_file.clone())
-    }
-
     /// Instantiates `Web3Api`
     pub fn web3_api(&self) -> Web3Api<Network> {
         Web3Api::new(self.network.clone())
-    }
-
-    /// Register Admin Namespace
-    pub fn register_admin(&mut self) -> &mut Self
-    where
-        Network: Peers,
-        Pool: TransactionPool + Clone + 'static,
-    {
-        let adminapi = self.admin_api();
-        self.modules.insert(SmartnetRpcModule::Admin, adminapi.into_rpc().into());
-        self
     }
 
     /// Register Web3 Namespace
@@ -1082,13 +1062,6 @@ where
                 self.modules
                     .entry(namespace.clone())
                     .or_insert_with(|| match namespace.clone() {
-                        SmartnetRpcModule::Admin => AdminApi::new(
-                            self.network.clone(),
-                            self.pool.clone(),
-                            self.mesh_peers_file.clone(),
-                        )
-                        .into_rpc()
-                        .into(),
                         SmartnetRpcModule::Debug => DebugApi::new(
                             eth_api.clone(),
                             self.blocking_pool_guard.clone(),
@@ -1127,8 +1100,8 @@ where
                         SmartnetRpcModule::Web3 => {
                             let mut module = Web3Api::new(self.network.clone()).into_rpc();
                             // `web3_nodeInfo` (operator key `RPC_NODEINFO`, default off): the
-                            // closed mesh roster — `admin_nodeInfo`'s data re-published under
-                            // the allowed `web3` namespace. Registered only when enabled so the
+                            // closed mesh roster, exposed here as `web3_nodeInfo`.
+                            // Registered only when enabled so the
                             // method is absent from the routing table otherwise. Reveals mesh
                             // membership labels/IPs/ports; the node's own public key is not
                             // reported yet (identity is by listen port until the keypair lands).
@@ -1570,7 +1543,7 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
 /// ```
 /// use smartnet_rpc_builder::{SmartnetRpcModule, TransportRpcModuleConfig};
 /// let config = TransportRpcModuleConfig::default()
-///     .with_http([SmartnetRpcModule::Eth, SmartnetRpcModule::Admin]);
+///     .with_http([SmartnetRpcModule::Eth, SmartnetRpcModule::Web3]);
 /// ```
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct TransportRpcModuleConfig {
@@ -2182,12 +2155,12 @@ mod tests {
 
     #[test]
     fn test_create_rpc_module_config() {
-        let selection = vec!["eth", "admin"];
+        let selection = vec!["eth", "web3"];
         let config = RpcModuleSelection::try_from_selection(selection).unwrap();
         assert_eq!(
             config,
             RpcModuleSelection::Selection(
-                [SmartnetRpcModule::Eth, SmartnetRpcModule::Admin].into()
+                [SmartnetRpcModule::Eth, SmartnetRpcModule::Web3].into()
             )
         );
     }
@@ -2195,12 +2168,12 @@ mod tests {
     #[test]
     fn test_configure_transport_config() {
         let config = TransportRpcModuleConfig::default()
-            .with_http([SmartnetRpcModule::Eth, SmartnetRpcModule::Admin]);
+            .with_http([SmartnetRpcModule::Eth, SmartnetRpcModule::Web3]);
         assert_eq!(
             config,
             TransportRpcModuleConfig {
                 http: Some(RpcModuleSelection::Selection(
-                    [SmartnetRpcModule::Eth, SmartnetRpcModule::Admin].into()
+                    [SmartnetRpcModule::Eth, SmartnetRpcModule::Web3].into()
                 )),
                 ws: None,
                 config: None,

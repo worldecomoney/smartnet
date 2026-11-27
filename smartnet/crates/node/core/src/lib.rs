@@ -5,6 +5,8 @@
 
 /// CLI argument types.
 pub mod args;
+/// Node-owned transaction-pool lifecycle policy.
+pub mod txpool_policy;
 /// Hand-rolled value parsers.
 pub mod parsers;
 /// CLI command dispatch.

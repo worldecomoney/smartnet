@@ -1,26 +1,28 @@
-# EVM-ENGINE-CHANGES.md — the chair's mint-mimic (door + fn)
+# EVM-ENGINE-CHANGES.md — the chair's mint-mimic (EVM GATE + fn)
 
 > **STATUS: implemented (2026-11-19), step 1 of the bridge build; import-only historical
 > execution corrections added 2026-11-21.** This file documents the ONE sanctioned
-> execution-layer exception in SmartNet — the balance-check door — and the one chair-side
+> execution-layer exception in SmartNet — the balance-check EVM GATE — and the one chair-side
 > fn that uses it. Everything else in the EVM/executor is untouched and must stay
 > untouched. Commit `3c3b7b3`.
 >
 > The bridge protocol itself (mandates, flows IN/OUT) lives in `BRIDGE-DOC.md` /
-> `BRIDGE-USR.md`. This file is only about the mechanics of the mint-mimic and why it
-> beats the alternatives.
+> `BRIDGE-USR.md`. This file is only about the mechanics of the mint-mimic and how it
+> differs from the alternatives. The security document — scope, findings and the
+> CURRENT/PLANNED split — is `doc/SECURITY-EVM-GATE.md`; no superiority over the retired
+> REWARD mechanics is claimed there or here.
 
 ---
 
 ## 1. What changed — exactly two pieces
 
-### 1.1 THE balance door — `EthEvm::transact_raw` (`vendor/alloy-evm/src/eth/mod.rs`)
+### 1.1 THE balance-check EVM GATE — `EthEvm::transact_raw` (`vendor/alloy-evm/src/eth/mod.rs`)
 
 Per-transaction, around the `transact` call, one condition:
 
 ```rust
-let door_opens = tx.caller == self.block.beneficiary;
-self.cfg.disable_balance_check = door_opens;
+let gate_opens = tx.caller == self.block.beneficiary;
+self.cfg.disable_balance_check = gate_opens;
 // ... execute ...
 self.cfg.disable_balance_check = false;   // never sticks
 ```
@@ -35,9 +37,9 @@ self.cfg.disable_balance_check = false;   // never sticks
 - When OFF (everyone else), the code path is byte-identical to before this change:
   `ensure_enough_balance` runs as always.
 
-**Determinism.** The door key is `signature-recovered sender == header beneficiary` —
+**Determinism.** The gate key is `signature-recovered sender == header beneficiary` —
 both values are sealed into the block itself. Every node — import, mesh sync, or a
-re-import years later — opens the door for precisely the same transactions and derives
+re-import years later — opens the gate for precisely the same transactions and derives
 the same state roots. There is no config value, no registry read, and no time dependence
 in the rule.
 
@@ -61,7 +63,7 @@ balance, mimiking minting."* Contract of the fn:
   mandate issuance (value = the mandate's exact amount, data = the mandate payload,
   carried verbatim), or the 0.01 WEM OUT authorization, or whatever the chair must say on
   chain;
-- **never consults any balance** — that is its entire point; the door settles the money
+- **never consults any balance** — that is its entire point; the gate settles the money
   side at execution;
 - priced at the protocol fixed fee (`SMARTNET_FIXED_GAS_PRICE_WEI`) and carries exactly
   the intrinsic gas of a plain transfer with this calldata (21 000 + 4/16 per byte);
@@ -70,13 +72,14 @@ balance, mimiking minting."* Contract of the fn:
 
 "chair only" is enforced in two mechanical places and never in the fn itself: the fn
 signs with exactly the key it is given (the chair's, in the chair's own sealing path),
-and the door only opens for the header beneficiary — which `check_seal` has proven is
-the SELECT chair.
+and the gate only opens for the header beneficiary. `check_seal` proves the **seal
+signer** is the SELECT chair; the beneficiary matches it by producer convention, not by
+a receiving-side check.
 
 ### 1.3 The import-mode carrier (2026-11-20 — historical data only)
 
 Historical RLP import sets one flag on **its own** `EthEvmConfig` (`for_import()`), which
-copies it into `CfgEnv.disable_balance_check`. The door ORs that value with the chair
+copies it into `CfgEnv.disable_balance_check`. The gate ORs that value with the chair
 condition and **restores the incoming value** after each transaction: on live/sync the
 incoming value is `false`, so only the chair's own overdraft gets through, exactly as
 before; in import mode it is `true` for every transaction. Nonce, base-fee/tip and all
@@ -103,13 +106,14 @@ allowance. The two import gates are unchanged (`classify`: previous block hash;
 `check_seal`: validator SELECT), and sync keeps every check. Problem and verification
 plan: `ISSUE.md`, review: `ISSUE-A.md`.
 
-## 2. Why this beats "block rewards on steroids"
+## 2. How this differs from "block rewards on steroids"
 
 The alternative on the table was an **event-driven block reward**: re-enable the
 `post_block_balance_increments` rail and credit mandate amounts at block finalization.
-It was rejected, deliberately:
+It was rejected, deliberately. The rows below state mechanical differences only — GATE
+does not claim to be more secure, faster or otherwise better than REWARD:
 
-| criterion | event-driven block reward | door + fn (this) |
+| criterion | event-driven block reward | gate + fn (this) |
 |---|---|---|
 | credit visibility | **silent balance addition** — no transaction record, invisible to explorers/wallets, hard to audit supply | every credit is a **real on-chain transaction** with the mandate payload in `data` — auditable, indexable, enumerable |
 | per-event shape | the reward layer must parse block contents (event mining, "rewards on steroids") inside block finalization — receipts/tx plumbing in the never-touch zone | the mandate is just a tx, the answer is just a tx — the protocol needs **zero** new execution machinery |
@@ -121,31 +125,32 @@ It was rejected, deliberately:
 
 Or in the operator's words: genesis is immutable, silent money addition is a big issue
 ("we want all credits live on chain"), and a switched-on reward "keeps going" — this
-design answers all three.
+design addresses all three mechanically. That is a different approach, not a claim of
+superior security or performance (see `doc/SECURITY-EVM-GATE.md`).
 
 ## 3. Security
 
-**This does not open an exploit to contracts.** The door changes exactly one thing: the
+**This does not open an exploit to contracts.** The gate changes exactly one thing: the
 pre-execution **caller balance check** for the sealer's own transactions. Contract
 semantics are 100% untouched — ERC-20, DeFi, approvals, routers, gas metering and every
 EVM opcode behave exactly as before. A contract can never become the beneficiary
 (beneficiary is the block header's field), and no contract code can trigger or widen the
-door — the sender of a transaction is always the signature-recovered EOA, and the door
+gate — the sender of a transaction is always the signature-recovered EOA, and the gate
 compares it against the header field before execution even starts. Nonce checks and
 EIP-3607 (no code senders) still apply to the chair exactly as to everyone else.
 
-- **Ordinary users cannot reach the door.** A sender that is not the block's beneficiary
+- **Ordinary users cannot reach the gate.** A sender that is not the block's beneficiary
   is balance-checked as always — proven by test
-  (`the_door_stays_closed_for_any_other_sender`: the same issuance from any other sender
+  (`the_gate_stays_closed_for_any_other_sender`: the same issuance from any other sender
   is refused with *"lack of funds"*).
 - **The issuance cannot leak into the txpool.** The pool's own balance check stays on
   (`disable_balance_check` is never set on the pool validator; `cost > balance` is
   enforced at admission), so an overdraft issuance submitted via RPC or gossip is
-  rejected at the pool door. The chair's fn output is appended **directly** to the body
+  rejected at the pool gate. The chair's fn output is appended **directly** to the body
   of the block the chair itself is sealing — it is valid there and nowhere else. (A
   leaked issuance in another chair's block would fail both that chair's selection balance
-  gate and, even if force-included, execution — the door would be closed. Never do it.)
-- **No impersonation, no replay.** The door key is two facts that live inside the block
+  gate and, even if force-included, execution — the gate would be closed. Never do it.)
+- **No impersonation, no replay.** The gate key is two facts that live inside the block
   (recovered sender, header beneficiary). Nobody can forge either. Replaying a chair tx
   in a later block is governed by the ordinary nonce rule; replaying a block is governed
   by `check_seal` (only the current SELECT chair's seals import).
@@ -165,17 +170,20 @@ EIP-3607 (no code senders) still apply to the chair exactly as to everyone else.
 > *"not just any sealer/validator, but current block chair can be only authorized for
 > this particular tx."*
 
-The door authorizes exactly that, in two layers that meet at execution:
+The gate authorizes exactly that, in two layers that meet at execution:
 
 1. **Mechanical key (deterministic, in the EVM):** `tx sender == this block's beneficiary`.
    The authorization attaches to the chair of **the block being executed** — a chair's
    issuance is valid only in the block that chair itself seals. In anyone else's block the
-   same tx is just an unfunded transfer and is refused. No "any validator, ever" door
+   same tx is just an unfunded transfer and is refused. No "any validator, ever" gate
    exists.
 2. **Identity chain (in consensus):** `check_seal` — the one entrance both import and
-   mesh sync use — proves the beneficiary is the **current SELECT chair** for the slot,
+   mesh sync use — proves the **seal signer** is the current SELECT chair for the slot,
    read from `validators.jsonl` (`status: true` only). A `status: false` record, an old
-   chair, or a foreign sealer never passes.
+   chair, or a foreign sealer never passes. **CURRENT:** the beneficiary is set to that
+   chair's address by the producer (`run_once.rs:870`) but is not validated against the
+   signer by receiving nodes. **PLANNED (needs operator ruling):** a receiving-side
+   `signer == beneficiary` check for SmartNet-runtime chains (finding G-2).
 
 Why the execution key is the header beneficiary and **not** a live
 `get_val_chair` lookup: the registry mutates over time (mesh-synced `validators.jsonl`),
@@ -196,10 +204,10 @@ identity; the registry question is answered once, at seal time, where it belongs
 
 | path | contents |
 |---|---|
-| `smartnet/vendor/alloy-evm/src/eth/mod.rs` | THE door (`EthEvm::transact_raw`) |
+| `smartnet/vendor/alloy-evm/src/eth/mod.rs` | THE EVM GATE (`EthEvm::transact_raw`) |
 | `smartnet/crates/node/validator/src/chair.rs` | THE fn (`chair::tx_out`) + unit tests |
 | `smartnet/Cargo.toml` | — (the `optional_balance_check` feature lives on `vendor/alloy-evm`'s own `revm` dependency, so every workspace that builds it compiles revm with the field) |
-| `smartnet/crates/evm/ethereum/tests/execute.rs` | door tests |
+| `smartnet/crates/evm/ethereum/tests/execute.rs` | gate tests |
 | `smartnet/crates/evm/ethereum/src/lib.rs` | import-only EVM env: balance-check bypass, seal-signer beneficiary, Istanbul spec (`import_mode_env_credits_recovered_sealer_only` asserts live stays LONDON) |
 | `smartnet/crates/engine/primitives/src/ethereum/mod.rs` | `execution_beneficiary_for_header()` helper shared by sync and import |
 | `smartnet/crates/node/ethereum/src/import.rs` | opt-in, logging-only F5 / single-block delta diagnostics; no acceptance gate |
@@ -211,7 +219,7 @@ Tests (all green):
 - `chair::tests::tx_out_is_signed_by_the_chair` — the signature recovers to the chair's address.
 - `chair_issuance_executes_despite_empty_wallet` — the sealer's issuance executes with an
   empty wallet and credits the bridge the full amount.
-- `the_door_stays_closed_for_any_other_sender` — same tx, any other sender: *"lack of funds"*.
+- `the_gate_stays_closed_for_any_other_sender` — same tx, any other sender: *"lack of funds"*.
 
 ```text
 cargo test -p smartnet-validator chair

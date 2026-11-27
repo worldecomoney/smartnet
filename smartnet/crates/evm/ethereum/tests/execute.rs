@@ -487,7 +487,7 @@ fn test_balance_increment_not_duplicated() {
     }
 }
 
-// [catalog: KEEP — THE door (bridge mint-mimic, operator 2026-11-19): the block sealer's
+// [catalog: KEEP — THE gate (bridge mint-mimic, operator 2026-11-19): the block sealer's
 // own transaction executes and credits the recipient even when the sealer's wallet is
 // empty. "1 distinct fn that can tx out by chair only ignoring it's own balance,
 // mimiking minting" — the issuance is a real transaction on chain, the money appears at
@@ -500,12 +500,12 @@ fn chair_issuance_executes_despite_empty_wallet() {
     let chair_address = public_key_to_address(*chair_key_pair.verifying_key());
     let bridge_address = address!("0x00000000000000000000000000000000000000bb");
 
-    // The chair's wallet is EMPTY — the whole point of the door.
+    // The chair's wallet is EMPTY — the whole point of the gate.
     let db = CacheDB::new(EmptyDB::default());
 
     let mut header = chain_spec.genesis_header().clone();
     header.gas_limit = 1_500_000;
-    // The door keys on the header beneficiary — the sealer's own wallet.
+    // The gate keys on the header beneficiary — the sealer's own wallet.
     header.beneficiary = chair_address;
 
     let value = U256::from(ETH_TO_WEI);
@@ -549,12 +549,12 @@ fn chair_issuance_executes_despite_empty_wallet() {
     );
 }
 
-// [catalog: KEEP — THE door stays closed for everyone else: the very same issuance from
+// [catalog: KEEP — THE gate stays closed for everyone else: the very same issuance from
 // any sender that is not the sealer is refused by the balance check, always. This is
 // what makes normal import/sync identical to before — only the sealer's own overdraft
 // is admitted, nothing else changes for any transaction that was valid before.]
 #[test]
-fn the_door_stays_closed_for_any_other_sender() {
+fn the_gate_stays_closed_for_any_other_sender() {
     let chain_spec = Arc::new(ChainSpecBuilder::from(&*MAINNET).london_activated().build());
 
     let sealer_key_pair = generators::generate_key(&mut generators::rng());
@@ -656,7 +656,7 @@ fn import_mode_admits_the_legacy_underfunded_tx() {
     );
 }
 
-// [catalog: KEEP — the chair door keeps working in import mode (both conditions true):
+// [catalog: KEEP — the chair gate keeps working in import mode (both conditions true):
 // OR-ing the import flag with `caller == beneficiary` must not change the mint-mimic path.]
 #[test]
 fn chair_issuance_still_executes_under_import_mode() {

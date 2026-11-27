@@ -12,12 +12,15 @@ pub use constants::*;
 
 /// SmartNet fixed-fee policy constants (single source for the protocol gas price).
 mod fixed_fee;
-pub use fixed_fee::{SMARTNET_FIXED_GAS_PRICE_WEI, SMARTNET_FIXED_TRANSFER_FEE_WEI};
+pub use fixed_fee::{
+    fixed_gas_price_wei, fixed_transfer_fee_wei, set_fixed_gas_price_wei,
+    SMARTNET_FIXED_GAS_PRICE_WEI, SMARTNET_FIXED_TRANSFER_FEE_WEI,
+};
 
 mod calibri_lite_genesis;
 pub use calibri_lite_genesis::{
-    extra_data_validators, normalize_calibri_genesis_raw, parse_extra_data_validators,
-    validate_calibri_lite_genesis, CALIBRI_LITE_MAX_EXTRA_DATA_SIZE,
+    extra_data_validators, is_smartnet_genesis, normalize_calibri_genesis_raw,
+    parse_extra_data_validators, validate_calibri_lite_genesis, CALIBRI_LITE_MAX_EXTRA_DATA_SIZE,
 };
 
 mod api;

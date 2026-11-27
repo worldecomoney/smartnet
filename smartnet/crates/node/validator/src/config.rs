@@ -6,11 +6,6 @@ use std::path::{Path, PathBuf};
 
 use crate::mempool_policy::SelectionCaps;
 
-/// Built-in default for `TXPOOL_VAL_MAX_TXS` — the total txs one seal pass processes
-/// (the pool snapshot is truncated to the oldest that many before state prefetch and
-/// selection). Per-class narrowing (native / heavy / …) comes later.
-const DEFAULT_TXPOOL_VAL_MAX_TXS: usize = 512;
-
 /// Parsed validator operator config.
 #[derive(Debug, Clone)]
 pub struct ValidatorConfig {
@@ -26,11 +21,6 @@ pub struct ValidatorConfig {
     /// `MAX_CONTRACTS_PER_BLOCK`, `MAX_NFT_PER_BLOCK`). Optional; each unset key keeps its
     /// default (64 / 32 / 1 / 2).
     pub selection_caps: SelectionCaps,
-    /// Total txs one seal pass may process (`TXPOOL_VAL_MAX_TXS`). Optional; absent or
-    /// blank = [`DEFAULT_TXPOOL_VAL_MAX_TXS`] (512), 0 is rejected. The pool snapshot is
-    /// truncated to the oldest that many before the state prefetch and the selection read
-    /// it; per-class narrowing comes later.
-    pub txpool_val_max_txs: usize,
     /// Seal a block when the txpool is empty (`ALLOW_EMPTY`, true/false). Optional; absent =
     /// false (an empty txpool is an idle beat, not an empty block).
     pub allow_empty: bool,
@@ -96,8 +86,10 @@ fn strip_comment(line: &str) -> &str {
 }
 
 /// Load the validator section of the shared node config: `HOME_DIR_PATH` (the single root),
-/// `KEY_PATH`, `PASSWORD_FILE`, `SEAL`, `ALLOW_EMPTY`, `NODE_HEARTBEAT`, the per-class caps and
-/// `TXPOOL_VAL_MAX_TXS`. The two keystore paths are relative to `HOME_DIR_PATH`.
+/// `KEY_PATH`, `PASSWORD_FILE`, `SEAL`, `ALLOW_EMPTY`, `NODE_HEARTBEAT` and the four per-block
+/// caps. The three `TXPOOL_*` keys are node policy, parsed by the node overlay and read from
+/// the pinned `TxpoolPolicy` at seal time — never owned here. Keystore paths are relative to
+/// `HOME_DIR_PATH`.
 ///
 /// `VAL_FILE` is node-owned and is ignored here. The validator reads no registry file: it
 /// asks the node for the enabled set and the chair through `ValidatorIo`. The keystore
@@ -132,7 +124,6 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
     let mut max_erc20_per_block: Option<u64> = None;
     let mut max_contracts_per_block: Option<u64> = None;
     let mut max_nft_per_block: Option<u64> = None;
-    let mut txpool_val_max_txs: Option<usize> = None;
 
     let mut seen: Vec<&'static str> = Vec::new();
 
@@ -159,7 +150,6 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
             "MAX_ERC_20_PER_BLOCK" => "MAX_ERC_20_PER_BLOCK",
             "MAX_CONTRACTS_PER_BLOCK" => "MAX_CONTRACTS_PER_BLOCK",
             "MAX_NFT_PER_BLOCK" => "MAX_NFT_PER_BLOCK",
-            "TXPOOL_VAL_MAX_TXS" => "TXPOOL_VAL_MAX_TXS",
             "SEAL" => "SEAL",
             "ALLOW_EMPTY" => "ALLOW_EMPTY",
             "NODE_HEARTBEAT" => "NODE_HEARTBEAT",
@@ -174,15 +164,13 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
         // A key that is present but blank is a problem in its own right — there is no
         // built-in default to fall back to. A few keys legitimately accept an empty value:
         // `PASSWORD_FILE` (prompt for the password instead of reading a file), `VERB`
-        // (optional — blank means the default, 1), the
-        // four class caps (optional — blank means the built-in default) and
-        // `TXPOOL_VAL_MAX_TXS` (optional — blank means the built-in default, 512).
+        // (optional — blank means the default, 1) and the four class caps (optional — blank
+        // means the built-in default). `TXPOOL_*` keys belong to the node, not here.
         if strip_quotes(value).trim().is_empty() &&
             name != "SEAL" &&
             name != "PASSWORD_FILE" &&
             name != "VERB" &&
             name != "ALLOW_EMPTY" &&
-            name != "TXPOOL_VAL_MAX_TXS" &&
             !name.starts_with("MAX_")
         {
             problems.push(format!(
@@ -245,24 +233,6 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
                         }
                         verb = Some(rank);
                     }
-                }
-                // Total-per-pass tx budget (`TXPOOL_VAL_MAX_TXS`). Optional, blank means
-                // the built-in default; a non-blank value must parse and be non-zero —
-                // a zero budget would never seal anything.
-                "TXPOOL_VAL_MAX_TXS" => {
-                    let raw = strip_quotes(value);
-                    if raw.is_empty() {
-                        return Ok(());
-                    }
-                    let n = raw
-                        .parse::<usize>()
-                        .with_context(|| format!("parse TXPOOL_VAL_MAX_TXS {value}"))?;
-                    if n == 0 {
-                        eyre::bail!(
-                            "TXPOOL_VAL_MAX_TXS must be >= 1 (got 0) — a zero budget never seals"
-                        );
-                    }
-                    txpool_val_max_txs = Some(n);
                 }
                 // Per-class caps. Optional, so a blank value means "use the default" rather than
                 // being an error; a non-blank value must parse and be non-zero, because a zero
@@ -357,7 +327,6 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
             },
             allow_empty: allow_empty.unwrap_or(false),
             heartbeat_ms: heartbeat_ms.unwrap_or(crate::DEFAULT_HEARTBEAT_MS),
-            txpool_val_max_txs: txpool_val_max_txs.unwrap_or(DEFAULT_TXPOOL_VAL_MAX_TXS),
             enabled: false,
         });
     }
@@ -384,8 +353,6 @@ pub fn load_validator_config(path: &Path) -> Result<ValidatorConfig> {
         allow_empty: allow_empty.unwrap_or(false),
         // Validator seal cadence: absent = 2000 ms. 0 = rejected above.
         heartbeat_ms: heartbeat_ms.unwrap_or(crate::DEFAULT_HEARTBEAT_MS),
-        // Total txs one pass processes: absent/blank = 512; 0 is rejected above.
-        txpool_val_max_txs: txpool_val_max_txs.unwrap_or(DEFAULT_TXPOOL_VAL_MAX_TXS),
         enabled: true,
     })
 }
@@ -489,7 +456,6 @@ mod tests {
             "MAX_ERC_20_PER_BLOCK",
             "MAX_CONTRACTS_PER_BLOCK",
             "MAX_NFT_PER_BLOCK",
-            "TXPOOL_VAL_MAX_TXS",
         ] {
             assert!(declares(key), "template is missing {key}: {}", template.display());
         }
@@ -541,13 +507,12 @@ mod tests {
 
     /// The shipped template carries working validator values (its own header states so): an
     /// unedited copy loads with the validator ON — keystore paths present, the 500 ms
-    /// heartbeat, the 512-tx budget, and the default per-class caps.
+    /// heartbeat and the default per-class caps. The txpool budget is node policy, not here.
     #[test]
     fn unedited_template_loads_with_validator_enabled_defaults() {
         let cfg = load_validator_config(&template()).expect("the shipped template must load as-is");
         assert!(cfg.enabled, "template ships SEAL = true");
         assert_eq!(cfg.heartbeat_ms, 500);
-        assert_eq!(cfg.txpool_val_max_txs, 512);
         assert_eq!(cfg.selection_caps, SelectionCaps::default());
     }
 
@@ -562,42 +527,6 @@ mod tests {
         let zero = format!("{}\nNODE_HEARTBEAT = 0", filled_template("VERB = 1"));
         let err = load_from_str(&zero, "hb-0").expect_err("heartbeat 0 must be rejected");
         assert!(err.to_string().contains("NODE_HEARTBEAT"), "got: {err}");
-    }
-
-    /// `TXPOOL_VAL_MAX_TXS` reaches the config: the template ships its 512 default, a
-    /// numeric value parses, blank falls back to the default, and 0 is rejected (a zero
-    /// budget would never seal).
-    #[test]
-    fn txpool_val_max_txs_is_parsed_and_defaults_to_512() {
-        let base = std::fs::read_to_string(template()).expect("template readable");
-        assert!(
-            base.contains("TXPOOL_VAL_MAX_TXS = 512"),
-            "template must ship TXPOOL_VAL_MAX_TXS = 512"
-        );
-
-        let cfg = load_from_str(&base, "val-max-default").expect("template budget must load");
-        assert_eq!(cfg.txpool_val_max_txs, 512);
-
-        let cfg = load_from_str(
-            &base.replace("TXPOOL_VAL_MAX_TXS = 512", "TXPOOL_VAL_MAX_TXS = 128"),
-            "val-max-128",
-        )
-        .expect("a numeric budget must load");
-        assert_eq!(cfg.txpool_val_max_txs, 128);
-
-        let cfg = load_from_str(
-            &base.replace("TXPOOL_VAL_MAX_TXS = 512", "TXPOOL_VAL_MAX_TXS ="),
-            "val-max-blank",
-        )
-        .expect("blank must fall back to the default");
-        assert_eq!(cfg.txpool_val_max_txs, 512);
-
-        let err = load_from_str(
-            &base.replace("TXPOOL_VAL_MAX_TXS = 512", "TXPOOL_VAL_MAX_TXS = 0"),
-            "val-max-zero",
-        )
-        .expect_err("a zero budget must be rejected");
-        assert!(err.to_string().contains("TXPOOL_VAL_MAX_TXS"), "got: {err}");
     }
 
     /// `ALLOW_EMPTY` is optional and boolean: absent/blank = false, `true` = seal empty blocks.
@@ -683,7 +612,6 @@ mod tests {
                     "MAX_ERC_20_PER_BLOCK",
                     "MAX_CONTRACTS_PER_BLOCK",
                     "MAX_NFT_PER_BLOCK",
-                    "TXPOOL_VAL_MAX_TXS",
                 ]
                 .iter()
                 .any(|k| l.starts_with(&format!("{k} ")))

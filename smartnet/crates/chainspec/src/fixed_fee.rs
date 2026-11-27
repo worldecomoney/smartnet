@@ -19,8 +19,11 @@
 //! `gasUsed × SMARTNET_FIXED_GAS_PRICE_WEI`, consistent with the compat-layer design in
 //! `doc/fees.md`.
 //!
-//! The node pins the same value for wallet quotes via `GPO_DEFAULT_SUGGESTED_FEE` in
-//! `~/.smartnet/config.toml` (see `doc/FEES-CURR.md`).
+//! The operator pins the live value with `FIXED_GAS_PRICE_WEI` in `~/.smartnet/config.toml`;
+//! the accessor above is the one runtime source for header construction, EVM execution, the
+//! sealer and wallet quotes (see `doc/FEES-CURR.md`). The constants remain only the pre-boot
+//! fallback. This is distinct from `TXPOOL_MARGIN`, which is only an optional txpool-entry
+//! filter and never changes the fee a transaction pays.
 
 /// `SmartNet` fixed gas price: `5_000_000_000_000_000 / 21_000 = 238_095_238_095` wei/gas
 /// (≈ 238.1 gwei). Sealed into every SmartNet-era header as `baseFeePerGas` and returned
@@ -30,6 +33,27 @@ pub const SMARTNET_FIXED_GAS_PRICE_WEI: u64 = 5_000_000_000_000_000 / 21_000; //
 
 /// Effective flat fee for a standard 21,000-gas native transfer: ≈ 0.005 coins.
 pub const SMARTNET_FIXED_TRANSFER_FEE_WEI: u128 = SMARTNET_FIXED_GAS_PRICE_WEI as u128 * 21_000;
+
+/// The operator-configured price (`FIXED_GAS_PRICE_WEI` in `config.toml`) becomes the single
+/// runtime source at boot. The compiled constant above is only the fallback for code that runs
+/// before the config is read (genesis helpers, tests); it is never a second policy source.
+static FIXED_GAS_PRICE_WEI: smartnet_primitives_traits::sync::OnceLock<u64> =
+    smartnet_primitives_traits::sync::OnceLock::new();
+
+/// Installs the operator's fixed gas price. First caller wins; returns `false` if already set.
+pub fn set_fixed_gas_price_wei(wei: u64) -> bool {
+    FIXED_GAS_PRICE_WEI.set(wei).is_ok()
+}
+
+/// The authoritative fixed gas price (wei/gas) for this process.
+pub fn fixed_gas_price_wei() -> u64 {
+    *FIXED_GAS_PRICE_WEI.get().unwrap_or(&SMARTNET_FIXED_GAS_PRICE_WEI)
+}
+
+/// Flat native-transfer fee at the authoritative price.
+pub fn fixed_transfer_fee_wei() -> u128 {
+    fixed_gas_price_wei() as u128 * 21_000
+}
 
 #[cfg(test)]
 mod tests {
@@ -49,6 +73,8 @@ mod tests {
         ChainSpecBuilder::mainnet()
             .chain(Chain::from(315u64))
             .genesis(Genesis {
+                // Live shape: validator signers in extraData; `clique` is inert legacy config.
+                extra_data: signer_extra_data().into(),
                 config: ChainConfig {
                     chain_id: 315,
                     clique: Some(CliqueConfig { period: Some(5), epoch: Some(30_000) }),
@@ -57,6 +83,14 @@ mod tests {
                 ..Default::default()
             })
             .build()
+    }
+
+    /// 32-byte vanity + one 20-byte validator + 65-byte seal: the live genesis identity.
+    fn signer_extra_data() -> Vec<u8> {
+        let mut extra = vec![0u8; 32];
+        extra.extend_from_slice(&[0x11; 20]);
+        extra.extend_from_slice(&[0u8; 65]);
+        extra
     }
 
     #[test]
@@ -83,6 +117,48 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(spec.next_block_base_fee(&era, 1_012), Some(SMARTNET_FIXED_GAS_PRICE_WEI));
+    }
+
+    #[test]
+    fn smartnet_identity_is_extra_data_not_inert_clique_config() {
+        // Live genesis: validator section present, legacy `config.clique` absent. This is the
+        // shape that used to fall through to parent-derived fees and park fixed-fee wallet txs.
+        let spec = ChainSpecBuilder::mainnet()
+            .chain(Chain::from(315u64))
+            .genesis(Genesis {
+                extra_data: signer_extra_data().into(),
+                config: ChainConfig { chain_id: 315, ..Default::default() },
+                ..Default::default()
+            })
+            .build();
+
+        assert!(crate::is_smartnet_genesis(spec.genesis()));
+        let legacy_parent = Header { timestamp: 1_000, ..Default::default() };
+        assert_eq!(
+            spec.next_block_base_fee(&legacy_parent, 1_012),
+            Some(SMARTNET_FIXED_GAS_PRICE_WEI),
+            "a legacy parent without baseFeePerGas must not drop the announced fixed price"
+        );
+        let fee_era_parent = Header {
+            base_fee_per_gas: Some(SMARTNET_FIXED_GAS_PRICE_WEI * 10),
+            ..legacy_parent
+        };
+        assert_eq!(
+            spec.next_block_base_fee(&fee_era_parent, 1_012),
+            Some(SMARTNET_FIXED_GAS_PRICE_WEI),
+            "a historical parent fee must not override the fixed native price"
+        );
+    }
+
+    #[test]
+    fn non_smartnet_legacy_parent_falls_back_instead_of_returning_none() {
+        let spec = ChainSpecBuilder::mainnet().build();
+        let legacy_parent = Header { timestamp: 1_000, ..Default::default() };
+        // Missing header fee: try the configured price rather than `None` → `0` at callers.
+        assert_eq!(
+            spec.next_block_base_fee(&legacy_parent, 1_012),
+            Some(SMARTNET_FIXED_GAS_PRICE_WEI)
+        );
     }
 
     #[test]

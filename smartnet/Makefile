@@ -66,7 +66,7 @@ build-native-%:
 
 ##@ Test
 
-UNIT_TEST_ARGS := --locked --workspace --features 'jemalloc-prof' -E 'kind(lib)' -E 'kind(bin)' -E 'kind(proc-macro)'
+UNIT_TEST_ARGS := --locked --workspace -E 'kind(lib)' -E 'kind(bin)' -E 'kind(proc-macro)'
 COV_FILE := lcov.info
 
 .PHONY: test-unit

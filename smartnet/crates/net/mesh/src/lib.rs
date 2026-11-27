@@ -37,6 +37,8 @@
 //! - [`spread`]: fanout to the peer file's active targets over the link pool.
 //! - [`inject`]: self-call of the node's local RPC to deliver a received object.
 
+/// Bootstrap config hash: recomputed-from-disk digests of the two node files.
+pub mod config_hash;
 /// Layer-2 identity: the signed `HELLO` handshake, digest, and verification.
 pub mod identity;
 /// Local JSON-RPC injection of a received object into this node.

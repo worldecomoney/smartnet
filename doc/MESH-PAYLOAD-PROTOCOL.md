@@ -1,25 +1,31 @@
-# Mesh Payload Protocol (UPDATED)
+# Mesh Payload Protocol
 
-Single source of truth for the mesh wire protocol. Replaces the older payload/handshake
-docs. Layers 0–6, one page. Keepalive, identity, flags, and application dialogs are
-separate — they never share opcodes or frames.
+!!! Mesh is fully operational since 22-NOV-2026. Avoid touching it unless very necessary, then do it with extra care. !!!
+
+This page is split in two:
+
+- **`CURRENT`** — what the shipped code does now. This is the normative part.
+- **`OLD / PLANNED`** — historical records kept for design history. Those records are **not** current behavior and must not be implemented or treated as a spec unless explicitly requested by the operator.
+
+The wire protocol is binary only. Layers 0–6 are separate: keepalive, identity, config gate, bootstrap, sync, and rumors never share opcodes or frames.
 
 **Transport boundary (operator ruling, 2026-11-19): RPC = HTTP, nothing else.**
-JSON-RPC is served over HTTP only. WebSocket carries **only** this binary protocol —
-RLP frames, mesh-specific — and never RPC; there is no RPC via WebSocket on SmartNet.
+JSON-RPC is served over HTTP only. WebSocket carries **only** this binary mesh protocol — RLP frames, mesh-specific — and never RPC; there is no RPC via WebSocket on SmartNet.
 
-Namespace (why it is laid out this way): opcodes are grouped by role first, so a new
-handshake or control message can never collide with an application message:
+Namespace (why it is laid out this way): opcodes are grouped by role first, so a new handshake or control message can never collide with an application message:
 
-- `0x00–0x0F` — control: keepalive, generic acks, identity handshake, bootstrap.
+- `0x00–0x0F` — control: keepalive, generic acks, identity handshake, bootstrap, config-hash gate.
 - `0x10–0x1F` — application request/`PING` messages.
 - `0x20–0x2F` — application response/`PONG` messages.
-- Within the application ranges: **block-related messages use low digits `0–7`,
-  transaction-related messages use `8–F`**.
+- Within the application ranges: **block-related messages use low digits `0–7`, transaction-related messages use `8–F`**.
 
 Every opcode is globally unique regardless of layer. Reserved slots stay reserved.
 
-## Layer 0 — Envelope (unchanged)
+---
+
+# CURRENT — implemented behavior
+
+## CURRENT — Layer 0 — Envelope
 
 Every `WebSocket` binary message is one frame:
 
@@ -30,102 +36,81 @@ length:  u32 big-endian (payload bytes)
 payload: `length` bytes
 ```
 
-- `version` = `1` (`protocol::VERSION`). Bump only on a breaking change; old peers are
-  rejected with `UnsupportedVersion`.
-- `length` **must equal the number of payload bytes that follow it exactly**. It is a
-  deliberate protocol header, not WebSocket framing (WebSocket already gives message
-  boundaries). A mismatch between `length` and the bytes actually present is a hard
-  `LengthMismatch` decode error — the connection is closed, never tolerated.
+- `version` = `1` (`protocol::VERSION`). Bump only on a breaking change; old peers are rejected with `UnsupportedVersion`.
+- `length` **must equal the number of payload bytes that follow it exactly**. It is a deliberate protocol header, not WebSocket framing (WebSocket already gives message boundaries). A mismatch between `length` and the bytes actually present is a hard `LengthMismatch` decode error — the connection is closed, never tolerated.
 - Frame size cap: `Limits::max_message_bytes` (default 32 MiB, `MESH_MAX_MSG_MB`).
-- No JSON anywhere on the wire. Fixed binary layouts.
+- No JSON anywhere on the wire. Fixed binary layouts. Text frames are rejected with `TextFrame`.
 
-## Layer 1 — Keepalive and generic acks (empty payloads)
+## CURRENT — Layer 1 — Keepalive and generic acks
 
-Pure control. Payload is always empty — the decoder rejects a non-empty frame for these
-opcodes. Never carries sync, identity, or application data.
+Pure control. Payload is always empty — the decoder rejects a non-empty frame for these opcodes. Never carries sync, identity, config, or application data.
 
-| Opcode | Message    | Meaning |
-| ------ | ---------- | ------- |
-| `0x01` | `PING`     | Liveness probe. |
-| `0x02` | `PONG`     | Liveness response. | keep it !!!
-| `0x03` | `PING_OK`  | Receipt after a **data-delivery** `PONG` — used only where a terminator is needed to stop the conversation (closes that dialog). |
-| `0x04` | `PONG_OK`  | Liveness answer; also the generic success ack everywhere below. |
-| `0x06` | `PONG_DROP`| Reject/terminate: the sender closes the connection right after. |
+| Opcode | Message | Current meaning |
+| ------ | ------- | --------------- |
+| `0x01` | `PING` | Liveness probe. |
+| `0x02` | *(reserved)* | Old `PONG`, superseded by `PONG_OK`. Stays reserved. |
+| `0x03` | `PING_OK` | Receipt after a data-delivery `PONG`; closes that dialog. |
+| `0x04` | `PONG_OK` | Generic success ack; also the keepalive answer. |
+| `0x05` | *(reserved)* | Reserved. |
+| `0x06` | `PONG_DROP` | Reject/terminate opcode. Receivers close on it. There is **no production sender** in the current code. |
 
-- `0x02` (the old `PONG`) is **superseded by `PONG_OK`** and stays reserved. `0x05` is
-  reserved.
-- Keepalive dialog: `A → B: PING`, `B → A: PONG_OK`. That ends the exchange — no
-  `PING_OK` on keepalive. The conversation simply resumes at the next heartbeat; the
-  connection stays alive.
-- `PONG_OK` never closes a connection; `PONG_DROP` always does.
-- Sent at `KEEPALIVE_INTERVAL`, phase-locked (a ping goes out once half the interval
-  passed with no outbound traffic). Silence past `DEAD_PEER_TIMEOUT` = dead peer; the
-  link reconnects with bounded backoff. A peer is never declared dead for missing a
-  single heartbeat — the dead check counts *total* silence across several intervals.
+- Keepalive dialog: `A → B: PING`, `B → A: PONG_OK`. That ends the exchange — no `PING_OK` on keepalive. The conversation resumes at the next heartbeat; the connection stays alive.
+- `PONG_OK` never closes a connection. `PONG_DROP` closes it on the receiving side; the sender-side behavior described in older records is not implemented.
+- Sent on `DEFAULT_KEEPALIVE_INTERVAL`. The client pings after half the interval passes with no outbound traffic. A peer is never declared dead for missing one heartbeat: the silence bound is one full keepalive period plus the margin.
 
-Default timings (shipped code values — `protocol.rs` / `ws.rs`):
+### CURRENT — constants
 
-| Constant | Default | Role |
-| -------- | ------- | ---- |
-| `DEFAULT_KEEPALIVE_INTERVAL` | 500 ms | Client ping cadence on a persistent link (`MESH_HEARTBEAT` overrides). |
-| `SILENCE_MARGIN` | 300 ms | Margin on top of keepalive for the shared silence bound. |
+| Constant | Current value | Role |
+| -------- | ------------- | ---- |
+| `DEFAULT_KEEPALIVE_INTERVAL` | 500 ms | Hardcoded mesh liveness cadence. Independent of `NODE_HEARTBEAT`; `MESH_HEARTBEAT` is retired and rejected as an unknown config key. |
+| `SILENCE_MARGIN` | 300 ms | Margin on top of keepalive. |
 | silence bound (derived) | 800 ms | No inbound frames for this long on either end → dead peer (server closes, client link exits and reconnects). |
-| `DEFAULT_REQUEST_TIMEOUT` | 1000 ms | One dialog / one-shot helper. |
+| `DEFAULT_REQUEST_TIMEOUT` | 5000 ms | One dialog / one-shot helper / rumor exchange. |
+| `DEFAULT_HANDSHAKE_TIMEOUT` | 5000 ms | WebSocket upgrade + first `HELLO_PING`; also bounds the config-hash reply on outbound links. |
+| `CONNECT_GRACE` | 10 s | Grace for a link that has not completed its first connect. |
 | `RECONNECT_MIN` / `RECONNECT_MAX` | 50 ms / 600 ms | Link reconnect backoff. |
-| `DEFAULT_HANDSHAKE_TIMEOUT` | 300 ms | WebSocket upgrade + first `HELLO_PING` only. |
+| `LINK_WINDOW` | 64 | Announces/pipelines allowed in flight on one persistent link. This pipelines **rumor announces**, not block fetches. |
+| `NONCE_CACHE_CAP` | 4096 | Bounded responder-side HELLO nonce replay cache. |
+| `BOOT_READY_TIMEOUT` | 10 s | Boot waits this long for mesh sync readiness, then proceeds with a warning (fail-open). |
 
-## Layer 2 — Identity handshake (signed HELLO, allowlist)
+## CURRENT — Layer 2 — Identity handshake
 
-One-time per connection, right after the WebSocket upgrade and before any other frame.
-Authenticates the peer; does not grant roles. Two distinct opcodes — both stages are
-checked, and they must not share an opcode:
+One-time per connection, right after the WebSocket upgrade and before any other frame. Authenticates the peer; does not grant roles. Two distinct opcodes — both stages are checked, and they must not share an opcode:
 
-| Opcode | Message      | Direction |
-| ------ | ------------ | --------- |
+| Opcode | Message | Direction |
+| ------ | ------- | --------- |
 | `0x07` | `HELLO_PING` | Initiator → responder: identity + fresh nonce + signature. |
 | `0x08` | `HELLO_PONG` | Responder → initiator: identity + echoed nonce + own fresh nonce + signature. |
 
-### Payload (178 bytes fixed, identical for both opcodes)
+### CURRENT — HELLO payload (178 bytes fixed, identical for both opcodes)
 
 The opcode lives in the envelope header; the payload carries no message-type byte.
 
-| Field                | Size    | Notes                                    |
-| -------------------- | ------- | ---------------------------------------- |
-| Protocol version     | 1 byte  | `1`                                      |
-| Network ID           | 8 bytes | BE u64 (chain id)                        |
-| Initiator address    | 20 bytes| Always present; echoed by responder      |
+| Field                | Size    | Notes |
+| -------------------- | ------- | ----- |
+| Protocol version     | 1 byte  | `1` |
+| Network ID           | 8 bytes | BE u64 (chain id) |
+| Initiator address    | 20 bytes| Always present; echoed by responder |
 | Responder address    | 20 bytes| ZEROED in `HELLO_PING`; own address in `HELLO_PONG` |
 | Initiator nonce      | 32 bytes| Fresh CSPRNG in `HELLO_PING`; echoed verbatim in `HELLO_PONG` |
 | Responder nonce      | 32 bytes| Fresh CSPRNG in `HELLO_PONG`; ZEROED in `HELLO_PING` |
 | Recoverable signature| 65 bytes| secp256k1, Ethereum-style (`r,s,v`) over the digest below |
 
-The wire layout carries the addresses/nonces in the order given; the **digest** (what is
-actually signed) is a separate, fixed big-endian concatenation defined in the next
-section. "Sender address" in the validation step = the initiator address field on
-`HELLO_PING`, the responder address field on `HELLO_PONG`.
+The wire layout carries the addresses/nonces in the order given; the **digest** (what is actually signed) is a separate, fixed big-endian concatenation defined in the next section. "Sender address" in the validation step = the initiator address field on `HELLO_PING`, the responder address field on `HELLO_PONG`.
 
-Two-message challenge/response, no extra round trip — **both nodes verify in this single
-double ping&pong**:
+### CURRENT — HELLO flow
 
-1. Initiator sends `HELLO_PING` (its address, its fresh nonce, signed).
-2. Responder verifies (allowlist + signature + echo-ability), replies `HELLO_PONG` (its
-   address, the initiator's echoed nonce + its own fresh nonce, signed over both
-   identities and both nonces).
-3. Initiator verifies `HELLO_PONG` locally: recovered signer == claimed responder
-   address, echoed `i_nonce` == its stored outstanding nonce, signature verifies.
-4. Connection authenticated. Each side has now authenticated this peer **locally** —
-   no third confirmation message exists or is needed. Application protocol (Layer 3+)
-   begins.
+1. Initiator generates `i_nonce`, stores it as outstanding before sending, and sends `HELLO_PING`.
+2. Responder requires the first frame to be `HELLO_PING`, probes its replay cache with `i_nonce`, verifies the HELLO, inserts the nonce, and replies with `HELLO_PONG`.
+3. Initiator requires the first reply to be `HELLO_PONG`; it checks the echoed `i_nonce`, the echoed initiator address (must be its own), and a non-zero responder nonce; then it verifies the reply.
+4. Both sides have now authenticated this peer locally. There is no third confirmation message. On an outbound persistent link, the **config-hash gate (Layer 3b)** runs next; on an inbound persistent link the session loop starts after HELLO.
 
-### Signing rules — exact signed bytes
-
-The digest is fully determined; there is no implementation latitude. Both sides sign and
-verify the **same** digest construction, differing only in which fields are zeroed.
+### CURRENT — exact signed bytes
 
 Digest = `keccak256` over this fixed-width, big-endian concatenation, in this order:
 
 ```text
-domain     = "smartnet-mesh-hello-v1"   (ASCII, 21 bytes, no NUL)
+domain     = "smartnet-mesh-hello-v1"   (ASCII, 22 bytes, no NUL)
 version    = 1 byte   (protocol version)
 network_id = 8 bytes  (BE u64, chain id)
 initiator  = 20 bytes (initiator Ethereum address)
@@ -136,222 +121,198 @@ r_nonce    = 32 bytes (responder nonce;   ZEROED in the initiator's own HELLO,
                        fresh in the responder's reply)
 ```
 
-- **`HELLO_PING` (initiator's own)**: `responder`, `r_nonce` are zeroed; `initiator`,
-  `i_nonce` are its own address and fresh nonce. Signs the 65-byte recoverable signature
-  over this digest.
-- **`HELLO_PONG` (responder's reply)**: `initiator`, `i_nonce` = the initiator's
-  (echoed, exact match required); `responder`, `r_nonce` = its own address and fresh
-  nonce. Signs the digest binding both identities and both nonces.
+- **`HELLO_PING` (initiator's own)**: `responder`, `r_nonce` are zeroed; `initiator`, `i_nonce` are its own address and fresh nonce.
+- **`HELLO_PONG` (responder's reply)**: `initiator`, `i_nonce` = the initiator's echoed values; `responder`, `r_nonce` = its own address and fresh nonce.
 
-Verification (Ethereum-style recoverable secp256k1) — the recovered signer is compared to
-the **initiator** address on `HELLO_PING`, and to the **responder** address on
-`HELLO_PONG` (each side recovers the signer and compares against *that message's own
-sender address*, never the other one). Mismatch = reject. The domain prefix separates
-this handshake from every other signed use of the key.
+Verification recovers the signer from the exact 32-byte digest and compares it to the sender address of that message: initiator on `HELLO_PING`, responder on `HELLO_PONG`. Mismatch = reject. The domain prefix separates this handshake from every other signed use of the key.
 
-### Ethereum signature convention
+### CURRENT — Ethereum signature convention
 
-The HELLO handshake uses recoverable ECDSA over secp256k1, following Ethereum address
-derivation conventions.
+- Construct the fixed-width preimage exactly as specified above.
+- `digest = Keccak-256(preimage)`; sign these 32 bytes directly.
+- No EIP-191 `personal_sign` prefix, no additional hash, no message transformation.
+- Signature is exactly 65 bytes: `r` (32-byte BE), `s` (32-byte BE), `v` (1 byte, `0x00` or `0x01`). Wire order is `r || s || v`.
+- Do not use transaction-signature values `27/28` or EIP-155 transaction `v` values on the wire.
+- Require `1 <= r < n` and `1 <= s <= floor(n / 2)`. Signers produce low-`s`; verifiers reject high-`s` and never normalize it.
+- If a signer normalizes `s` to `n - s`, it must flip the recovery parity bit: `v = v XOR 1`.
 
-**Digest calculation**
-- Construct the fixed-width handshake preimage exactly as specified above.
-- Calculate `digest = Keccak-256(preimage)`, producing exactly 32 bytes.
-- Sign these 32 digest bytes directly.
-- Do **not** apply the EIP-191 `personal_sign` prefix, any additional hash, or any other
-  message transformation.
+### CURRENT — nonce and validation order
 
-**Signature encoding**
+- **Responder (actual call order)**: first-frame check → replay probe on `i_nonce` → `verify_hello` (version/network → allowlist → signature) → nonce insert → `HELLO_PONG`. A bad-signature frame cannot poison the cache; the post-verify insert still catches a parallel race on the same nonce.
+- **Initiator (actual call order)**: first-reply check → echoed nonce/address/responder-nonce checks → `verify_hello` (version/network → allowlist → signature). On any mismatch or timeout the connection is closed.
+- **Replay cache key**: the initiator nonce alone, not `(initiator, nonce)`. It is bounded FIFO (`NONCE_CACHE_CAP = 4096`), process-local, and connection-independent.
+- **Allowlist**: a peer is admitted only if its identity field parses as a `0x` address and its record has `active && valid`. Legacy `key_id` is accepted as the field name. Non-address labels and paused/revoked entries are excluded. The peer file is re-read so membership changes take effect without restart.
 
-The signature is exactly 65 bytes:
-- `r`: 32-byte unsigned big-endian integer.
-- `s`: 32-byte unsigned big-endian integer.
-- `v`: 1-byte recovery identifier, either `0x00` or `0x01`.
+### CURRENT — key loading (node bootstrap, fatal)
 
-Wire encoding: `r || s || v`.
-
-The recovery identifier is the secp256k1 recovery ID/y-parity supported by
-Ethereum-compatible recoverable-signature libraries. Do **not** use transaction-signature
-values `27/28` or EIP-155 transaction `v` values on the wire.
-
-**Canonical signature requirements**
-- Require `1 <= r < n`, where `n` is the secp256k1 curve order.
-- Require `1 <= s <= floor(n / 2)`.
-- Signers MUST produce low-`s` signatures.
-- Verifiers MUST reject high-`s` signatures; they MUST NOT silently normalize received
-  signatures.
-- If a signing implementation normalizes `s` to `n - s`, it MUST also flip the recovery
-  parity bit: `v = v XOR 1`.
-
-**Verification**
-1. Validate the signature length, `r`, `s`, and `v`.
-2. Recover the signer address from the exact 32-byte digest and signature, without applying
-   another hash or prefix.
-3. Compare the recovered 20-byte address against the expected HELLO sender address
-   (**initiator** address on `HELLO_PING`; **responder** address on `HELLO_PONG`).
-4. Reject the handshake if any check fails.
-
-Implementations MUST use the same digest construction, signature byte order, recovery-ID
-convention, and low-`s` rules.
-
-### Nonce-state handling (must be exact)
-
-- **Initiator**: generates `i_nonce` from a CSPRNG, stores it as *outstanding* before
-  sending `HELLO_PING`. Marks the connection authenticated **only after** `HELLO_PONG`
-  verifies: recovered address == claimed responder address, **and** the reply's echoed
-  `i_nonce` == the stored outstanding nonce, **and** the signature verifies over the
-  reconstructed digest. On any mismatch or timeout, the outstanding nonce is discarded
-  and the connection is closed — never authenticated. The responder's signed echo of our
-  nonce is what makes a captured `HELLO_PONG` useless on any other connection.
-  (Enforced in `handshake_client`; regression-tested by replaying a captured
-  `HELLO_PONG` on a second connection — it must be rejected.)
-- **Responder**: on receiving `HELLO_PING`, verifies signature + allowlist *before*
-  doing anything else. Only then generates a fresh `r_nonce` and sends `HELLO_PONG`. It
-  echoes the initiator's nonce verbatim.
-- **Responder replay cache**: a signed `HELLO_PING` captured off one connection would
-  otherwise be replayable on a fresh connection. The responder keeps a **bounded replay
-  cache of already-accepted initiator nonces** (connection-independent, oldest-first
-  eviction at the cap): a `HELLO_PING` whose `(initiator, nonce)` pair is already in the
-  cache is rejected before any reply is produced. No extra round trip is added — the
-  cache is local state, not a message.
-- Nonces are single-use; the digest binds both addresses and both nonces.
-
-### Validation order (fast-reject first)
-
-1. Parse fixed header: opcode (`0x07` only — a `HELLO_PONG` first is rejected), version,
-   network id, sufficient payload length.
-2. Extract the 20-byte initiator address (the claimed sender of this `HELLO_PING`).
-3. **Allowlist check**: the claimed address must be in `mainnet.jsonl` (`address` = the
-   `0x` address; `key_id` is accepted as a legacy alias). Not in file → close immediately,
-   no signature recovery. This is the cheap DoS gate.
-4. **Replay check**: `(initiator, i_nonce)` must not be in the responder's bounded
-   replay cache. Seen before → reject (no reply).
-5. Verify signature, recover the signer address, compare to the **initiator** address
-   (this message's own sender). Mismatch = reject.
-6. Record the nonce in the replay cache and send `HELLO_PONG` — only after successful
-   verification. On that reply the initiator will recover and compare against the
-   **responder** address.
-
-Unknown or mis-signed peer → drop the connection. This is the only gate that decides "is
-this connection allowed"; payload validity stays at the application layer.
-
-### Key loading (node bootstrap, fatal)
-
-- Every node loads its identity key at bootstrap via **one shared keystore loader**
-  (`load_secret_from_keystore`, exposed `pub` for all node/validator functionality; no
-  separate test-only decrypt path).
+- Every node loads its identity key at bootstrap via **one shared keystore loader**.
 - Keystore is an encrypted Ethereum JSON v3 file; plaintext key files are refused.
-- Password comes **only** from the configured password file. No terminal prompt at
-  bootstrap (headless-safe, no human in the loop on reboot).
-- The process keeps only encrypted keystore bytes and the zeroized password bytes. Each HELLO
-  signature decrypts transiently and drops the key immediately; no naked 32-byte key is retained.
-- Missing, undecryptable, or plaintext key → **fatal**: the boot aborts. A node with no
-  verifiable identity does not join the mesh ("broken = no have").
+- Password comes **only** from the configured password file. No terminal prompt at bootstrap.
+- The process keeps only encrypted keystore bytes and the zeroized password bytes. Each HELLO signature decrypts transiently and drops the key immediately.
+- Missing, undecryptable, or plaintext key → **fatal**: the boot aborts.
 
-The `address` field in `mainnet.jsonl` is the verified `0x` address (no longer a free-form
-label); `key_id` remains accepted as a legacy alias.
+## CURRENT — Node bootstrap preconditions (non-wire)
 
-## Connection flags (AUTH, MODE)
+These are startup checks, not frames. A node will not boot unless they pass.
 
-Two connection-local flags. Neither is ever sent as a payload — both sides track their
-own copy, and both drop when the connection is lost.
+1. **Both files must exist and be loaded.** `validators.jsonl` is loaded into RAM for the block gate; `mainnet.jsonl` is actually read and parsed. Missing either is a hard boot error. Malformed peer lines are skipped with a warning; they are not a reason to disable the whole mesh.
+2. **Whole-file `mainnet.jsonl` validation first.** Duplicate parseable addresses and duplicate `ip:port` endpoints are hard errors, reported with line numbers. No identity matching is attempted against a logically broken file.
+3. **Identity derivation.** The keystore is decrypted and the address derived. Optional `COINBASE` is only a keystore-file selector; when present it must name the same derived address, or boot fails with `keys mismatch`.
+4. **Self-record lookup.** The node finds its single `mainnet.jsonl` record by that derived address.
+5. **Symmetric endpoint match.** Config `MESH_ADDR`/`MESH_PORT` and the self-record `ip`/`port_range` are checked against each other. Neither file is authoritative; the only question is whether they describe the same endpoint for this identity. Mismatch is a hard error showing both endpoints. Match logs INFO:
 
-| Flag | Values | Rules |
-| ---- | ------ | ----- |
-| `AUTH` | `true` / `false` | `false` on connect. Set `true` only after **this side** locally verified the peer's HELLO (responder: `HELLO_PING` verified; initiator: `HELLO_PONG` verified). **While `AUTH = false`, all Layer ≥ 3 messages are rejected** (the connection exists only to finish the handshake). Dropped on connection loss; re-established by a new handshake. |
-| `MODE` | `SYNC` / `RUMOR` | Per-connection application state. Bootstrap success → `SYNC`. Tip alignment → `RUMOR`. Tip regression, reorg, or a **gap of 2+ blocks** → `SYNC` again, without reconnecting. |
+   ```text
+   config.toml and mainnet.jsonl agree on this node's mesh endpoint
+   ```
 
-`AUTH` means "I verified this peer's key on this connection" — it grants no roles or
-validator privileges.
+**No defaults and no hardcoded endpoint.** Both `MESH_ADDR` and `MESH_PORT` must be explicitly present; the port must be ≥ 1024 and must not collide with the HTTP listener. There is no loopback fallback. Production uses real routable IPs, which must be written explicitly in both files. `url`, `active`, `valid`, and the inert `is_self` label are ignored by this self-check. Nothing is written by the check.
 
-## Layer 3 — Bootstrap peer exchange
+The `is_self` labels set at load are inert bookkeeping only: no gate, seal, or gossip decision consults them.
+
+## CURRENT — JSONL headers and record defaults (non-wire)
+
+### `mainnet.jsonl`
+
+Optional first-line header, detected only on the first non-blank/non-comment line that contains `mesh_protocol_ver`:
+
+| Field | Type | Absent / wrong-typed default |
+| ----- | ---- | ---------------------------- |
+| `mesh_protocol_ver` | u64 | `0` |
+| `signed` | string | `""` |
+| `ts` | u64 | `0` |
+| `hash` | string | `""` |
+| `block` | u64 | `0` |
+
+- Absent header → all defaults, no error. Wrong-typed fields default individually; the rest of the header is still read.
+- The header line is skipped as a record. Blank lines and `#` comments are ignored; malformed record lines are warned and skipped.
+- The header is kept in RAM and refreshed on every parse. It is bookkeeping only: no handshake, gossip, or config-gate decision consults it.
+- Record defaults: `url = ""`, `active = true`, `valid = true`. `ip` and `port_range` are required.
+- `active && valid` gates both inbound allowlist membership and outbound gossip targets, along with a parseable `0x` identity address.
+
+### `validators.jsonl`
+
+Optional first-line header, detected only on the first non-blank/non-comment line that contains `calibri_quorum_protocol_ver`:
+
+| Field | Type | Absent / wrong-typed default |
+| ----- | ---- | ---------------------------- |
+| `calibri_quorum_protocol_ver` | u64 | `0` |
+| `signed` | string | `""` |
+| `ts` | u64 | `0` |
+| `hash` | string | `""` |
+| `block` | u64 | `0` |
+
+- Same lenient behavior: absent → all defaults, wrong types default field-by-field, header line skipped as a record, bookkeeping only.
+- The registry is loaded once into RAM at boot. The config gate described below still hashes the **raw file bytes on disk**, not the parsed RAM registry or header values.
+
+## CURRENT — Link lifecycle order
+
+**Outbound persistent link:**
+
+```text
+WebSocket connect/upgrade
+  → HELLO_PING / HELLO_PONG        (Layer 2)
+  → CONFIG_HASH_PING / CONFIG_HASH_PONG  (Layer 3b; bootstrap gate)
+  → arm pre-auth budget
+  → bootstrap_sync: status + one-block-at-a-time catch-up  (Layer 4)
+  → session loop: rumor pipeline + keepalive               (Layers 1, 5, 6)
+```
+
+**Inbound persistent link:**
+
+```text
+WebSocket accept
+  → HELLO_PING / HELLO_PONG        (Layer 2)
+  → session loop                   (Layers 1, 3–6)
+```
+
+- The inbound side serves `CONFIG_HASH_PING` from its session loop but does not initiate the gate. It answers from its own current disk bytes; the received digests are not used for its own decision.
+- One-shot helpers (`send_rumor_inner`, `ping_inner`, `fetch_peers_inner`) perform HELLO only; they do not run the config gate.
+- Node startup preconnects all peer-file targets, seeds the boot sync gate, and runs `bootstrap_sync` on each outbound link. It does not use `fetch_peers` for node boot.
+
+## CURRENT — Layer 3 — Bootstrap peer exchange
 
 | Opcode | Message | Payload |
 | ------ | ------- | ------- |
 | `0x09` | `BOOTSTRAP_PEERS_PING` | empty |
 | `0x0A` | `BOOTSTRAP_PEERS_PONG` | `list_hash` (32) + `count` (BE u16) + records |
 
-Records keep the existing layout (`key_id`, `ip`, `port`, flags); `protocol.rs` is
-normative for the record bytes. `list_hash` = `keccak256` of the canonical record
-encoding.
+- `list_hash = keccak256(encode_peer_records(peers))`.
+- Canonical record encoding: `ip_len (u8) ‖ ip ‖ port (BE u64) ‖ flags (u8) ‖ key_len (u8) ‖ key`. `flags` bit 0 is `active`, bit 1 is `valid`. `url` is intentionally not carried.
+- The server answers `BOOTSTRAP_PEERS_PING` directly; this dialog does not run the config-hash gate.
+- `fetch_peers` (a helper/test path, not node boot) accepts a response only when `peer_list_hash(peers) == list_hash`. A mismatch is `TransportError::Protocol("bootstrap list hash mismatch")`. It does **not** compare against its own canonical list, does not set a mode, and does not log a warning-and-skip decision.
+- No `PING_OK` follows the list: the `PONG` terminates the dialog.
 
-Dialog — **strict equality, no merging**:
+Handshake failures, `PONG_DROP`, and list-hash failures remain per-connection decisions: no lasting blacklist from those. The **config-hash mismatch is the explicit exception** — see Layer 3b.
 
-```
-A → B: BOOTSTRAP_PEERS_PING            (empty)
-B → A: BOOTSTRAP_PEERS_PONG { list_hash, records }
-A:  hash(records) == list_hash  AND  list_hash == hash(A's own canonical list)
-      equal     → accept the list; A sets MODE = SYNC
-                  (B sets MODE = SYNC when it serves the list)
-      different → WARNING + skip this node: discard the response, do not adopt the
-                  list, do not use this node as a bootstrap source. Nothing else.
-```
-
-The list **must be identical or it is discarded** — there is no partial merging, no
-fallback membership, no negotiation, and **no failure message on the wire** beyond the
-warning + skip (nothing further is implemented in this version). `PING_OK` is not sent
-here: the `PONG` already terminates the conversation and no further exchange follows.
-
-**No blacklists.** "Skip" applies to this one response only — nothing is banned,
-remembered, or refused afterwards. The node may connect or retry at **any time**, and
-every attempt gets a fresh handshake and a fresh list comparison; tolerance to retries is
-managed per connection, never by banning. The same rule applies everywhere in the
-protocol: a rejected handshake, a `PONG_DROP`, or a discarded list is a
-**per-connection** decision, not a lasting one.
-
-## Layer 4 — Sync (status + full-block fetch)
-
-Two separate pairs — a height exchange and a per-block RLP fetch. Not PING/PONG
-overloads. Delivered blocks go through the ordinary inject/validate/store path.
+## CURRENT — Layer 3b — Bootstrap config-hash gate
 
 | Opcode | Message | Payload |
 | ------ | ------- | ------- |
-| `0x10` | `SYNC_BLOCK_PING` | `our_last_block_nr` (BE u64) — request for the peer's last block nr; carries the sender's own tip as a hint |
+| `0x0B` | `CONFIG_HASH_PING` | `mainnet_hash (32) ‖ validators_hash (32)` |
+| `0x0C` | `CONFIG_HASH_PONG` | `mainnet_hash (32) ‖ validators_hash (32)` |
+
+Fixed 64-byte payload for both opcodes. A non-64-byte payload is a protocol malformed error.
+
+**Hash rule.** `get_real_file_hash(path)` is the only hash function for these two files. It reads the whole file and returns `keccak256(raw_bytes)`. It is recomputed on every call and never cached — no `OnceLock`, no sticky digest. `ConfigHashes::read` calls it once per file. A changed file is visible on the next link bootstrap. No file is ever written or synced.
+
+**Dialog (outbound enforcement):**
+
+```text
+A: local = keccak256(raw mainnet.jsonl bytes) ‖ keccak256(raw validators.jsonl bytes)
+A → B: CONFIG_HASH_PING { local.mainnet, local.validators }
+B: recompute both digests from B's own disk bytes
+B → A: CONFIG_HASH_PONG { B.mainnet, B.validators }
+A: require B.mainnet == A.mainnet AND B.validators == A.validators
+```
+
+- Runs once per outbound link bootstrap, immediately after HELLO and before sync or gossip.
+- Byte-for-byte equality is required. Comments, whitespace, blank lines, and headers all count because the raw file bytes are hashed.
+- The reply is bounded by `DEFAULT_HANDSHAKE_TIMEOUT` (5 s).
+- This gate is separate from Layer 3 `list_hash`. `list_hash` is `keccak256` of the canonical peer-record encoding; the gate never reads or compares `list_hash`.
+
+**Mismatch semantics:**
+
+- Either file differing yields `TransportError::ConfigMismatch("mainnet.jsonl")` or `("validators.jsonl")`.
+- The link is closed; no failure frame is sent on the wire.
+- The peer's `ip:port` is marked rejected in memory for the lifetime of the process. The link stops reconnecting and future gossip target selection filters the peer out. A restart clears the set and gives the peer one fresh bootstrap chance.
+- Unreadable **local** files close the session but do **not** mark the peer rejected.
+- No file is modified, no config is pushed, and no peer-list data is exchanged as part of this gate.
+
+## CURRENT — Layer 4 — Sync (status + full-block fetch)
+
+| Opcode | Message | Payload |
+| ------ | ------- | ------- |
+| `0x10` | `SYNC_BLOCK_PING` | `our_last_block_nr` (BE u64) — request for peer tip; carries sender's tip as hint |
 | `0x20` | `SYNC_BLOCK_PONG` | `peer_last_block_nr` (BE u64) |
 | `0x11` | `SYNC_BLOCK_RLP_PING` | `blockNr` (BE u64) — fetch one full block |
 | `0x21` | `SYNC_BLOCK_RLP_PONG` | `blockNr` (BE u64) + full block RLP |
 
+```text
+Status:  A → B: SYNC_BLOCK_PING { our_nr }     B → A: SYNC_BLOCK_PONG { peer_nr }
+Fetch:   A → B: SYNC_BLOCK_RLP_PING { nr }     B → A: SYNC_BLOCK_RLP_PONG { nr, RLP }
+                                              A → B: PING_OK
 ```
-Status:  A → B: SYNC_BLOCK_PING { our_nr }     B → A: SYNC_BLOCK_PONG { peer_nr }     (done)
-Fetch:   A → B: SYNC_BLOCK_RLP_PING { nr }     B → A: SYNC_BLOCK_RLP_PONG { nr, RLP } A → B: PING_OK
-```
 
-Sync flow (pull-based, one height per dialog):
+**Outbound bootstrap path (`bootstrap_sync`):**
 
-1. `SYNC_BLOCK_PING` — "what is your last block?" (carries ours as a hint).
-2. `SYNC_BLOCK_PONG` — "my last block is `BlockNrX`" (the peer's tip; a **hint**).
-3. The requester computes the start as **`local_tip + 1`**, bounded above by the peer's
-   available range — *not* `BlockNrX + 1`. If the peer is at 120 and we are at 100, we
-   request from **101**. (Requesting from the peer's tip would skip everything we lack.)
-4. It sends `SYNC_BLOCK_RLP_PING(n)` for one block; the peer answers
-   `SYNC_BLOCK_RLP_PONG(n, full RLP)`; the requester validates/injects it through the
-   normal block path, replies `PING_OK`, and advances to `n + 1`.
-5. Repeat until our tip equals the peer's reported tip; then (and only then) this
-   connection may transition to `RUMOR`. Requester-side dialogs **may be pipelined** —
-   each `SYNC_BLOCK_RLP` dialog is independent and responses are matched by `blockNr`.
+1. Send `SYNC_BLOCK_PING` with our tip; await `SYNC_BLOCK_PONG` with the peer's tip.
+2. While `our_tip < peer_tip`, fetch `our_tip + 1` only.
+3. Await the `SYNC_BLOCK_RLP_PONG` whose `blockNr` matches the outstanding request.
+4. Inject through the ordinary block path, send `PING_OK`, and set `our_tip = max(head_read, injected_nr)`.
+5. Repeat until `our_tip >= peer_tip`. Block fetch is **serialized**: one request in flight, one block per response. Responses may be matched by `blockNr`, but the code does not pipeline these fetches.
 
-**Single-block rule (protocol invariant).** The wire already carries exactly one block
-per `SYNC_BLOCK_RLP_PONG`. On top of that, a receiver injects blocks **strictly one at
-a time, node-wide** — a global one-permit gate serializes every block inject regardless
-of which connection (ordered pull, stray announce reply, bootstrap, link session)
-delivered it. No block batches anywhere; only tx batches are supported. Request
-pipelining (step 5) is fine — responses queue at the gate and inject serially.
+**Inbound session path:**
 
-`BlockNrX` is a **synchronization hint only**. A reported height does not prove the two
-peers share the same chain history — if they disagree about fork choice, equal or greater
-height says nothing about which chain is canonical. Received blocks are therefore validated
-and the canonical chain determined by the node's real consensus/fork-choice rules, never
-trusted blindly; consensus remains authoritative over the hint. Because a synced node
-answers rumors truthfully and only the validator seals in order, the chain arrives in
-order; a gap is simply `peer_tip > my_tip`, revealed directly by the status exchange.
+- A status report or forward announce arms an ordered pull range `[local_tip + 1 ..= target]`, one fetch in flight, advanced from the injected block number.
+- `mode` flips to `Sync` when the peer reports/announces a height more than one block ahead; it returns to `Rumor` when caught up (`tip >= target`) and the peer is no longer ahead. Inbound sessions initialize to `Rumor`; outbound `bootstrap_sync` is a one-shot ordered pull and does not use `LinkMode`.
+- The completed pull is reported to the boot sync gate. Boot readiness requires every target link to have made one exchange, local tip `>=` the highest reported peer tip, and no pull still armed; the gate times out after 10 s and returns `false` with a warning rather than blocking RPC forever.
+- There is **no reorg or tip-regression detection** in the current code. Only reported/announced heights are compared.
 
-**Bootstrap always starts in `SYNC`.** A node begins in `SYNC` and stays there until its
-local chain is aligned with the network tip; only then does the connection stitch into
-`RUMOR`. A later tip regression or reorg moves it back to `SYNC` without reconnecting.
-Entering `RUMOR` means *initial synchronization is complete* — it does **not** mean the
-node will never need an older block again (see Layer 5).
+**Single-block rule.** The wire carries one block per `SYNC_BLOCK_RLP_PONG`, and a node-wide single-permit gate injects exactly one block at a time regardless of which path delivered it. No block batches; `LINK_WINDOW` pipelines announcements, not block fetches.
 
-## Layer 5 — Block rumor
+`peer_last_block_nr` is a synchronization hint only. Received blocks are validated and the canonical chain is decided by the node's real consensus/fork-choice rules, never trusted blindly from the height.
+
+## CURRENT — Layer 5 — Block rumor
 
 Announces carry the **block number, not the hash**.
 
@@ -359,28 +320,22 @@ Announces carry the **block number, not the hash**.
 | ------ | ------- | ------- |
 | `0x12` | `RUMOR_BLOCKS_PING` | `blockNr` (BE u64) — announce |
 
-```
+```text
 A → B: RUMOR_BLOCKS_PING { nr }
-B → A: PONG_OK                             // B already has nr — dialog ends
-  or
-B → A: SYNC_BLOCK_RLP_PING { nr }          // B needs nr — backwards fetch allowed,
-A → B: SYNC_BLOCK_RLP_PONG { nr, RLP }     // NO mode switch required
+B → A: PONG_OK                              // B already has nr (height-based)
+   or
+B → A: SYNC_BLOCK_RLP_PING { nr }           // B needs the announced block
+A → B: SYNC_BLOCK_RLP_PONG { nr, RLP }       // no mode change required for this fetch
 B → A: PING_OK
 ```
 
-- The response to a block announce is `PONG_OK` **or** `SYNC_BLOCK_RLP_PING` — the same
-  fetch pair as Layer 4. There is no dedicated `RUMOR_BLOCKS_PONG` (`0x22` reserved).
-- **No chat history**: every message is self-describing; nothing is remembered between
-  dialogs, so each exchange can be constructed independently.
-- **Backwards fetch is allowed** (`nr <= local_tip`, or any single missing block a peer
-  asks for): answer the `SYNC_BLOCK_RLP_PING` directly — no need to switch to sync mode
-  for it.
-- **Gap policy (forward)**: if the announced/reported height is **2 or more** ahead of
-  `local_tip`, `MODE` drops to `SYNC` and the node pulls `local_tip + 1 …` via
-  `SYNC_BLOCK_RLP` until aligned, then returns to `RUMOR`. A gap of one block heals
-  inside the rumor dialog itself (answer `SYNC_BLOCK_RLP_PING`, no mode change).
+- For a forward announce the current code sends the announced-block fetch **and** arms/extends the ordered range from `local_tip + 1`, re-sending its first fetch. For a one-block gap these two fetches can have the same `nr`.
+- Mode flips to `Sync` only when `block_nr >= local_tip + 2`. A single-block gap or a backwards/up-to-date announce does not flip the mode.
+- `PONG_OK` for a block announce is answered from height (`block_nr <= local_tip`), not from the seen/object caches.
+- There is no dedicated `RUMOR_BLOCKS_PONG` (`0x22` reserved).
+- On the outbound session loop, a peer's ordered fetch for a block we did not just announce is served from the chain when available.
 
-## Layer 6 — Transaction rumor
+## CURRENT — Layer 6 — Transaction rumor
 
 Announces carry the transaction hash.
 
@@ -390,53 +345,40 @@ Announces carry the transaction hash.
 | `0x19` | `RUMOR_TX_REQUEST_PING` | `txHash` (32) — "send me that tx" |
 | `0x29` | `RUMOR_TX_REQUEST_PONG` | `txHash` (32) + full tx bytes — "txHash sent" |
 
-```
+```text
 A → B: RUMOR_TX_PING { hash }
-B → A: PONG_OK                             // B already has it — dialog ends
-  or
+B → A: PONG_OK                             // B already has it (SeenCache / ObjectCache)
+   or
 B → A: RUMOR_TX_REQUEST_PING { hash }      // B needs it
 A → B: RUMOR_TX_REQUEST_PONG { hash, tx }  // self-describing answer
 B → A: PING_OK                             // receipt after inject
 ```
 
-There is no dedicated `RUMOR_TX_PONG` (`0x28` reserved) — the response set is `PONG_OK`
-or `RUMOR_TX_REQUEST_PING`.
+There is no dedicated `RUMOR_TX_PONG` (`0x28` reserved).
 
-## Dialog construction rule
+## CURRENT — Dialog construction rule
 
-- A dialog is a `PING` → `PONG` exchange, optionally closed by `PING_OK`. Build each
-  payload so a dialog needs **at most two payload `PING`s and two payload `PONG`s**
-  (`RUMOR_*_PING` + counter-request `*_PING` → data `PONG` → `PING_OK` is the deepest
-  chain). This is a construction rule, **not enforced on the wire** — no per-dialog state
-  machine is required, because every message is self-describing (no chat history).
-- After a **data-delivery** `PONG` (`SYNC_BLOCK_RLP_PONG`, `RUMOR_TX_REQUEST_PONG`)
-  the receiver replies `PING_OK` — this is where a terminator is *needed*: it stops the
-  conversation by protocol and resolves the data sender's pending dialog truthfully
-  (receipt is sent only after the local inject completed). After `PONG_OK`,
-  `SYNC_BLOCK_PONG`, or `BOOTSTRAP_PEERS_PONG` the `PONG` itself already terminates the
-  conversation — no `PING_OK` follows. (`PING_OK` may optionally be used after any
-  request/response to unify handling; that is allowed but not required.)
-- The keepalive dialog is `PING` → `PONG_OK` only; it repeats at the next heartbeat.
-- Connections stay alive across dialogs; a finished dialog closes nothing.
-- `PONG_DROP` is outside dialogs: the sender closes the connection immediately after.
+- A dialog is a `PING` → `PONG` exchange, optionally closed by `PING_OK`. Build each payload so a dialog needs **at most two payload `PING`s and two payload `PONG`s** (`RUMOR_*_PING` + counter-request `*_PING` → data `PONG` → `PING_OK` is the deepest chain). This is a construction rule, not an enforced state machine; every message is self-describing.
+- After a data-delivery `PONG` (`SYNC_BLOCK_RLP_PONG`, `RUMOR_TX_REQUEST_PONG`) the receiver replies `PING_OK` in the ordered pull/bootstrap paths — the receipt is sent only after the local inject completed.
+- After `PONG_OK`, `SYNC_BLOCK_PONG`, or `BOOTSTRAP_PEERS_PONG` the `PONG` itself terminates the dialog — no `PING_OK` follows.
+- The config gate is an additional `PING`→`PONG` control pair after HELLO. Success proceeds to sync/gossip; mismatch closes the link. There is no `PING_OK` for the gate.
+- The keepalive dialog is `PING` → `PONG_OK` only.
+- Announcements on a persistent outbound link are pipelined up to `LINK_WINDOW = 64`; block fetches are serialized.
+- `PONG_DROP` is receiver-side terminate only in current code: receivers close, but no production path sends it.
 
-## Duplicate detection
+## CURRENT — Duplicate detection
 
-- `PONG_OK` ("already have it") is truthful: sent only after the object was actually
-  processed locally (its inject completed and it was marked in the `SeenCache` / it sits
-  in the `ObjectCache`), never optimistically from an entry that may have expired.
-- `PING_OK` (receipt) is sent only after the local inject of the received data completed.
-  A failed inject sends no `PING_OK` and un-marks the object so a later announce can
-  retry; the sender's dialog then times out and may retry.
-- Blocks are recognized by `blockNr` for announces/requests and validated through the
-  normal import path; transactions by `txHash` (re-hash on receive).
+- Block `PONG_OK` is height-based (`block_nr <= local_tip`). Transaction `PONG_OK` uses `SeenCache` / `ObjectCache`.
+- `PING_OK` in the ordered pull and bootstrap paths is sent only after the local inject completes. A failed inject there sends no `PING_OK`, clears the armed pull, and lets a later announce or reconnect restart the range.
+- Stray/pushed-data handlers log a failed inject but still send `PING_OK`; they do not universally un-mark the object. Do not assume the stronger old guarantee.
+- Blocks are recognized by `blockNr` for announces/requests and validated through the normal import path. Transactions are re-hashed on receive and compared to the announced `txHash`.
 
-## Opcode registry (v1, complete)
+## CURRENT — Opcode registry (v1, complete)
 
 | Opcode | Message | Layer | Payload |
 | ------ | ------- | ----- | ------- |
 | `0x01` | `PING` | 1 | empty |
-| `0x02` | *(reserved — superseded by `PONG_OK`)* | — | — |
+| `0x02` | *(reserved — old `PONG`)* | — | — |
 | `0x03` | `PING_OK` | 1 | empty |
 | `0x04` | `PONG_OK` | 1 | empty |
 | `0x05` | reserved | — | — |
@@ -445,7 +387,9 @@ or `RUMOR_TX_REQUEST_PING`.
 | `0x08` | `HELLO_PONG` | 2 | identity + echoed nonce + signature |
 | `0x09` | `BOOTSTRAP_PEERS_PING` | 3 | empty |
 | `0x0A` | `BOOTSTRAP_PEERS_PONG` | 3 | `list_hash` + records |
-| `0x0B–0x0F` | reserved (control expansion) | — | — |
+| `0x0B` | `CONFIG_HASH_PING` | 3b | `mainnet_hash (32)` + `validators_hash (32)` |
+| `0x0C` | `CONFIG_HASH_PONG` | 3b | `mainnet_hash (32)` + `validators_hash (32)` |
+| `0x0D–0x0F` | reserved (control expansion) | — | — |
 | `0x10` | `SYNC_BLOCK_PING` | 4 | `our_last_block_nr` (BE u64) |
 | `0x11` | `SYNC_BLOCK_RLP_PING` | 4 | `blockNr` (BE u64) |
 | `0x12` | `RUMOR_BLOCKS_PING` | 5 | `blockNr` (BE u64) |
@@ -461,24 +405,84 @@ or `RUMOR_TX_REQUEST_PING`.
 | `0x29` | `RUMOR_TX_REQUEST_PONG` | 6 | `txHash` (32) + tx bytes |
 | `0x2A–0x2F` | reserved (tx expansion) | — | — |
 
-## Mode rules (operational)
-
-- A node enters `RUMOR` **only when its own tip equals the network tip** (its tip is at
-  or above the highest tip reported by a synced peer), not on a timer. Flipping to `RUMOR`
-  early re-opens the gap hole.
-- `SYNC`→`RUMOR` and `RUMOR`→`SYNC` need no reconnect; the mode is per-connection
-  application state, layered on an already-authenticated link.
-- Trigger back to `SYNC`: tip regression / reorg, or a gap of **2+** blocks against a
-  reported/announced height. Single-block and backwards fetches never flip the mode.
-- Layering order is fixed: **keepalive (Layer 1) → identity + flags (Layer 2) →
-  application (Layers 3–6)**. While `AUTH = false`, Layers 3+ are rejected. No opcode is
-  shared across layers.
-
-## Out of scope (unchanged)
+## CURRENT — Out of scope
 
 - No TLS requirement; transport security is optional and separate from identity.
-- No validator roles/permissions exchanged on the wire; the handshake proves key control
-  only. Consensus roles come from the node's own config/DB.
-- No fishermen / collateral-burning / malicious-behavior classification yet; duplicate
-  detection only reduces redundant work and retains attribution evidence for later.
+- No validator roles/permissions exchanged on the wire; the handshake proves key control only. Consensus roles come from the node's own config/DB.
+- No fishermen / collateral-burning / malicious-behavior classification yet; duplicate detection only reduces redundant work.
+- No file synchronization or pushing of config from one peer to another. The config gate only compares hashes and closes on mismatch.
 
+---
+
+# OLD / PLANNED — historical records, not current behavior
+
+Everything in this section was present on an earlier version of this page. It is preserved for design history only. **Do not treat it as implemented or normative.**
+
+## OLD — Timings and config knobs
+
+Superseded records:
+
+- `DEFAULT_KEEPALIVE_INTERVAL` was documented as overridable by `MESH_HEARTBEAT`. Current code: `MESH_HEARTBEAT` is retired/unknown; mesh keepalive is hardcoded and independent of `NODE_HEARTBEAT`.
+- `DEFAULT_REQUEST_TIMEOUT` was `1000 ms`. Current: `5000 ms`.
+- `DEFAULT_HANDSHAKE_TIMEOUT` was `300 ms`, described as "WebSocket upgrade + first `HELLO_PING` only". Current: `5000 ms`, and it also bounds the config-hash reply.
+- The HELLO domain was described as 21 bytes. Current: `b"smartnet-mesh-hello-v1"` is 22 bytes.
+- Opcode `0x02` was marked "old `PONG` — keep it!!!". Current: it stays reserved and `PONG_OK` (`0x04`) is the live answer.
+- Opcode range `0x0B–0x0F` was "reserved (control expansion)". Current: `0x0B`/`0x0C` are the config-hash gate; `0x0D–0x0F` remain reserved.
+
+## OLD — HELLO validation records
+
+Superseded records:
+
+- The replay cache was keyed by `(initiator, nonce)`. Current: keyed by initiator nonce alone, bounded FIFO.
+- Validation order was written as allowlist → replay → signature. Current responder call order is first-frame → replay probe → `verify_hello` (version/network → allowlist → signature) → nonce insert → reply.
+- Allowlist was described as any `0x` address in the file. Current: the address must parse as `0x` **and** the record must have `active && valid`.
+
+## OLD — `AUTH` / `MODE` flags
+
+Superseded design record:
+
+> Two connection-local flags, `AUTH` and `MODE`. Neither is ever sent as a payload. `AUTH` starts false and is set true only after this side verifies the peer's HELLO; while `AUTH = false`, all Layer ≥ 3 messages are rejected. `MODE` starts as `SYNC` on bootstrap success, flips to `RUMOR` when tips align, and flips back to `SYNC` on tip regression, reorg, or a gap of 2+ blocks without reconnecting. A node enters `RUMOR` only when its own tip equals the network tip. `SYNC`→`RUMOR` and `RUMOR`→`SYNC` need no reconnect.
+
+Current code has no literal runtime `AUTH` flag: a failed handshake closes the connection before the session loop. Inbound sessions initialize `LinkMode::Rumor`; outbound `bootstrap_sync` is a one-shot ordered pull. There is no reorg/regression detection. Gap-based `Sync` flips are implemented for reported/announced heights, not for a general reorg signal.
+
+## OLD — Peer-list strict-equality dialog
+
+Superseded design record:
+
+```text
+A → B: BOOTSTRAP_PEERS_PING            (empty)
+B → A: BOOTSTRAP_PEERS_PONG { list_hash, records }
+A:  hash(records) == list_hash  AND  list_hash == hash(A's own canonical list)
+      equal     → accept the list; A sets MODE = SYNC
+                  (B sets MODE = SYNC when it serves the list)
+      different → WARNING + skip this node: discard the response, do not adopt the
+                  list, do not use this node as a bootstrap source.
+```
+
+Current `fetch_peers` checks only `peer_list_hash(peers) == list_hash`; it has no own-list equality check, no `MODE` write, and no warning-and-skip path. Node boot uses preconnect plus `bootstrap_sync`, not `fetch_peers`.
+
+## OLD — "no blacklists anywhere" rule
+
+Superseded record:
+
+> No blacklists. Skip applies to this one response only — nothing is banned, remembered, or refused afterwards. The node may connect or retry at any time, and every attempt gets a fresh handshake and a fresh list comparison. A rejected handshake, a `PONG_DROP`, or a discarded list is a per-connection decision, not a lasting one.
+
+Current code preserves this for handshake/list failures, but the config-hash gate is an explicit exception: a mismatch marks `ip:port` rejected in memory for the process lifetime, stops reconnect, and filters the peer out of gossip until restart.
+
+## OLD — Sync and rumor flow records
+
+Superseded records:
+
+- Requester-side `SYNC_BLOCK_RLP` dialogs "may be pipelined; responses matched by `blockNr`". Current: block fetch is serialized, one in flight; only rumor announces are pipelined (`LINK_WINDOW = 64`).
+- "Repeat until our tip equals the peer's tip." Current loops use `>=` (`our_tip < peer_tip`, `tip >= target`).
+- "Bootstrap always starts in `SYNC`." Current: inbound sessions start `RUMOR`; outbound bootstrap is an ordered pull without `LinkMode`.
+- "A later tip regression or reorg moves it back to `SYNC`." Current: no reorg/regression detection exists.
+- A block announce was described as a single `SYNC_BLOCK_RLP_PING { nr }` reply with a one-block gap healing inside the dialog. Current: a forward announce also arms/extends the ordered range from `local_tip + 1`; for a one-block gap two fetch frames can be sent.
+
+## OLD — `PONG_DROP` / receipt records
+
+Superseded records:
+
+- `PONG_DROP`: "the sender closes the connection right after". Current: only receivers close on it; no production sender exists.
+- `PING_OK`: "A failed inject sends no `PING_OK` and un-marks the object so a later announce can retry". Current: this is true for ordered pull/bootstrap paths only. Stray/pushed-data handlers log a failed inject but still send `PING_OK` and do not un-mark.
+- `PONG_OK` ("already have it") was described universally as "sent only after the object was actually processed locally". Current: block `PONG_OK` is height-based; tx `PONG_OK` uses the seen/object caches.

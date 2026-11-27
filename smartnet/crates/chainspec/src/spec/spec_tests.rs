@@ -52,9 +52,9 @@ fn wem_mainnet_genesis_header_is_sealed() {
 
 #[test]
 fn from_genesis_keeps_wem_block_forks_and_does_not_inject_london() {
-    // London must not be injected from a genesis file: the historical sealed-block
-    // headers carry no base fee, and London@1 broke historical block import. London is
-    // forced at the EVM layer instead (see crates/evm/ethereum/src/config.rs).
+    // No fee-era fork is injected from a hard-coded block number: historical sealed-block
+    // headers carry no base fee and replay under Istanbul (per-header import spec), while live
+    // blocks use the uniform Mars/EVM profile. See crates/evm/ethereum/src/lib.rs.
     let genesis = Genesis { config: wem_shape_genesis(4_242_424), ..Default::default() };
     let spec = ChainSpec::from_genesis(genesis);
 

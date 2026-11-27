@@ -13,7 +13,10 @@ pub const CALIBRI_LITE_RUNTIME_PROTOCOL_VERSION: u8 = 1;
 /// source lives in the chain-rulebook crate (`smartnet-chainspec::fixed_fee`, with the
 /// full derivation and compatibility-boundary docs); re-exported here so the consensus
 /// layer, node CLI, and sync verifier all read one definition. See `doc/FEES-CURR.md`.
-pub use smartnet_chainspec::{SMARTNET_FIXED_GAS_PRICE_WEI, SMARTNET_FIXED_TRANSFER_FEE_WEI};
+pub use smartnet_chainspec::{
+    fixed_gas_price_wei, fixed_transfer_fee_wei, SMARTNET_FIXED_GAS_PRICE_WEI,
+    SMARTNET_FIXED_TRANSFER_FEE_WEI,
+};
 
 /// How execution behaves (EVM, receipts, gas accounting).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +101,7 @@ impl SmartNetRuntimeProfile {
     pub fn child_base_fee_per_gas(&self, parent_base_fee: Option<u64>) -> Option<u64> {
         let _ = self;
         let _ = parent_base_fee;
-        Some(SMARTNET_FIXED_GAS_PRICE_WEI)
+        Some(fixed_gas_price_wei())
     }
 
     /// Emit structured startup log.
@@ -123,7 +126,7 @@ pub struct ChildHeaderFields {
     pub gas_limit: u64,
     /// Child EIP-1559 base fee for wallets.
     pub base_fee_per_gas: u64,
-    /// Wire difficulty (zero on SmartNet).
+    /// Wire difficulty: `2` for the single in-turn sealer, matching chain history.
     pub difficulty: U256,
 }
 

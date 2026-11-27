@@ -28,9 +28,10 @@
 //! no block batches — only tx batches); tx injects stay bounded-concurrent.
 
 use crate::{
+    config_hash::ConfigHashes,
     identity::{verify_hello, HelloVerify, Identity, NonceCache},
     inject::Injector,
-    link::PendingRumor,
+    link::{PendingRumor, RejectedPeers},
     peers::{allowlist_addresses, load_peers, PeerEntry},
     preauth::{self, PreAuthGuard},
     protocol::{self, Limits, Message, PeerRecord, ProtocolError},
@@ -142,6 +143,9 @@ pub enum TransportError {
     /// The peer closed before answering.
     #[error("mesh peer closed the connection")]
     Closed,
+    /// Bootstrap config files differ: the named file's hash did not match.
+    #[error("bootstrap config mismatch in {0}")]
+    ConfigMismatch(&'static str),
 }
 
 /// Per-connection sync mode (spec: `MODE`). `Sync` while the peer's tip is ahead by two
@@ -184,6 +188,8 @@ impl Drop for PullGuard {
 #[derive(Debug)]
 pub struct MeshServer {
     peers_file: PathBuf,
+    /// `validators.jsonl` path — hashed (with the peer file) to answer `CONFIG_HASH_PING`.
+    validators_file: PathBuf,
     seen: Arc<SeenCache>,
     objects: Arc<ObjectCache>,
     rpc: Arc<dyn Injector>,
@@ -199,6 +205,7 @@ impl MeshServer {
     /// Creates a server handler.
     pub fn new(
         peers_file: PathBuf,
+        validators_file: PathBuf,
         seen: Arc<SeenCache>,
         objects: Arc<ObjectCache>,
         rpc: Arc<dyn Injector>,
@@ -207,6 +214,7 @@ impl MeshServer {
     ) -> Self {
         Self {
             peers_file,
+            validators_file,
             seen,
             objects,
             rpc,
@@ -304,6 +312,10 @@ impl MeshServer {
                 Message::Ping => self.serve_keepalive(&sink, limit, peer, pull).await,
                 // ── Layer 3: bootstrap ──────────────────────────────────
                 Message::BootstrapPeersPing => self.serve_bootstrap(&sink, limit, peer).await,
+                // ── Layer 3b: bootstrap config gate (right after HELLO) ─
+                Message::ConfigHashPing { .. } => {
+                    self.serve_config_hash(&sink, limit, peer).await
+                }
                 // ── Layer 4: sync status + block fetch ──────────────────
                 Message::SyncBlockPing { last_block } => {
                     let (turn, m, p) =
@@ -351,6 +363,7 @@ impl MeshServer {
                 | Message::HelloPing(_)
                 | Message::HelloPong(_)
                 | Message::BootstrapPeersPong { .. }
+                | Message::ConfigHashPong { .. }
                 | Message::SyncBlockPong { .. } => Turn::Next,
                 Message::PongDrop => {
                     debug!(target: "smartnet::mesh", %peer, "mesh peer dropped the connection");
@@ -824,7 +837,12 @@ impl MeshServer {
         // The inbound allowlist is the peer file's `address` identities, re-read so
         // membership changes apply without a restart.
         let allowlist = match load_peers(&self.peers_file) {
-            Ok(parsed) => allowlist_addresses(&parsed),
+            Ok(mut parsed) => {
+                // Label our own entry in the in-RAM peer set; the allowlist logic below is
+                // deliberately unchanged.
+                PeerEntry::mark_self(&mut parsed.peers, None, self.identity.address());
+                allowlist_addresses(&parsed)
+            }
             Err(err) => {
                 warn!(
                     target: "smartnet::mesh",
@@ -900,6 +918,42 @@ impl MeshServer {
         // Reply with our signed `HELLO_PONG`, echoing the initiator's nonce and identity.
         let reply = self.identity.sign_hello_responder(&hello.initiator, &hello.initiator_nonce);
         send_via(sink, &Message::HelloPong(reply), limit).await
+    }
+
+    /// Answers the initiator's bootstrap config gate with OUR two file digests, computed
+    /// fresh from disk on every request (never cached). If either file can't be read the
+    /// connection is closed — a node that cannot prove its files is not a bootstrap peer.
+    async fn serve_config_hash<S>(
+        &self,
+        sink: &Arc<tokio::sync::Mutex<S>>,
+        limit: usize,
+        peer: SocketAddr,
+    ) -> Turn
+    where
+        S: futures::Sink<WsMessage, Error = WsError> + Unpin + ?Sized,
+    {
+        let hashes = match ConfigHashes::read(&self.peers_file, &self.validators_file) {
+            Ok(hashes) => hashes,
+            Err(err) => {
+                warn!(
+                    target: "smartnet::mesh",
+                    %peer,
+                    mainnet = %self.peers_file.display(),
+                    validators = %self.validators_file.display(),
+                    %err,
+                    "mesh config hash unavailable — dropping bootstrap peer"
+                );
+                return Turn::Close;
+            }
+        };
+        let reply = Message::ConfigHashPong { mainnet: hashes.mainnet, validators: hashes.validators };
+        match send_via(sink, &reply, limit).await {
+            Ok(()) => Turn::Next,
+            Err(err) => {
+                debug!(target: "smartnet::mesh", %peer, %err, "mesh config hash reply failed");
+                Turn::Close
+            }
+        }
     }
 
     async fn inject(rpc: &dyn Injector, rumor: &Rumor) -> Result<(), String> {
@@ -1241,6 +1295,56 @@ where
     }
 }
 
+/// Client side of the bootstrap config gate. Recomputes our two file digests from disk on
+/// every call, sends them, and requires the peer's freshly computed digests to match BOTH.
+/// A mismatch is [`TransportError::ConfigMismatch`] — the caller drops the link and marks the
+/// peer false in memory for this process. Runs once per link bootstrap, right after HELLO.
+async fn verify_config_hashes<S>(
+    socket: &mut S,
+    peers_file: &Path,
+    validators_file: &Path,
+    limit: usize,
+) -> Result<(), TransportError>
+where
+    S: futures::Sink<WsMessage, Error = WsError>
+        + futures::Stream<Item = Result<WsMessage, WsError>>
+        + Unpin,
+{
+    let local = ConfigHashes::read(peers_file, validators_file).map_err(|err| {
+        warn!(
+            target: "smartnet::mesh",
+            mainnet = %peers_file.display(),
+            validators = %validators_file.display(),
+            %err,
+            "local bootstrap config files unreadable — cannot verify peer"
+        );
+        TransportError::Protocol(ProtocolError::Malformed("local bootstrap config files unreadable"))
+    })?;
+    send_protocol(
+        socket,
+        &Message::ConfigHashPing { mainnet: local.mainnet, validators: local.validators },
+        limit,
+    )
+    .await?;
+    let reply = tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, recv_protocol(socket, limit))
+        .await
+        .map_err(|_| TransportError::Timeout)??;
+    match reply {
+        Message::ConfigHashPong { mainnet, validators } => {
+            if mainnet != local.mainnet {
+                return Err(TransportError::ConfigMismatch("mainnet.jsonl"));
+            }
+            if validators != local.validators {
+                return Err(TransportError::ConfigMismatch("validators.jsonl"));
+            }
+            Ok(())
+        }
+        _ => Err(TransportError::Protocol(ProtocolError::Malformed(
+            "reply after HELLO must be CONFIG_HASH_PONG",
+        ))),
+    }
+}
+
 /// One in-flight announce on a persistent link: bytes awaiting the peer's answer
 /// (`PONG_OK` have-ack or a counter-request that resolves the spread ack at data-send),
 /// the spread ack resolved when it arrives (dropped on timeout or session exit = the
@@ -1409,6 +1513,8 @@ pub(crate) async fn run_link_session(
     limits: Limits,
     identity: &Identity,
     peers_file: &Path,
+    validators_file: &Path,
+    rejected: &RejectedPeers,
     injector: &Arc<dyn Injector>,
     seen: &Arc<SeenCache>,
     objects: &Arc<ObjectCache>,
@@ -1422,7 +1528,25 @@ pub(crate) async fn run_link_session(
         let _ = socket.close(None).await;
         return Err(err);
     }
-    // Responder authenticated (signed HELLO_PONG + nonce echo): lift the pre-auth cap.
+    // Bootstrap config gate, right after HELLO: both files must be present and have equal
+    // hashes on both ends. Mismatch drops THIS connection and marks the peer false in RAM
+    // for the rest of this process; no file is written or synced.
+    if let Err(err) =
+        verify_config_hashes(&mut socket, peers_file, validators_file, limits.max_message_bytes)
+            .await
+    {
+        if let TransportError::ConfigMismatch(file) = &err {
+            warn!(
+                target: "smartnet::mesh",
+                %ip, port, file,
+                "mesh bootstrap config hash mismatch — peer rejected for this process"
+            );
+            rejected.mark(ip, port);
+        }
+        let _ = socket.close(None).await;
+        return Err(err);
+    }
+    // Responder authenticated (HELLO) and config verified: lift the pre-auth cap.
     socket.get_mut().arm();
     connected.store(true, Ordering::Release);
     let result = match bootstrap_sync(
@@ -1639,6 +1763,8 @@ where
                     Message::HelloPing(_) |
                     Message::HelloPong(_) |
                     Message::BootstrapPeersPong { .. } |
+                    Message::ConfigHashPing { .. } |
+                    Message::ConfigHashPong { .. } |
                     Message::SyncBlockPing { .. } |
                     Message::SyncBlockPong { .. } |
                     Message::RumorTxPing { .. } |
@@ -1910,5 +2036,80 @@ mod tests {
         }
         // The probe only counts new_payload; zero block injects happened here.
         assert_eq!(probe.blocks.load(Ordering::SeqCst), 0);
+    }
+
+    /// Minimal injector: this test's server only answers HELLO + `CONFIG_HASH_PING`, never
+    /// injects an object.
+    #[derive(Debug)]
+    struct Noop;
+
+    #[async_trait::async_trait]
+    impl Injector for Noop {
+        async fn send_raw_transaction(&self, _raw: &Bytes) -> Result<(), String> { Ok(()) }
+        async fn new_payload(&self, _block_rlp: &Bytes) -> Result<(), String> { Ok(()) }
+        async fn last_block_nr(&self) -> Result<u64, String> { Ok(0) }
+        async fn block_rlp(&self, _block_nr: u64) -> Result<Option<Bytes>, String> { Ok(None) }
+    }
+
+    /// The bootstrap gate accepts a peer whose two files hash equal to ours and rejects one
+    /// where either file differs (no file is written or synced by the gate).
+    #[tokio::test]
+    async fn config_hash_gate_accepts_equal_and_rejects_changed_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let peers = dir.path().join("mainnet.jsonl");
+        let server_validators = dir.path().join("server-validators.jsonl");
+        let client_validators = dir.path().join("client-validators.jsonl");
+        let server_id = crate::identity::test_identity(9);
+        let client_id = crate::identity::test_identity(10);
+        // Both identities must be allowlisted: the server checks the initiator, the client
+        // checks the responder, against this same peer file.
+        std::fs::write(
+            &peers,
+            format!(
+                "{{\"address\":\"{:#x}\",\"ip\":\"127.0.0.1\",\"port_range\":1,\"active\":true,\"valid\":true}}\n\
+                 {{\"address\":\"{:#x}\",\"ip\":\"127.0.0.1\",\"port_range\":2,\"active\":true,\"valid\":true}}\n",
+                server_id.address(),
+                client_id.address()
+            ),
+        )
+        .expect("write peers");
+        std::fs::write(&server_validators, "validators-v1").expect("write server validators");
+        std::fs::write(&client_validators, "validators-v1").expect("write client validators");
+
+        let server = Arc::new(MeshServer::new(
+            peers.clone(),
+            server_validators.clone(),
+            Arc::new(SeenCache::default()),
+            Arc::new(ObjectCache::default()),
+            Arc::new(Noop),
+            Arc::new(server_id.clone()),
+            SyncGate::new(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = serve(listener, server, ServerConfig::default()).await;
+        });
+
+        let allowlist = vec![server_id.address()];
+        let limit = Limits::default().max_message_bytes;
+
+        // Equal files: the gate passes.
+        let mut socket = connect(&addr.ip().to_string(), addr.port(), limit).await.expect("connect");
+        handshake_client(&mut socket, &client_id, &allowlist, limit).await.expect("hello");
+        verify_config_hashes(&mut socket, &peers, &client_validators, limit)
+            .await
+            .expect("equal hashes must pass");
+
+        // Our validators file changes: the server's copy stays at v1, so the very next
+        // bootstrap must reject. Nothing is written back to the server's file.
+        std::fs::write(&client_validators, "validators-v2").expect("rewrite validators");
+        assert_eq!(std::fs::read(&server_validators).unwrap(), b"validators-v1");
+        let mut socket = connect(&addr.ip().to_string(), addr.port(), limit).await.expect("connect");
+        handshake_client(&mut socket, &client_id, &allowlist, limit).await.expect("hello");
+        let err = verify_config_hashes(&mut socket, &peers, &client_validators, limit)
+            .await
+            .expect_err("changed validators must fail");
+        assert!(matches!(err, TransportError::ConfigMismatch("validators.jsonl")), "got: {err:?}");
     }
 }

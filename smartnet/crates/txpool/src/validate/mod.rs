@@ -443,6 +443,30 @@ impl<T: PoolTransaction> ValidPoolTransaction<T> {
         self.transaction.clone_into_consensus()
     }
 
+    /// `SmartNet` native-only cancellation: a zero-value, empty-calldata, non-blob, non-auth
+    /// transaction at the same sender+nonce may replace a plain native coin transfer without the
+    /// usual +10% price bump.
+    ///
+    /// Native transfers pay the configured fixed price, so a wallet cannot offer a legal higher
+    /// fee; requiring a bump made "cancel" impossible. Token/contract/blob replacements keep the
+    /// bump. The cancel may not lower either fee field — same price, never a cheaper replay.
+    pub(crate) fn is_native_same_fee_cancel_of(&self, cancel: &Self) -> bool {
+        let plain_native = |tx: &T| {
+            !tx.is_create() &&
+                tx.input().is_empty() &&
+                tx.blob_versioned_hashes().is_none_or(|hashes| hashes.is_empty()) &&
+                tx.authorization_list().is_none_or(|list| list.is_empty())
+        };
+        // `self` is the existing tx; `cancel` is the replacement candidate.
+        plain_native(&self.transaction) &&
+            plain_native(&cancel.transaction) &&
+            !self.transaction.value().is_zero() &&
+            cancel.transaction.value().is_zero() &&
+            cancel.max_fee_per_gas() >= self.max_fee_per_gas() &&
+            cancel.max_priority_fee_per_gas().unwrap_or_default() >=
+                self.max_priority_fee_per_gas().unwrap_or_default()
+    }
+
     /// Determines whether a candidate transaction (`maybe_replacement`) is underpriced compared to
     /// an existing transaction in the pool.
     ///

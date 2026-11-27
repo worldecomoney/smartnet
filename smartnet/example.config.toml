@@ -4,9 +4,9 @@
 #
 # Required keys (a missing/empty/unparseable value aborts startup with an error that lists
 # all problems at once and names the key): HOME_DIR_PATH, DATADIR_PATH, CROSS_BLOCK_CACHE_SIZE,
-# MESH_PORT, MESH_ADDR, GPO_DEFAULT_SUGGESTED_FEE — plus HTTP_PORT and HTTP_ADDR for a plain
-# node only (SEAL/BRIDGE roles are mesh-only and do not run RPC) — plus the validator-section
-# keys listed below when SEAL = true.
+# MESH_PORT, MESH_ADDR, FIXED_GAS_PRICE_WEI and GPO_DEFAULT_SUGGESTED_FEE — plus HTTP_PORT
+# and HTTP_ADDR for a plain node only (SEAL/BRIDGE roles are mesh-only and do not run RPC)
+# — plus the validator-section keys listed below when SEAL = true.
 # HOME_DIR_PATH is the ONLY absolute path in this file. Its leading `~/` is substituted once
 # against $HOME. DATADIR_PATH, KEY_PATH, PASSWORD_FILE, MESH_PEERS_FILE and VAL_FILE are all
 # relative to it: runtime path = HOME_DIR_PATH + <key value>.
@@ -96,8 +96,20 @@ CROSS_BLOCK_CACHE_SIZE = 128
 # never a spendability or balance rule. Absent = 0.02 ether (20000000000000000 wei).
 #MIN_TO_TXPOOL_ENTRY = 20000000000000000
 
-# --- gas price oracle -------------------------------------------------------
-# Must be >= SMARTNET_FIXED_GAS_PRICE_WEI (238095238095); 0 is rejected.
+# Txpool-entry FILTER (`TXPOOL_MARGIN`, optional integer 0..=5) — NOT the fixed native fee below.
+# Filters FRESH NATIVE COIN TXS on declared fee at txpool admission (RPC + mesh rumor) only;
+# never on block assembly or block acceptance. Absent or 0 = no filter; 1 = exact fixed price;
+# 2 = fixed/2 .. fixed*2; ... 5 = fixed/5 .. fixed*5. Out-of-range values abort boot.
+#TXPOOL_MARGIN = 0
+
+# --- fixed fee (single source) ----------------------------------------------
+# Authoritative protocol gas price (wei/gas). Headers, txpool, sealer and wallet quotes all
+# read this one value at boot; 0 is rejected. Ships as 0.005 coins / 21,000 gas.
+FIXED_GAS_PRICE_WEI = 238095238095
+
+# --- gas price oracle (legacy compat) ---------------------------------------
+# Parsed for drift guards only; wallet quotes are pinned from FIXED_GAS_PRICE_WEI above.
+# Kept required for existing configs; 0 is still rejected.
 GPO_DEFAULT_SUGGESTED_FEE = 238095238095
 
 # --- MESH --------------------------------------------------------------------
@@ -114,7 +126,7 @@ MESH_PORT = 41700
 # Mesh listen address — where the MESH_PORT listener binds. Required. "0.0.0.0" = all
 # interfaces; set a specific interface address to restrict the listener. This is bind-only:
 # peer entries still carry the address other nodes dial (127.0.0.1 for a single host).
-MESH_ADDR = "0.0.0.0"
+MESH_ADDR = "127.0.0.1"
 
 # Mesh peer file — one JSON object per line, re-read on every spread (membership changes
 # need no restart). Relative to HOME_DIR_PATH (here: ~/.smartnet/mainnet.jsonl). When absent
@@ -122,7 +134,7 @@ MESH_ADDR = "0.0.0.0"
 # holding the file is a startup error. Absolute values and `~` are rejected.
 # `address` is the peer's 0x Ethereum identity (legacy `key_id` is still accepted).
 # Sample:
-#   {"address":"0x24..31","url":"","ip":"127.0.0.1","port_range":41811,"active":true,"valid":true}
+#   {"address":"0x..","url":"","ip":"127.0.0.1","port_range":41811,"active":true,"valid":true}
 MESH_PEERS_FILE = "mainnet.jsonl"
 
 # Max size of a single mesh WebSocket frame, in megabytes — covers the largest rumor the
@@ -154,21 +166,15 @@ NODE_HEARTBEAT = 500
 VAL_FILE = "validators.jsonl"
 
 # Mesh-only role: with SEAL = true the RPC listener is off and the HTTP_* keys are optional.
-SEAL = true
+SEAL = false
 
 ALLOW_EMPTY = false
-
-# Total txs one seal pass processes: the pool snapshot is truncated to the oldest N
-# pending txs (pool arrival, FIFO) before the state prefetch and the selection read it.
-# Optional — absent/blank keeps 512, 0 is rejected. Per-class narrowing (native / heavy /
-# …) comes later; the per-class caps below already bound what enters a block.
-TXPOOL_VAL_MAX_TXS = 512
 
 # Per-class caps: what each class may contribute to one sealed block (native transfer /
 # ERC-20 transfer / contract create / NFT). Absent or blank = the defaults below; 0 is
 # rejected (a zero cap would silently select nothing for that class). For load tests,
-# raise MAX_NATIVE_PER_BLOCK together with TXPOOL_VAL_MAX_TXS — the snapshot truncation
-# binds first, so raising only the per-class cap still seals at the snapshot size.
+# raise MAX_NATIVE_PER_BLOCK together with TXPOOL_VAL_MAX_TXS (in the txpool block below)
+# — the snapshot truncation binds first, so raising only the cap still seals at that size.
 MAX_NATIVE_PER_BLOCK = 64
 MAX_ERC_20_PER_BLOCK = 32
 MAX_CONTRACTS_PER_BLOCK = 1
@@ -187,18 +193,26 @@ KEY_PATH = "keystore"
 # File read for the keystore password, relative to HOME_DIR_PATH (here: ~/.smartnet/pw.txt).
 # `""` means "prompt on the terminal" (no built-in path exists in the code). The headless
 # mesh-identity load requires a password file — an interactive prompt is unavailable at boot.
-PASSWORD_FILE = "password.txt"
+PASSWORD_FILE = "pw.txt"
 
 # --- txpool tx lifetimes (TTL-POOL.md) --------------------------------------
 # QUEUED (future-nonce) txs expire after this many seconds: the pool maintenance sweep
-# evicts external queued txs past their TTL. Default 28800 s = 8 h (operator band 4-16 H).
-# Entry/maintenance policy only — never consensus.
-TXPOOL_QUEUED_TTL_SECS = 28800
+# evicts external queued txs past their TTL, on canonical events AND on a 60 s timer, so a
+# stalled chain cannot strand them. This key is the SINGLE SOURCE OF TRUTH: the value is used
+# verbatim, 1..=600 accepted (10-minute ceiling), anything else is a boot error — no silent
+# clamp, no code override. Entry/maintenance policy only — never consensus.
+TXPOOL_QUEUED_TTL_SECS = 600
 
 # PENDING (executable) tx cap in seconds: 0 = no cap (a pending tx stays until included,
 # replaced, invalidated, or evicted under pool pressure). Set >0 (6-24 H band) to sweep
 # external pending txs older than the cap.
 TXPOOL_PENDING_TTL_SECS = 0
+
+# Validator's own pick count: at most N txs from the pool snapshot it fetches are picked
+# up for one seal pass (oldest first, FIFO); the node serves the full pool, uncapped by
+# this key. Optional — absent/blank keeps 512, 0 is rejected. Per-class narrowing comes
+# later; the per-block caps above already bound what enters a block.
+TXPOOL_VAL_MAX_TXS = 512
 
 # --- RPC batch policy limits -------------------------------------------------
 # Per-batch class budgets of the batch-policy middleware (better-than-deny: admitted
@@ -215,12 +229,4 @@ RPC_BATCH_TX_MAX = 128
 RPC_BATCH_HEAVY_TX_MAX = 16
 RPC_BATCH_HEAVY_MAX = 1
 RPC_BATCH_READ_MAX = 1024
-
-# --- seed-tx (`smartnet seed-tx`) --------------------------------------------
-# Recipient of the seed transfer. Zero address is rejected.
-#SEED_TX_TO = "0x<recipient-address>"
-# Amount in wei. 0 is rejected. Guidance for a test transfer: 1000000000000000 (0.001 ETH).
-#SEED_TX_VALUE_WEI = 1000000000000000
-# Gas limit of the seed transfer. 0 is rejected. A plain transfer needs 21000.
-#SEED_TX_GAS_LIMIT = 21000
 

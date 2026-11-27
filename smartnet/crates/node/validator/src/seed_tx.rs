@@ -19,11 +19,11 @@ pub(crate) struct SeedTxArgs {
     pub node_url: String,
     /// Encrypted keystore + password in RAM; no decrypted key is retained between calls.
     pub key: KeystoreMaterial,
-    /// `SEED_TX_TO` from config — never a hard-coded recipient.
+    /// Derived from the keystore identity; `SEED_TX_TO` was removed from config.
     pub to: Address,
-    /// `SEED_TX_VALUE_WEI` from config — never a hard-coded amount.
+    /// Merged-flow default (0.001 coins); `SEED_TX_VALUE_WEI` was removed from config.
     pub value_wei: U256,
-    /// `SEED_TX_GAS_LIMIT` from config — never a hard-coded gas limit.
+    /// Merged-flow default for a plain transfer; `SEED_TX_GAS_LIMIT` was removed from config.
     pub gas_limit: u64,
     pub chain_id: u64,
     /// `RPC_TIMEOUT_MS` from config — per-request HTTP timeout.
@@ -55,8 +55,8 @@ pub(crate) async fn seed_tx(args: &SeedTxArgs) -> Result<()> {
         .await
         .wrap_err("eth_getTransactionCount(pending)")?;
 
-    // Legacy type-0 tx shape with an explicit gas price. SmartNet runs London-compatible
-    // execution (baseFeePerGas present from genesis/London@1), so legacy txs are accepted
+    // Legacy type-0 tx shape with an explicit gas price. New SmartNet headers carry the
+    // configured fixed baseFeePerGas (no fee-era block boundary), so legacy txs are accepted
     // as long as gas_price >= base fee. Use the protocol fixed gas price to ensure the
     // seed tx is valid and will be mined.
     let tx = TransactionRequest::default()
@@ -66,9 +66,7 @@ pub(crate) async fn seed_tx(args: &SeedTxArgs) -> Result<()> {
         .with_nonce(nonce)
         .with_gas_limit(args.gas_limit)
         .with_chain_id(chain_id)
-        .with_gas_price(
-            calibri_lite_consensus::pre_consensus::SMARTNET_FIXED_GAS_PRICE_WEI as u128,
-        );
+        .with_gas_price(smartnet_chainspec::fixed_gas_price_wei() as u128);
 
     let envelope = tx.build(&wallet).await.wrap_err("sign transaction locally")?;
     drop(wallet);

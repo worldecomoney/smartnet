@@ -29,10 +29,7 @@ use smartnet_node_core::{
     version::{version_metadata, CLIENT_CODE},
 };
 use smartnet_payload_builder::{PayloadBuilderHandle, PayloadStore};
-use smartnet_rpc::{
-    eth::{core::EthRpcConverterFor, EthApiTypes, FullEthApiServer},
-    AdminApi,
-};
+use smartnet_rpc::eth::{core::EthRpcConverterFor, EthApiTypes, FullEthApiServer};
 use smartnet_rpc_api::IntoEngineApiRpcModule;
 use smartnet_rpc_builder::{
     config::SmartnetRpcServerConfig,
@@ -401,14 +398,6 @@ impl<Node: FullNodeComponents, EthApi: EthApiTypes> RpcHandle<Node, EthApi> {
     /// Returns the `EthApi` instance of the rpc server.
     pub const fn eth_api(&self) -> &EthApi {
         self.rpc_registry.registry.eth_api()
-    }
-
-    /// Returns an instance of the [`AdminApi`] for the rpc server.
-    pub fn admin_api(&self) -> AdminApi<Node::Network, Node::Pool>
-    where
-        <Node::Types as NodeTypes>::ChainSpec: EthereumHardforks,
-    {
-        self.rpc_registry.registry.admin_api()
     }
 }
 

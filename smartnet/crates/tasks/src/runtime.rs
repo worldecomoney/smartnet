@@ -593,6 +593,14 @@ impl Runtime {
         self.spawn_critical_as(name, fut, TaskKind::Blocking)
     }
 
+    /// Number of tasks still holding a graceful-shutdown guard.
+    ///
+    /// Used by the final protocol: the marker task itself holds one guard, so it waits until
+    /// this count drops to `1` before writing `SHUTDOWN_CLEAN`.
+    pub fn graceful_tasks_remaining(&self) -> usize {
+        self.0.graceful_tasks.load(Ordering::SeqCst)
+    }
+
     /// This spawns a critical task onto the runtime.
     ///
     /// If this task panics, the [`TaskManager`] is notified.

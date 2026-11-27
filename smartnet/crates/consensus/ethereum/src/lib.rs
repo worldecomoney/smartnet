@@ -51,17 +51,18 @@ pub use validation::validate_block_post_execution;
 /// **Intentionally dead.** `SmartNet` uses fixed fees rather than EIP-1559 dynamic base fees.
 /// Ethereum's `validate_against_parent_eip1559_base_fee` computes the expected base fee from
 /// the parent using EIP-1559 elasticity and denominator parameters; `SmartNet`'s
-/// `child_base_fee_per_gas` returns a protocol constant (`SMARTNET_FIXED_GAS_PRICE_WEI ≈ 238.1
-/// gwei`), identical on every block. The parent-derived EIP-1559 formula would reject every
-/// `SmartNet` block whose base fee is the fixed constant instead of the EIP-1559-derived value.
+/// `child_base_fee_per_gas` returns the operator's configured fixed price
+/// (`FIXED_GAS_PRICE_WEI`, ≈ 238.1 gwei by default), identical on every new block. The
+/// parent-derived EIP-1559 formula would reject every `SmartNet` block — and it would also
+/// reject honest legacy history whose base fee was different (even zero), which is why the
+/// same flag now skips the London "base fee present" check as well.
 ///
 /// ## Future Replacement
 ///
-/// The `SmartNet` replacement for the skipped Ethereum base-fee check now exists
-/// (`doc/FEES-CURR.md`): `beacon_pre_consensus` enforces that a present `baseFeePerGas`
-/// equals `SMARTNET_FIXED_GAS_PRICE_WEI` (absent stays legal for pre SmartNet-era headers).
-/// A maximum timestamp-gap rule is **deferred** — see `24H.md`. Neither re-enables an
-/// Ethereum EIP-1559 check.
+/// Historical fee fields are deliberately never checked: imported/synced headers may carry
+/// any base fee (including none or zero) and are accepted as-is. The `SmartNet` fixed price is
+/// enforced only on current wallet txs and in the RPC quotes (`doc/FEES-CURR.md`); no Ethereum
+/// EIP-1559 transition rule is re-enabled. A maximum timestamp-gap rule is **deferred**.
 #[derive(Debug, Clone)]
 pub struct EthBeaconConsensus<ChainSpec> {
     /// Configuration
@@ -305,7 +306,12 @@ where
         }
         validate_header_extra_data(header, self.max_extra_data_size)?;
         validate_header_gas(header)?;
-        validate_header_base_fee(header, &self.chain_spec)?;
+        // Legacy imported/synced headers may predate the fee era entirely: no base fee at all
+        // is legal, and a present one is never compared to the fixed price here. SmartNet's
+        // runtime profile already skips the sibling EIP-1559 parent check above.
+        if !self.skip_eip1559_transition_checks {
+            validate_header_base_fee(header, &self.chain_spec)?;
+        }
 
         // EIP-4895: Beacon chain push withdrawals as operations
         if self.chain_spec.is_shanghai_active_at_timestamp(header.timestamp()) &&

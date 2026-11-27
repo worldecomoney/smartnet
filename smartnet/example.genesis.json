@@ -1,21 +1,16 @@
 {
   "config": {
     "chainId": 315,
-    "home": "MARS",
-    "consensus": "calibri-lite",
-    "timestamp": "0x675fd019",
-    "gasLimit": "0x47b760",
-  },
-  "calibri-lite": {
-       "quorum": 1,
-       "period": 1
-  },
-  "alloc": {
-    "86..BC": {
-      "balance": "0x20000000000000000000"
-    }, 
-   "55..cB": {
-      "balance": "0x20000000000000000000"
+    "calibri-lite": {
+      "quorum": 3
     }
   },
+  "timestamp": "0x675fd019",
+  "gasLimit": "0x47b760",
+  "coinbase": "0x0000000000000000000000000000000000000000",
+  "alloc": {
+    "868982Fb4c603e437C521C19cE20b39BE9c77DBC": {
+      "balance": "0x20000000000000000000"
+    }
+  }
 }

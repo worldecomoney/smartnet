@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Phase 4 / T0-GATE helper — read-only checks + optional empty seal.
 # Usage:
-#   export SMARTNET_CONFIG=~/.smartnet/node/config.toml   # optional (node config)
+#   export SMARTNET_CONFIG=~/.smartnet/config.toml       # optional (shared node/validator config)
 #   export SMARTNET_RPC=http://<HTTP_ADDR>:<HTTP_PORT>    # required — from the node config
 #   export ERC20_CONTRACT=0x…                             # required for the ERC20 probes
-#   export VALIDATOR_CONFIG=~/.smartnet/validator/config.toml  # optional
+#   # Validator runs in-process from the same canonical config (SEAL/ALLOW_EMPTY); no separate validator config.
 #   ./scripts/phase4-runtime-gate.sh check
 #   ./scripts/phase4-runtime-gate.sh run-once-empty
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 BIN="${REPO}/bin"
-CONFIG="${SMARTNET_CONFIG:-${HOME}/.smartnet/node/config.toml}"
+CONFIG="${SMARTNET_CONFIG:-${HOME}/.smartnet/config.toml}"
 # No built-in endpoint and no built-in contract: both are operator data.
 RPC="${SMARTNET_RPC:?set SMARTNET_RPC (HTTP_ADDR/HTTP_PORT from $CONFIG)}"
 ERC20="${ERC20_CONTRACT:?set ERC20_CONTRACT}"
@@ -32,13 +32,9 @@ case "$cmd" in
     ;;
   run-once-empty)
     echo "head before:"; rpc '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
-    # Config-driven: NODE_URL / COINBASE / ALLOW_EMPTY come from the validator config
-    # (CLI flags for them no longer exist).
-    if [ -n "${VALIDATOR_CONFIG:-}" ]; then
-      "$BIN/smartnet-validator" --config "$VALIDATOR_CONFIG"
-    else
-      "$BIN/smartnet-validator"
-    fi
+    # No one-shot validator CLI: SEAL = true + ALLOW_EMPTY = true in the shared config make
+    # the node's heartbeat seal the empty block. The node runs until signalled to stop.
+    "$BIN/smartnet" --config "$CONFIG"
     echo "head after:"; rpc '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
     ;;
   *)

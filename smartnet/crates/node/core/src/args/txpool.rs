@@ -526,6 +526,7 @@ impl SmartnetTransactionPoolConfig for TxPoolArgs {
                 default_price_bump: self.price_bump,
                 replace_blob_tx_price_bump: self.blob_transaction_price_bump,
             },
+            native_same_fee_cancel: crate::txpool_policy::txpool_policy().native_same_fee_cancel,
             minimal_protocol_basefee: self.minimal_protocol_basefee,
             minimum_priority_fee: self.minimum_priority_fee,
             gas_limit: self.enforced_gas_limit,
@@ -615,7 +616,9 @@ mod tests {
         assert_eq!(args.max_tx_input_bytes, 131_072);
         assert_eq!(args.max_cached_entries, 100);
         assert_eq!(args.max_batch_size, 1);
-        assert_eq!(args.max_queued_lifetime, Duration::from_secs(28_800));
+        // Operator ruling 2026-11-22: 10-minute hard ceiling (was 8 h) so a future-nonce tx
+        // cannot strand the pool when the chain stops producing canonical events.
+        assert_eq!(args.max_queued_lifetime, Duration::from_secs(600));
         assert_eq!(args.additional_validation_tasks, 1);
         CommandParser::<TxPoolArgs>::parse_from(["smartnet"]);
     }

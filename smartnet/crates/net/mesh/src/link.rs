@@ -38,6 +38,25 @@ pub(crate) struct PendingRumor {
     pub(crate) ack: oneshot::Sender<()>,
 }
 
+/// Peers rejected by the bootstrap config-hash gate, held **only in memory for this
+/// process**. `mark` is called when a link's post-HELLO hash exchange fails; `targets()`
+/// filters these out so no further rumor is sent to them. Nothing is written to any peer
+/// file and a restart clears the set (the peer gets one fresh bootstrap chance).
+#[derive(Debug, Clone, Default)]
+pub struct RejectedPeers(Arc<Mutex<HashSet<(String, u16)>>>);
+
+impl RejectedPeers {
+    /// Mark `ip:port` as rejected for the rest of this process.
+    pub fn mark(&self, ip: &str, port: u16) {
+        self.0.lock().expect("rejected peers lock poisoned").insert((ip.to_owned(), port));
+    }
+
+    /// Whether `ip:port` failed the bootstrap config gate.
+    pub fn is_rejected(&self, ip: &str, port: u16) -> bool {
+        self.0.lock().expect("rejected peers lock poisoned").contains(&(ip.to_owned(), port))
+    }
+}
+
 /// Per-link connectivity + birth time (grace window for the very first connect).
 #[derive(Debug)]
 pub(crate) struct LinkState {
@@ -78,6 +97,8 @@ pub struct LinkPool {
     limits: Limits,
     identity: Arc<Identity>,
     peers_file: PathBuf,
+    validators_file: PathBuf,
+    rejected: RejectedPeers,
     injector: Arc<dyn Injector>,
     seen: Arc<SeenCache>,
     objects: Arc<ObjectCache>,
@@ -94,12 +115,25 @@ impl LinkPool {
         limits: Limits,
         identity: Arc<Identity>,
         peers_file: PathBuf,
+        validators_file: PathBuf,
+        rejected: RejectedPeers,
         injector: Arc<dyn Injector>,
         seen: Arc<SeenCache>,
         objects: Arc<ObjectCache>,
         gate: Arc<SyncGate>,
     ) -> Self {
-        Self { links: Mutex::default(), limits, identity, peers_file, injector, seen, objects, gate }
+        Self {
+            links: Mutex::default(),
+            limits,
+            identity,
+            peers_file,
+            validators_file,
+            rejected,
+            injector,
+            seen,
+            objects,
+            gate,
+        }
     }
 
     /// Queue sender for `ip:port`, spawning the peer's link task on first use.
@@ -118,6 +152,8 @@ impl LinkPool {
             self.limits,
             self.identity.clone(),
             self.peers_file.clone(),
+            self.validators_file.clone(),
+            self.rejected.clone(),
             self.injector.clone(),
             self.seen.clone(),
             self.objects.clone(),
@@ -168,6 +204,8 @@ async fn link_task(
     limits: Limits,
     identity: Arc<Identity>,
     peers_file: PathBuf,
+    validators_file: PathBuf,
+    rejected: RejectedPeers,
     injector: Arc<dyn Injector>,
     seen: Arc<SeenCache>,
     objects: Arc<ObjectCache>,
@@ -184,6 +222,8 @@ async fn link_task(
             limits,
             identity.as_ref(),
             &peers_file,
+            &validators_file,
+            &rejected,
             &injector,
             &seen,
             &objects,
@@ -203,6 +243,11 @@ async fn link_task(
                 // dead peer. Idempotent — a later successful bootstrap overwrites
                 // with real tips.
                 gate.note_bootstrap(&format!("{ip}:{port}"), 0, 0);
+                // A config-hash mismatch marked this peer false in memory for this process:
+                // stop reconnecting. `targets()` filters it out of all future spreads.
+                if rejected.is_rejected(&ip, port) {
+                    return;
+                }
             }
         }
         // At-most-once while down: drop what queued during the gap (bounded memory);
@@ -215,5 +260,24 @@ async fn link_task(
         }
         sleep(backoff).await;
         backoff = (backoff * 2).min(ws::RECONNECT_MAX);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_peers_is_in_memory_shared_and_port_specific() {
+        let set = RejectedPeers::default();
+        assert!(!set.is_rejected("127.0.0.1", 30811));
+        set.mark("127.0.0.1", 30811);
+        assert!(set.is_rejected("127.0.0.1", 30811));
+        assert!(!set.is_rejected("127.0.0.1", 30812));
+        assert!(!set.is_rejected("127.0.0.2", 30811));
+        // Clones share the same set (Arc) so the link task and the spreader agree.
+        let clone = set.clone();
+        clone.mark("127.0.0.2", 9999);
+        assert!(set.is_rejected("127.0.0.2", 9999));
     }
 }

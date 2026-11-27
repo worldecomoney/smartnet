@@ -125,7 +125,9 @@ where
                     Ok(Either::Right(Err(fcu_error))) => {
                         error!(target: "engine::stream::reorg", %fcu_error, "Error on reorg forkchoice update");
                     }
-                    Err(_) => {}
+                    Err(err) => {
+                        warn!(target: "engine::stream::reorg", %err, "reorg response channel closed before response");
+                    }
                 };
                 continue;
             }

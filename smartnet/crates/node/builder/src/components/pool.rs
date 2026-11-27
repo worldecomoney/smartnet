@@ -200,10 +200,10 @@ where
             validator,
             ordering,
             blob_store,
-            pool_config.clone(),
+            pool_config,
         );
 
-        spawn_maintenance_tasks(ctx, transaction_pool.clone(), &pool_config)?;
+        spawn_maintenance_tasks(ctx, transaction_pool.clone())?;
 
         Ok(transaction_pool)
     }
@@ -249,10 +249,17 @@ where
             .clone()
             .unwrap_or_else(|| data_dir.txpool_transactions());
 
+        // Same TTLs maintenance uses, so a backup older than the node's own policy is
+        // discarded instead of reinserting transactions that would have been swept.
+        let policy = smartnet_node_core::txpool_policy::txpool_policy();
         let transactions_backup_config =
-            smartnet_transaction_pool::maintain::LocalTransactionBackupConfig::with_local_txs_backup(
-                transactions_path,
-            );
+            smartnet_transaction_pool::maintain::LocalTransactionBackupConfig {
+                queued_ttl: policy.queued_ttl,
+                pending_ttl: policy.pending_ttl,
+                ..smartnet_transaction_pool::maintain::LocalTransactionBackupConfig::with_local_txs_backup(
+                    transactions_path,
+                )
+            };
 
         ctx.task_executor().spawn_critical_with_graceful_shutdown_signal(
             "local transactions backup task",
@@ -272,7 +279,6 @@ where
 fn spawn_pool_maintenance_task<Node, Pool>(
     ctx: &BuilderContext<Node>,
     pool: Pool,
-    pool_config: &PoolConfig,
 ) -> eyre::Result<()>
 where
     Node: FullNodeTypes<Types: NodeTypes<ChainSpec: EthereumHardforks>>,
@@ -284,6 +290,9 @@ where
     let chain_events = ctx.provider().canonical_state_stream();
     let client = ctx.provider().clone();
 
+    // Every node owns and cleanses its own txpool: read the pinned node policy and hand the
+    // explicit TTLs and sweep cadence to the pool. No hidden pool-side globals.
+    let policy = smartnet_node_core::txpool_policy::txpool_policy();
     ctx.task_executor().spawn_critical_task(
         "txpool maintenance task",
         smartnet_transaction_pool::maintain::maintain_transaction_pool_future(
@@ -292,8 +301,9 @@ where
             chain_events,
             ctx.task_executor().clone(),
             smartnet_transaction_pool::maintain::MaintainPoolConfig {
-                max_tx_lifetime: pool_config.max_queued_lifetime,
-                no_local_exemptions: pool_config.local_transactions_config.no_exemptions,
+                queued_ttl: policy.queued_ttl,
+                pending_ttl: policy.pending_ttl,
+                ttl_sweep_interval: policy.sweep_interval,
                 ..Default::default()
             },
         ),
@@ -306,7 +316,6 @@ where
 pub fn spawn_maintenance_tasks<Node, Pool>(
     ctx: &BuilderContext<Node>,
     pool: Pool,
-    pool_config: &PoolConfig,
 ) -> eyre::Result<()>
 where
     Node: FullNodeTypes<Types: NodeTypes<ChainSpec: EthereumHardforks>>,
@@ -316,7 +325,7 @@ where
     Pool::Transaction: PoolTransaction<Consensus = TxTy<Node::Types>>,
 {
     spawn_local_backup_task(ctx, pool.clone())?;
-    spawn_pool_maintenance_task(ctx, pool, pool_config)?;
+    spawn_pool_maintenance_task(ctx, pool)?;
     Ok(())
 }
 

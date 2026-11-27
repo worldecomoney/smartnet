@@ -75,6 +75,13 @@ pub fn extra_data_validators(extra_data: &[u8]) -> Vec<Address> {
     parse_extra_data_validators(extra_data).unwrap_or_default()
 }
 
+/// `SmartNet` chain identity: a genesis carrying a validator section in `extraData`. This is the
+/// same signal the consensus runtime profile and node bootstrap use; the legacy `config.clique`
+/// object is inert and must never gate fee policy (see `GENESIS-LEGACY-CONFIG.md`).
+pub fn is_smartnet_genesis(genesis: &Genesis) -> bool {
+    !extra_data_validators(&genesis.extra_data).is_empty()
+}
+
 /// Calibri\* genesis defaults (GENESIS.md): absent keys are **replaced by defaults in
 /// the DB at init** — the operator's file stays minimal. Only applies when the file is
 /// NOT legacy clique (`config.clique` absent — the legacy path is never touched).

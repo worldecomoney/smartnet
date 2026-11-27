@@ -514,18 +514,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alloy-rpc-types-admin"
-version = "2.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2144d5b2866e651796eac0a997d3b5a056449c12e0d91be3184129e0c722885"
-dependencies = [
- "alloy-genesis",
- "alloy-primitives",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "alloy-rpc-types-anvil"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6266,6 +6254,7 @@ dependencies = [
  "alloy-primitives",
  "serde",
  "serde_json",
+ "smartnet-primitives-traits",
  "tracing",
 ]
 
@@ -6330,7 +6319,6 @@ version = "3.7.2"
 dependencies = [
  "alloy-genesis",
  "alloy-primitives",
- "calibri-lite-consensus",
  "clap",
  "eyre",
  "futures",
@@ -6355,7 +6343,6 @@ dependencies = [
  "smartnet-rpc-server-types",
  "smartnet-tasks",
  "smartnet-tracing",
- "smartnet-transaction-pool",
  "smartnet-validator",
  "tempfile",
  "tokio",
@@ -7299,7 +7286,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-client",
  "alloy-rpc-types",
- "alloy-rpc-types-admin",
  "alloy-rpc-types-beacon",
  "alloy-rpc-types-debug",
  "alloy-rpc-types-engine",
@@ -7371,7 +7357,6 @@ dependencies = [
  "alloy-json-rpc",
  "alloy-primitives",
  "alloy-rpc-types",
- "alloy-rpc-types-admin",
  "alloy-rpc-types-anvil",
  "alloy-rpc-types-beacon",
  "alloy-rpc-types-debug",
@@ -8068,6 +8053,7 @@ dependencies = [
  "smartnet-chainspec",
  "smartnet-db",
  "smartnet-fs-util",
+ "smartnet-node-core",
  "smartnet-payload-types",
  "smartnet-provider",
  "smartnet-timing",

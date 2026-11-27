@@ -1,0 +1,9 @@
+# CODEOWNERS placeholder.
+#
+# This checkout has no configured GitHub remote and no org/team is documented,
+# so no owner is asserted rather than inventing one. Owner assignment is a
+# tracked "not done" item in IMP-06 / doc/ROADMAP.md.
+#
+# When a remote exists, replace the lines below with real owners, e.g.:
+#   * @org/team
+#   /doc/ @org/docs-team

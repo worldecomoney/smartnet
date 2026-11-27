@@ -4,30 +4,33 @@
 //! The chair never needs the EVM layer to "mine" funds: against a bridge mandate that is
 //! on-net and verifiable it builds and signs an **ordinary native transaction** to the
 //! bridge's node address — `value` = the mandate's exact amount, `data` = the mandate
-//! payload — and appends it to the block it is sealing. At execution the DOOR (see
+//! payload — and appends it to the block it is sealing. At execution the GATE (see
 //! `EthEvm::transact_raw`: the balance check switched off only for the block sealer's own
 //! transactions) lets it through whatever the chair holds: the recipient is credited and
 //! the chair is never debited below zero — mimicking minting. Every credit therefore
 //! lives on chain as a real transaction record; nothing is added silently.
 //!
 //! "chair only" is enforced in two mechanical places and never in here: this fn signs
-//! with exactly the key it is given (the chair's), and the door only opens for the header
-//! beneficiary — which `check_seal` has already proven is the SELECT chair. The chair
-//! itself signs only against a verified mandate — the mint authority is the chair's
-//! approval, nothing else.
+//! with exactly the key it is given (the chair's), and the gate only opens for the header
+//! beneficiary. `check_seal` proves the block's **seal signer** is the SELECT chair; the
+//! beneficiary equals that chair by producer convention, **not** by a receiving-side
+//! check. The chair itself signs only
+//! against a verified mandate — the mint authority is the chair's approval, nothing else.
+//! Mandate verification / the dedicated receipt input is the design intent of the GATE;
+//! the bridge-side wiring is still pending (`BRIDGE-TODO.md` §3, finding G-3).
 
 use alloy_consensus::{SignableTransaction, TxEnvelope, TxLegacy};
 use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
 use eyre::Result;
 use k256::ecdsa::SigningKey;
-use smartnet_chainspec::SMARTNET_FIXED_GAS_PRICE_WEI;
+use smartnet_chainspec::fixed_gas_price_wei;
 
 /// THE fn (operator: "make 1 distinct fn that can tx out by chair only ignoring it's own
 /// balance, mimiking minting") — build and sign one native `value + data` transfer from
 /// the chair: a bridge mandate issuance, the 0.01 WEM authorization, whatever the chair
 /// must say on chain.
 ///
-/// The fn **never consults any balance** — that is its entire point; the door at
+/// The fn **never consults any balance** — that is its entire point; the gate at
 /// execution settles the money side. The tx is priced at the protocol fixed fee and
 /// carries exactly the intrinsic gas of a plain transfer with this calldata, so nothing
 /// is ever over-paid.
@@ -52,7 +55,7 @@ pub fn tx_out(
     let tx = TxLegacy {
         chain_id: Some(chain_id),
         nonce,
-        gas_price: u128::from(SMARTNET_FIXED_GAS_PRICE_WEI),
+        gas_price: u128::from(fixed_gas_price_wei()),
         gas_limit,
         to: TxKind::Call(to),
         value,
@@ -121,7 +124,7 @@ mod tests {
         assert_eq!(tx.to, TxKind::Call(BRIDGE));
         assert_eq!(tx.value, U256::from(10).pow(U256::from(18)));
         assert_eq!(tx.input, Bytes::from_static(b"mandate-1"));
-        assert_eq!(tx.gas_price, u128::from(SMARTNET_FIXED_GAS_PRICE_WEI), "fixed-fee policy");
+        assert_eq!(tx.gas_price, u128::from(fixed_gas_price_wei()), "fixed-fee policy");
         assert!(tx.gas_limit >= 21_000, "the issuance covers its own intrinsic gas");
     }
 

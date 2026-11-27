@@ -12,7 +12,7 @@
 use crate::{
     identity::Identity,
     inject::Injector,
-    link::{LinkPool, PendingRumor},
+    link::{LinkPool, PendingRumor, RejectedPeers},
     peers::{self, PeerEntry},
     protocol::Limits,
     rumor::Rumor,
@@ -38,6 +38,8 @@ use tracing::{debug, info, warn};
 pub struct SpreadConfig {
     /// Path of the peer file (`mainnet.jsonl`), re-read per spread.
     pub peers_file: PathBuf,
+    /// Path of `validators.jsonl`. Hashed together with the peer file at link bootstrap.
+    pub validators_file: PathBuf,
     /// Our own mesh listen port — entries with this port are skipped as self.
     pub self_port: u16,
     /// How long one spread waits for the peers' delivery acks.
@@ -53,11 +55,18 @@ impl SpreadConfig {
     pub fn new(peers_file: impl Into<PathBuf>, self_port: u16, identity: Arc<Identity>) -> Self {
         Self {
             peers_file: peers_file.into(),
+            validators_file: PathBuf::new(),
             self_port,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             limits: Limits::default(),
             identity,
         }
+    }
+
+    /// Sets the `validators.jsonl` path used by the bootstrap config-hash gate.
+    pub fn with_validators_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.validators_file = path.into();
+        self
     }
 }
 
@@ -77,6 +86,8 @@ pub struct SpreadReport {
 pub struct Spreader {
     config: SpreadConfig,
     links: Arc<LinkPool>,
+    /// In-memory, process-lifetime set of peers rejected at the config-hash gate.
+    rejected: RejectedPeers,
     missing_file_warned: AtomicBool,
 }
 
@@ -92,10 +103,13 @@ impl Spreader {
         objects: Arc<ObjectCache>,
         gate: Arc<SyncGate>,
     ) -> Self {
+        let rejected = RejectedPeers::default();
         let links = Arc::new(LinkPool::new(
             config.limits,
             config.identity.clone(),
             config.peers_file.clone(),
+            config.validators_file.clone(),
+            rejected.clone(),
             injector,
             seen,
             objects,
@@ -104,6 +118,7 @@ impl Spreader {
         Self {
             config,
             links,
+            rejected,
             missing_file_warned: AtomicBool::new(false),
         }
     }
@@ -148,14 +163,24 @@ impl Spreader {
             }
         };
 
-        let parsed = peers::parse_peers(&content);
+        let mut parsed = peers::parse_peers(&content);
         for error in &parsed.errors {
             warn!(target: "smartnet::mesh", path = %self.config.peers_file.display(), %error, "mesh peer line skipped");
         }
+        // Label our own entry in the in-RAM peer set. Inert: the filter below is the only
+        // behavior and it still uses `is_target`.
+        PeerEntry::mark_self(
+            &mut parsed.peers,
+            Some(self.config.self_port),
+            self.config.identity.address(),
+        );
         parsed
             .peers
             .into_iter()
-            .filter(|peer| peer.is_target(self.config.self_port, self.config.identity.address()))
+            .filter(|peer| {
+                !self.rejected.is_rejected(&peer.ip, peer.port_range)
+                    && peer.is_target(self.config.self_port, self.config.identity.address())
+            })
             .collect()
     }
 

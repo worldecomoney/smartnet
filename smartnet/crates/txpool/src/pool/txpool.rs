@@ -1416,6 +1416,8 @@ pub(crate) struct AllTransactions<T: PoolTransaction> {
     pending_fees: PendingFees,
     /// Configured price bump settings for replacements
     price_bumps: PriceBumpConfig,
+    /// Node policy switch for same-fee native cancellations (the pool only enforces it).
+    native_same_fee_cancel: bool,
     /// How to handle [`TransactionOrigin::Local`](crate::TransactionOrigin) transactions.
     local_transactions_config: LocalTransactionConfig,
     /// All accounts with a pooled authorization
@@ -1430,6 +1432,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         Self {
             max_account_slots: config.max_account_slots,
             price_bumps: config.price_bumps,
+            native_same_fee_cancel: config.native_same_fee_cancel,
             local_transactions_config: config.local_transactions_config.clone(),
             minimal_protocol_basefee: config.minimal_protocol_basefee,
             block_gas_limit: config.gas_limit,
@@ -2073,8 +2076,13 @@ impl<T: PoolTransaction> AllTransactions<T> {
                 let existing_transaction = entry.get().transaction.as_ref();
                 let maybe_replacement = transaction.as_ref();
 
-                // Ensure the new transaction is not underpriced
-                if existing_transaction.is_underpriced(maybe_replacement, &self.price_bumps) {
+                // Node policy: a native no-op cancel of a plain native transfer may replace at
+                // the same fixed fee (there is no legal higher price). Everything else still
+                // needs the configured bump.
+                if !(self.native_same_fee_cancel &&
+                    existing_transaction.is_native_same_fee_cancel_of(maybe_replacement)) &&
+                    existing_transaction.is_underpriced(maybe_replacement, &self.price_bumps)
+                {
                     return Err(InsertErr::Underpriced {
                         transaction: pool_tx.transaction,
                         existing: *entry.get().transaction.hash(),
@@ -2235,6 +2243,7 @@ impl<T: PoolTransaction> Default for AllTransactions<T> {
             last_seen_block_hash: Default::default(),
             pending_fees: Default::default(),
             price_bumps: Default::default(),
+            native_same_fee_cancel: true,
             local_transactions_config: Default::default(),
             auths: Default::default(),
             metrics: Default::default(),
@@ -2379,6 +2388,94 @@ mod tests {
 
         let inserted = pool.txs.get(&valid_tx.transaction_id).unwrap();
         assert_eq!(inserted.subpool, SubPool::Pending);
+    }
+
+    /// `SmartNet`: a zero-value native no-op replaces a plain native transfer at the SAME fixed
+    /// fee — no +10% bump (there is no legal higher price for a native coin transfer).
+    #[test]
+    fn native_same_fee_cancel_replaces_without_bump() {
+        let balance = U256::MAX;
+        let mut f = MockTransactionFactory::default();
+        let mut pool = AllTransactions::default();
+
+        let native = MockTransaction::eip1559()
+            .with_value(U256::from(100))
+            .with_gas_price(100);
+        let original = f.validated(native.clone());
+        pool.insert_tx(original.clone(), balance, 0, true).unwrap();
+
+        // Same sender + nonce, zero value, empty input, SAME fee, different hash.
+        let cancel = native.clone().with_value(U256::ZERO).rng_hash();
+        assert_eq!(cancel.sender(), native.sender());
+        assert_eq!(*cancel.get_nonce(), *native.get_nonce());
+        assert_eq!(cancel.get_gas_price(), native.get_gas_price());
+
+        let cancel = f.validated(cancel);
+        let InsertOk { replaced_tx, .. } =
+            pool.insert_tx(cancel.clone(), balance, 0, true).unwrap();
+        let replaced = replaced_tx.expect("same-fee native cancel must replace the original");
+        assert_eq!(*replaced.0.hash(), *original.hash());
+        assert!(pool.contains(cancel.hash()));
+        assert!(!pool.contains(original.hash()));
+    }
+
+    /// A lower-fee "cancel" never qualifies for the bypass and stays underpriced.
+    #[test]
+    fn native_cancel_with_lower_fee_is_rejected() {
+        let balance = U256::MAX;
+        let mut f = MockTransactionFactory::default();
+        let mut pool = AllTransactions::default();
+
+        let native = MockTransaction::eip1559()
+            .with_value(U256::from(100))
+            .with_gas_price(100);
+        let original = f.validated(native.clone());
+        pool.insert_tx(original.clone(), balance, 0, true).unwrap();
+
+        let cheaper = native.with_value(U256::ZERO).with_gas_price(90).rng_hash();
+        let err = pool.insert_tx(f.validated(cheaper), balance, 0, true).unwrap_err();
+        assert!(matches!(err, InsertErr::Underpriced { .. }), "got: {err:?}");
+        assert!(pool.contains(original.hash()));
+    }
+
+    /// The node's policy switch governs the bypass: when off, the +10% bump applies again.
+    #[test]
+    fn native_cancel_respects_node_policy_switch() {
+        let balance = U256::MAX;
+        let mut f = MockTransactionFactory::default();
+        let config = PoolConfig { native_same_fee_cancel: false, ..Default::default() };
+        let mut pool = AllTransactions::new(&config);
+
+        let native = MockTransaction::eip1559()
+            .with_value(U256::from(100))
+            .with_gas_price(100);
+        let original = f.validated(native.clone());
+        pool.insert_tx(original, balance, 0, true).unwrap();
+
+        let cancel = native.with_value(U256::ZERO).rng_hash();
+        let err = pool.insert_tx(f.validated(cancel), balance, 0, true).unwrap_err();
+        assert!(matches!(err, InsertErr::Underpriced { .. }), "got: {err:?}");
+    }
+
+    /// Calldata (token/contract) replacements keep the +10% bump — the native bypass does not
+    /// leak to any non-native transfer.
+    #[test]
+    fn contract_call_cancel_still_requires_price_bump() {
+        let balance = U256::MAX;
+        let mut f = MockTransactionFactory::default();
+        let mut pool = AllTransactions::default();
+
+        let call = MockTransaction::eip1559()
+            .with_value(U256::from(100))
+            .with_input(alloy_primitives::Bytes::from(vec![1u8, 2, 3]))
+            .with_gas_price(100);
+        let original = f.validated(call.clone());
+        pool.insert_tx(original, balance, 0, true).unwrap();
+
+        // Same fee, empty input: plain-native guard fails because the ORIGINAL carries calldata.
+        let cancel = call.with_value(U256::ZERO).with_input(Default::default()).rng_hash();
+        let err = pool.insert_tx(f.validated(cancel), balance, 0, true).unwrap_err();
+        assert!(matches!(err, InsertErr::Underpriced { .. }), "got: {err:?}");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use alloy_primitives::U256;
 use alloy_rpc_types_eth::{BlockNumberOrTag, FeeHistory};
 use futures::{Future, StreamExt};
 use smartnet_primitives_traits::BlockBody;
-use smartnet_chainspec::{ChainSpecProvider, EthChainSpec, SMARTNET_FIXED_GAS_PRICE_WEI};
+use smartnet_chainspec::{fixed_gas_price_wei, ChainSpecProvider, EthChainSpec};
 use smartnet_rpc_eth_types::{
     fee_history::calculate_reward_percentiles_for_block, utils::checked_blob_gas_used_ratio,
     EthApiError, FeeHistoryCache, FeeHistoryEntry, GasPriceOracle, RpcInvalidTransactionError,
@@ -317,18 +317,16 @@ where
 
     /// `SmartNet` fixed-fee quote: the total wallet-facing price per gas unit.
     ///
-    /// On chains whose genesis carries a seal config the whole fee is policy, not a market, so
-    /// every wallet-facing fee quote derives from one configured total
-    /// (`GPO_DEFAULT_SUGGESTED_FEE`, falling back to the protocol constant). Returns `None`
-    /// on standard Ethereum chains, which keep the gas-price oracle untouched.
+    /// On `SmartNet` chains (validator section in genesis `extraData`) the whole fee is policy,
+    /// not a market, so every wallet-facing fee quote derives from the one configured total
+    /// (`FIXED_GAS_PRICE_WEI`, installed at boot). The legacy `config.clique` object is inert.
+    /// Returns `None` on other chains, which keep the gas-price oracle untouched.
     fn smartnet_total_fee_price(&self) -> Option<U256> {
-        self.provider().chain_spec().genesis().config.clique?;
-        Some(
-            self.gas_oracle()
-                .config()
-                .default_suggested_fee
-                .unwrap_or_else(|| U256::from(SMARTNET_FIXED_GAS_PRICE_WEI)),
-        )
+        let chain_spec = self.provider().chain_spec();
+        if !smartnet_chainspec::is_smartnet_genesis(chain_spec.genesis()) {
+            return None;
+        }
+        Some(U256::from(fixed_gas_price_wei()))
     }
 
     /// Returns the gas price if it is set, otherwise fetches a suggested gas price for legacy
@@ -404,6 +402,17 @@ where
     /// See also: <https://github.com/ethereum/pm/issues/328#issuecomment-853234014>
     fn gas_price(&self) -> impl Future<Output = Result<U256, Self::Error>> + Send {
         async move {
+            // SmartNet: pin the announced legacy price to the configured native fee. A
+            // historical header may carry any base fee (or none) — it is execution input only
+            // and must never push the wallet quote away from what the pool/sealer expect.
+            if let Some(total) = self.smartnet_total_fee_price() {
+                tracing::debug!(
+                    target: "smartnet::cli",
+                    fixed_gas_price = %total,
+                    "eth_gasPrice pinned to configured fixed native price"
+                );
+                return Ok(total);
+            }
             let header = self.provider().latest_header().map_err(Self::Error::from_eth_err)?;
             let suggested_tip = self.suggested_priority_fee().await?;
             let base_fee = header.and_then(|h| h.base_fee_per_gas()).unwrap_or_default();
@@ -455,16 +464,20 @@ where
     {
         async move {
             if let Some(total) = self.smartnet_total_fee_price() {
-                // Emulate the normal `total = base + tip` decomposition on a fixed-price
-                // chain: the base fee already is the whole protocol price, so the tip is
-                // whatever remains of the configured total (zero in the fee era).
-                let base_fee = self
+                // Emulate `total = pending base + tip` on a fixed-price chain. Use the same
+                // pending base fee the new header, txpool and EVM env use — not the latest
+                // historical header's own fee — so type-2 quotes also land on the fixed total.
+                let latest = self
                     .provider()
                     .latest_header()
                     .map_err(Self::Error::from_eth_err)?
-                    .and_then(|header| header.base_fee_per_gas())
-                    .unwrap_or_default();
-                return Ok(smartnet_priority_tip(total, Some(base_fee)));
+                    .ok_or(EthApiError::HeaderNotFound(BlockNumberOrTag::Latest.into()))?;
+                let pending_base_fee = self
+                    .provider()
+                    .chain_spec()
+                    .next_block_base_fee(&latest, latest.timestamp())
+                    .unwrap_or_else(fixed_gas_price_wei);
+                return Ok(smartnet_priority_tip(total, Some(pending_base_fee)));
             }
             self.gas_oracle().suggest_tip_cap().await.map_err(Self::Error::from_eth_err)
         }
@@ -496,6 +509,7 @@ fn clamp_rewards_to_smartnet_policy(rewards: &mut [Vec<u128>], base_fees: &[u128
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smartnet_chainspec::SMARTNET_FIXED_GAS_PRICE_WEI;
 
     #[test]
     fn smartnet_tip_lands_on_total_price() {

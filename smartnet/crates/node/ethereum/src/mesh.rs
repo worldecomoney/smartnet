@@ -251,7 +251,7 @@ pub(crate) struct MeshStart {
 pub(crate) async fn spawn_mesh_service<N, A>(
     ctx: &AddOnsContext<'_, N>,
     eth_api: A,
-) -> MeshStart
+) -> eyre::Result<MeshStart>
 where
     N: FullNodeComponents<
         Types: NodeTypes<
@@ -262,30 +262,27 @@ where
     >,
     A: FullEthApiServer<NetworkTypes = Ethereum, Primitives = EthPrimitives> + Send + Sync + 'static,
 {
-    let port = match mesh_gate(ctx.config.rpc.mesh_port) {
-        Ok(port) => port,
-        Err(reason) => {
-            error!(target: "smartnet::mesh", %reason, "mesh misconfigured — refusing to boot");
-            std::process::exit(1);
-        }
-    };
+    // Return errors instead of calling `process::exit`: the CLI runner must receive the
+    // failure so it can fire graceful shutdown and let the marker task record a clean
+    // shutdown. A hard exit here would leave the next boot to wrongly unwind the chain.
+    let port = mesh_gate(ctx.config.rpc.mesh_port).map_err(|reason| {
+        error!(target: "smartnet::mesh", %reason, "mesh misconfigured — refusing to boot");
+        eyre::eyre!("mesh misconfigured: {reason}")
+    })?;
 
     let peers_file = ctx.config.rpc.mesh_peers_file.clone().unwrap_or_else(default_peers_file);
 
     // Bind first: the mesh is always on, so a busy port is a boot failure, never a silent
     // mesh-off. `MESH_ADDR` absent = all interfaces.
     let bind_addr = ctx.config.rpc.mesh_addr.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-    let listener = match TcpListener::bind((bind_addr, port)).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            error!(
-                target: "smartnet::mesh",
-                %err, port,
-                "mesh listen port unavailable — the mesh is always on, refusing to boot"
-            );
-            std::process::exit(1);
-        }
-    };
+    let listener = TcpListener::bind((bind_addr, port)).await.map_err(|err| {
+        error!(
+            target: "smartnet::mesh",
+            %err, port,
+            "mesh listen port unavailable — the mesh is always on, refusing to boot"
+        );
+        eyre::eyre!("cannot bind mesh listener on {bind_addr}:{port}: {err}")
+    })?;
 
     let tasks = ctx.node.task_executor().clone();
 
@@ -299,13 +296,26 @@ where
     // Mesh identity: the node's keystore, decrypted once — fatal if missing/broken
     // (peers could not authenticate us; the mesh must never boot without an identity).
     let chain_id = smartnet_chainspec::EthChainSpec::chain_id(ctx.config.chain.as_ref());
-    let identity = match load_mesh_identity(ctx.config.config.as_deref(), chain_id) {
-        Ok(identity) => Arc::new(identity),
-        Err(reason) => {
+    let identity = Arc::new(load_mesh_identity(ctx.config.config.as_deref(), chain_id).map_err(
+        |reason| {
             error!(target: "smartnet::mesh", %reason, "mesh identity unavailable — refusing to boot");
-            std::process::exit(1);
-        }
-    };
+            eyre::eyre!("mesh identity unavailable: {reason}")
+        },
+    )?);
+
+    // `validators.jsonl` — the bootstrap config gate hashes it together with the peer file
+    // on every link bootstrap. Resolved from the same config the boot guard and identity
+    // used; unresolvable means the node cannot prove its config, so refuse to boot.
+    let config_path = ctx
+        .config
+        .config
+        .as_deref()
+        .ok_or_else(|| eyre::eyre!("config path is required by mesh identity"))?;
+    let validators_file =
+        crate::validator_registry::load_val_file(config_path).map_err(|reason| {
+            error!(target: "smartnet::mesh", %reason, "validators.jsonl path unavailable — refusing to boot");
+            eyre::eyre!("validators.jsonl path unavailable: {reason}")
+        })?;
 
     // In-process inject: EthApi (txs + chain reads) + consensus engine (blocks) — no
     // loopback round trip. Shared by the inbound server and every link session.
@@ -317,7 +327,9 @@ where
     // One persistent link per peer: keepalive + backoff + the identity handshake live
     // there. The gate starts unfinalized (never ready) until the target set is seeded
     // from the peer-file snapshot below — notes can arrive any time after dialing.
-    let mut spread_config = SpreadConfig::new(peers_file.clone(), port, identity.clone());
+    let mut spread_config =
+        SpreadConfig::new(peers_file.clone(), port, identity.clone())
+            .with_validators_file(validators_file.clone());
     spread_config.limits = limits;
     let gate = SyncGate::new();
     let spreader = Arc::new(Spreader::new(
@@ -330,6 +342,7 @@ where
 
     let server = Arc::new(MeshServer::new(
         peers_file.clone(),
+        validators_file,
         seen.clone(),
         objects.clone(),
         injector,
@@ -377,7 +390,7 @@ where
     let status_spreader = spreader.clone();
     spawn_tx_relay::<N>(ctx.node.clone(), spreader, seen, objects, tasks);
 
-    MeshStart { enabled: true, ready: gate.subscribe(), spreader: status_spreader }
+    Ok(MeshStart { enabled: true, ready: gate.subscribe(), spreader: status_spreader })
 }
 
 /// Canon-state → mesh block rumors (see module docs). Awaited per block for ordering.

@@ -20,7 +20,6 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-mod admin;
 mod aliases;
 mod debug;
 mod engine;
@@ -36,7 +35,6 @@ mod validation;
 mod web3;
 mod wem;
 
-pub use admin::{mesh_node_info, AdminApi};
 pub use aliases::*;
 pub use debug::DebugApi;
 pub use engine::{EngineApi, EngineEthApi};
@@ -49,6 +47,6 @@ pub use smartnet_rpc_convert::RpcTypes;
 pub use trace::TraceApi;
 pub use txpool::TxPoolApi;
 pub use validation::{ValidationApi, ValidationApiConfig};
-pub use web3::Web3Api;
+pub use web3::{mesh_node_info, Web3Api};
 /// Operator extension RPC backend (`wem_*` + `smartnet_*` namespaces on one type).
 pub use wem::OperatorExtensionApi;

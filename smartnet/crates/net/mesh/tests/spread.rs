@@ -36,9 +36,24 @@ fn write_peers(dir: &tempfile::TempDir, lines: &[String]) -> std::path::PathBuf 
     path
 }
 
+/// A stable validators.jsonl beside the peer file, for the bootstrap config-hash gate.
+fn validators_file(path: &std::path::Path) -> std::path::PathBuf {
+    let validators = path.with_file_name("validators.jsonl");
+    if !validators.exists() {
+        std::fs::write(
+            &validators,
+            b"{\"address\":\"0x0000000000000000000000000000000000000001\",\"status\":true}\n",
+        )
+        .expect("write validators");
+    }
+    validators
+}
+
 fn spreader(path: &std::path::Path, self_port: u16) -> Spreader {
+    let validators = validators_file(path);
     Spreader::new(
-        SpreadConfig::new(path, self_port, Arc::new(client_identity())),
+        SpreadConfig::new(path, self_port, Arc::new(client_identity()))
+            .with_validators_file(validators),
         Arc::new(NoopInjector),
         Arc::new(SeenCache::default()),
         Arc::new(ObjectCache::default()),
@@ -205,8 +220,10 @@ async fn dead_peer_releases_the_gate_on_its_first_handshake_try() {
     let path = write_peers(&dir, &[peer_line(&common::server_identity(), dead.port(), true, true)]);
 
     let gate = SyncGate::new();
+    let validators = validators_file(&path);
     let spreader = Spreader::new(
-        SpreadConfig::new(&path, 41_812, Arc::new(client_identity())),
+        SpreadConfig::new(&path, 41_812, Arc::new(client_identity()))
+            .with_validators_file(validators),
         Arc::new(NoopInjector),
         Arc::new(SeenCache::default()),
         Arc::new(ObjectCache::default()),

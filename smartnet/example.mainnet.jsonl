@@ -1,3 +1,4 @@
-{"address": "0x24..31", "url": "", "ip": "127.0.0.1", "port_range": 41711, "active": true, "valid": true}
-{"address": "0x93..42", "url": "", "ip": "127.0.0.1", "port_range": 41722, "active": true, "valid": true}
+{"mesh_protocol_ver": 11, "signed": "", "ts": 0}
+{"address": "0x868982Fb4c603e437C521C19cE20b39BE9c77DBC", "url": "", "ip": "127.0.0.1", "port_range": 41711, "active": true, "valid": true}
+{"address": "0x...", "url": "", "ip": "127.0.0.1", "port_range": 41722, "active": true, "valid": true}
 

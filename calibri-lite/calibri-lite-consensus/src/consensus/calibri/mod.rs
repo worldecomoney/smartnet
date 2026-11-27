@@ -32,8 +32,6 @@ pub type BlockNr = u64;
 /// Errors resolving CALIBRI schedule data from chain genesis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalibriError {
-    /// Genesis has no seal section; CALIBRI stubs cannot derive signers.
-
     /// Failed to parse checkpoint signers from `extraData`.
     SignersParse(String),
     /// Parsed signer list was empty.

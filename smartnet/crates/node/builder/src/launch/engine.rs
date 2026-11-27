@@ -1,7 +1,7 @@
 //! Engine node related functionality.
 
 use crate::{
-    common::{Attached, LaunchContextWith, WithComponents, WithConfigs},
+    common::{Attached, LaunchContextWith, WithConfigs},
     engine_util::EngineMessageStreamExt,
     events::node,
     hooks::NodeHooks,
@@ -31,7 +31,7 @@ use smartnet_node_core::{
 };
 use smartnet_primitives_traits::NodePrimitives;
 use smartnet_provider::{
-    providers::{BlockchainProvider, NodeTypesForProvider},
+    providers::{BlockchainProvider, NodeTypesForProvider, ProviderNodeTypes},
     ProviderFactory, StorageEngine, StorageSettingsCache,
 };
 use smartnet_tasks::{EventSender, TaskExecutor};
@@ -40,6 +40,27 @@ use smartnet_trie_db::ChangesetCache;
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio::sync::{mpsc::unbounded_channel, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
+
+/// THE final shutdown protocol, shared by the command-success, command-error and ctrl+c paths:
+/// after the graceful signal, wait until every **other** graceful task has finalized, then
+/// flush the file tier and write `SHUTDOWN_CLEAN` (flag + timestamp) **last**. The runtime is
+/// dropped only after this returns. A timeout leaves no marker, so the next boot unwinds.
+async fn final_protocol<N: ProviderNodeTypes>(tasks: TaskExecutor, factory: ProviderFactory<N>) {
+    // This task owns one guard; `1` means every other graceful task is done.
+    while tasks.graceful_tasks_remaining() > 1 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let engine = StorageEngine::new(factory, None, 0);
+    if let Some(base) = smartnet_file_tier::base() {
+        match engine.shutdown_clean(base) {
+            Ok(()) => debug!(target: "smartnet::cli", "flushed FS and recorded SHUTDOWN_CLEAN"),
+            Err(err) => error!(target: "smartnet::cli", %err, "failed to record clean shutdown"),
+        }
+    } else {
+        error!(target: "smartnet::cli", "file tier base is unset; cannot record SHUTDOWN_CLEAN");
+    }
+}
 
 /// The engine node launcher.
 #[derive(Debug)]
@@ -162,6 +183,23 @@ impl EngineNodeLauncher {
 
         bootstrap_seq_20_recovery(&ctx, file_tier_base.as_path())?;
 
+        // Register the final protocol immediately after recovery, before any later bootstrap
+        // step can fail. Recovery has just cleared the marker; waiting until components are
+        // attached leaves a window where `with_blockchain_db` / `with_components` can fail with
+        // no task left to record a clean shutdown, and the next boot would wrongly unwind.
+        // The runner fires the graceful signal on success, command error and ctrl+c alike;
+        // `final_protocol` writes the marker only after every other graceful task has finished.
+        let shutdown_marker_factory = ctx.provider_factory().clone();
+        let shutdown_marker_tasks = ctx.task_executor().clone();
+        let final_protocol_tasks = shutdown_marker_tasks.clone();
+        shutdown_marker_tasks.spawn_critical_with_graceful_shutdown_signal(
+            "shutdown final_protocol",
+            move |on_graceful_shutdown| async move {
+                let _guard = on_graceful_shutdown.await;
+                final_protocol(final_protocol_tasks, shutdown_marker_factory).await;
+            },
+        );
+
         let ctx = ctx
             .with_metrics_task()
             // passing FullNodeTypes as type parameter here so that we can build
@@ -171,8 +209,6 @@ impl EngineNodeLauncher {
             })?
             .with_components(components_builder, on_component_initialized)
             .await?;
-
-        bootstrap_seq_30_shutdown_marker(&ctx);
 
         let exex_manager_handle = ExExManagerHandle::empty();
 
@@ -419,70 +455,30 @@ impl EngineNodeLauncher {
     }
 }
 
-/// The launch context after components attach — the receiver type of the shutdown-marker
-/// bootstrap phase (keeps the helper signature readable). The chain-spec type is a
-/// parameter (not `T::Types::ChainSpec`) because type aliases cannot elaborate
-/// associated-type bounds.
-type WithComponentsCtx<ChainSpec, T, CB> =
-    LaunchContextWith<Attached<WithConfigs<ChainSpec>, WithComponents<T, CB>>>;
-
-    /// Bootstrap phase 20 — crash recovery (RECOVERY.md §4–5).
-    ///
-    /// The clean-shutdown flag decides whether recovery runs; both the check and the
-    /// recovery must happen before anything reads the DB head (the blockchain provider,
-    /// and `ctx.max_block`). Delegates to [`StorageEngine::recover_on_boot`]: reconcile
-    /// half-finished seals, then on a cold restart run `restore_unwind(2)` (the only
-    /// unwind) — drop the last 2 FS lines, truncate the DB to `BX`, re-sync from
-    /// `BX + 1`. Fatal on failure: reconcile only fails on genuine on-disk corruption
-    /// (a lone `.gz.tmp` with neither its `.jsonl` source nor a sealed `.gz`), and it
-    /// runs before a single read or write of the file tier or the DB.
-    fn bootstrap_seq_20_recovery<T>(
-        ctx: &LaunchContextWith<Attached<WithConfigs<T::ChainSpec>, ProviderFactory<T>>>,
-        file_tier_base: &std::path::Path,
-    ) -> eyre::Result<()>
-    where
-        T: smartnet_provider::providers::ProviderNodeTypes,
-    {
-        let engine = StorageEngine::new(ctx.provider_factory().clone(), None, 0);
-        let bx = engine
-            .recover_on_boot(file_tier_base)
-            .map_err(|err| eyre::eyre!("crash recovery failed: {err}"))?;
-        info!(target: "smartnet::cli", bx, "recovery complete; head at BX, re-syncing from BX + 1");
-        Ok(())
-    }
-
-    /// Bootstrap phase 30 — clean-shutdown marker.
-    ///
-    /// On a graceful exit — ctrl+c or SIGTERM — the runtime fires the shutdown signal;
-    /// this task runs [`StorageEngine::shutdown_clean`] (flush FS, then write
-    /// `SHUTDOWN_CLEAN` last). Holding the guard keeps `graceful_tasks` > 0 so
-    /// `graceful_shutdown_with_timeout` waits for both to finish before the runtime
-    /// (and the database) is dropped. A crash (SIGKILL, panic, power loss) never fires
-    /// the signal, so the flag stays absent and the next boot runs recovery.
-    fn bootstrap_seq_30_shutdown_marker<T, CB>(
-        ctx: &WithComponentsCtx<<T::Types as NodeTypes>::ChainSpec, T, CB>,
-    )
-    where
-        T: FullNodeTypes<Types: NodeTypesForProvider>,
-        CB: NodeComponentsBuilder<T>,
-    {
-        let shutdown_marker_factory = ctx.provider_factory().clone();
-        ctx.task_executor().spawn_critical_with_graceful_shutdown_signal(
-            "shutdown marker",
-            move |on_graceful_shutdown| async move {
-                let _guard = on_graceful_shutdown.await;
-                let engine =
-                    StorageEngine::new(shutdown_marker_factory.clone(), None, 0);
-                if let Some(base) = smartnet_file_tier::base() {
-                    match engine.shutdown_clean(base) {
-                        Ok(()) => debug!(target: "smartnet::cli", "flushed FS and recorded SHUTDOWN_CLEAN"),
-                        Err(err) => error!(target: "smartnet::cli", %err, "failed to record clean shutdown"),
-                    }
-                }
-            },
-        );
-    }
-
+/// Bootstrap phase 20 — crash recovery (RECOVERY.md §4–5).
+///
+/// The clean-shutdown flag decides whether recovery runs; both the check and the
+/// recovery must happen before anything reads the DB head (the blockchain provider,
+/// and `ctx.max_block`). Delegates to [`StorageEngine::recover_on_boot`]: reconcile
+/// half-finished seals, then on a cold restart run `restore_unwind(2)` (the only
+/// unwind) — drop the last 2 FS lines, truncate the DB to `BX`, re-sync from
+/// `BX + 1`. Fatal on failure: reconcile only fails on genuine on-disk corruption
+/// (a lone `.gz.tmp` with neither its `.jsonl` source nor a sealed `.gz`), and it
+/// runs before a single read or write of the file tier or the DB.
+fn bootstrap_seq_20_recovery<T>(
+    ctx: &LaunchContextWith<Attached<WithConfigs<T::ChainSpec>, ProviderFactory<T>>>,
+    file_tier_base: &std::path::Path,
+) -> eyre::Result<()>
+where
+    T: smartnet_provider::providers::ProviderNodeTypes,
+{
+    let engine = StorageEngine::new(ctx.provider_factory().clone(), None, 0);
+    let bx = engine
+        .recover_on_boot(file_tier_base)
+        .map_err(|err| eyre::eyre!("crash recovery failed: {err}"))?;
+    info!(target: "smartnet::cli", bx, "recovery complete; head at BX, re-syncing from BX + 1");
+    Ok(())
+}
 
 impl<T, CB, AO> LaunchNode<NodeBuilderWithComponents<T, CB, AO>> for EngineNodeLauncher
 where

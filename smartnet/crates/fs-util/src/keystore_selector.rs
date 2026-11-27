@@ -95,7 +95,7 @@ pub fn select_keystore(key_dir: &Path, coinbase: Option<Address>) -> Result<Path
          (the key is gathered, never named)",
         files.len(),
         key_dir.display()
-    )
+    );
 }
 
 /// True when the filename ends in `address` after `UTC--…--`, with or without `0x`, in any case.

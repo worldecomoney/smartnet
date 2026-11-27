@@ -61,4 +61,4 @@ Gas price is the chain-fixed `238095238095` wei; chain id 315.
 - ERC-20 bench needs a deployed token first: `txsend deploy <bytecode.hex>`.
 - `TXSEND_DUMP=1` prints every request body (RPC framing debug).
 - Point load tests at the **validator** RPC directly to bypass lossy tx gossip (see
-  repo `2-MESH-LOCAL.md` for gossip findings).
+  repo `doc/MESH-PAYLOAD-PROTOCOL.md` for the current mesh/gossip behavior).

@@ -23,6 +23,7 @@
 - All Cities like Istanbul, London, etc.. is gone, now it's all Mars! Support is mixed.
 
 # 1 - MUST KEEP AS IS — NEVER TOUCH !!!
+## Explicid permission needed/required to conduct such changes!
 
 - EVM and executor functionality !
 - Smart-contract core !
@@ -36,20 +37,23 @@
 
 # 2 - DO NOT
 
-- do not over-engineer
 - do not fix what is not broken
 - do not replace working blocks with your "better" design
 - do not invent anything, consult, play along with the team
 - do not do shady/background fixes without reporting first no matter how small, collect all to todo first
 - do not do stuff that was not asked from you, do not try to be just helpful, follow designer lead, play along with the team
 - do not abuse build, it still does some network activity, do only when many changes is done
+- do not put all md files in doc/ by default just because you think is ever-lasting and/or important, dump all requested .md's into repo root first and let operator to decide if it needs to be moved
 
 # Special cases, IMPORTANT:
 
+ - all root repo .md files are temporary except of 3 files this one AGENTS, CONTRIBUTING and README, all files in doc/subdirs are temporary, so if you want to commit lasting docs data use doc/ directory, those .md files will survive
+ - on codebase/docs review in case of code-doc contradiciton check if this item present in TODO, mark it accordingly, or else correct docs with CURRENT and OLD/PLANNED whatever contradicts the code.
  - this repo is very heavily modified Reth v2.1, it is not a fork of Reth per-se, it is inspired by and used as a base to
  - we follow KISS ideology, DO NOT over-engineer anything, smart things always simple
 build most efficient client for a private EVM compatible network, no Ethereum legacy must be preserved, it is not an Ethereum node.
- - when you read md files make sure you check their creation time, fresh files data always outweigh the old file data in case of contradiction!
+ - when you read md files make sure you check their creation time, fresh files data always outweigh the old file data in case of contradiction! Do not use this rule blindly, some outdated docs may have a few cxurrent changes,
+they will have a fresh modified date but that does not make them src of truth, check all first and use this rule with caution.
  - if/when operator asks to compress md files use younger data prevails rule to construct/compile new file.
  - commit rule: no partial commits unless absolutely necessary; after each and any meaningful green build (tests + lint pass), do one full `commit All` of the whole repo — never leave changes uncommitted across a green checkpoint.
 

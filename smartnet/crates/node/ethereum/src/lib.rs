@@ -33,5 +33,8 @@ pub mod validator;
 /// Node-owned validator registry (`VAL_FILE`, `get_val_all`, `get_val_chair`).
 pub mod validator_registry;
 
+/// Fatal bootstrap precondition: both `validators.jsonl` and `mainnet.jsonl` must be loaded.
+pub mod bootstrap_files;
+
 /// Mesh service — closed-list all-to-all gossip over `POST /rumor` (replaces devp2p).
 pub(crate) mod mesh;

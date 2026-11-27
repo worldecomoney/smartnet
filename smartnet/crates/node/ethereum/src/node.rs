@@ -411,7 +411,7 @@ where
         // used to spawn lazily on first spread, so a quiet chain never caught up at
         // boot), and the engine loop is already running so those in-process injects are
         // answered. The gate receiver below is how boot learns catch-up finished.
-        let mesh = crate::mesh::spawn_mesh_service(&ctx, eth_api.clone()).await;
+        let mesh = crate::mesh::spawn_mesh_service(&ctx, eth_api.clone()).await?;
         let mesh_enabled = mesh.enabled;
         // The status line's "X nodes connected" reading — taken here because `mesh.ready`
         // is moved into the sync-gate wait just below; `eth_api` moves into the heartbeat
@@ -718,7 +718,7 @@ where
         // Devp2p/kademlia neutralized (p2p2mesh.md Stage 2): no discovery, no 30303
         // listener, no "P2P networking initialized". Gossip runs on the mesh
         // (smartnet-mesh) and block acquisition on rpc-sync; this component stays an
-        // inert Noop so FullNodeComponents, net_*/admin_* RPC, events and the pipeline
+        // inert Noop so FullNodeComponents, net_* RPC, events and the pipeline
         // wiring keep compiling until Stage 3 detaches them for good.
         debug!(
             target: "smartnet::cli",
@@ -750,7 +750,7 @@ where
             Some(config_path) => Some(crate::validator_registry::load_val_file(config_path)?),
             None => None,
         };
-        Ok(build_eth_consensus(ctx.chain_spec(), val_file.as_deref()))
+        build_eth_consensus(ctx.chain_spec(), val_file.as_deref())
     }
 }
 
@@ -780,47 +780,44 @@ where
 /// Calibri-Lite runtime profile is applied (max extraData, the profile detected from
 /// the genesis, the London/Paris shape warnings).
 ///
-/// `val_file` is the registry path from the operator's `VAL_FILE` key. The registry is
-/// loaded from that file only — the consensus gate never guesses a location. `None` is
-/// only for in-process test builders that carry no config file; it leaves the gate
-/// unloaded (fail closed).
+/// `val_file` is the registry path from the operator's `VAL_FILE` key. The key may be absent
+/// or blank — the node-owned scaffold then looks in the launch directory and under
+/// `HOME_DIR_PATH` and errors if neither holds the file. A keyed path that cannot be read is
+/// also a hard boot error. `None` is only for in-process test builders that carry no config
+/// file; it leaves the gate unloaded.
 pub fn build_eth_consensus<ChainSpec>(
     chain_spec: Arc<ChainSpec>,
     val_file: Option<&Path>,
-) -> Arc<EthBeaconConsensus<ChainSpec>>
+) -> eyre::Result<Arc<EthBeaconConsensus<ChainSpec>>>
 where
     ChainSpec: EthChainSpec + EthereumHardforks + core::fmt::Debug + Send + Sync + 'static,
 {
     // The node-owned registry (statuses included) is the authority the gate answers from —
     // loaded ONCE at bootstrap from `VAL_FILE` so every block this node sees is gate-checked.
-    // An unreadable file leaves the array empty: the gate then fails closed for this chain
-    // (no enabled validator ⇒ no block validates).
-    if let Some(registry_path) = val_file
-        && let Err(err) = crate::validator_registry::load_validators(registry_path)
-    {
-        warn!(
-            target: "smartnet::cli",
-            %err,
-            path = %registry_path.display(),
-            "validator registry unreadable — the validator gate will fail closed (no block validates)"
-        );
+    // A configured registry that cannot be read is a hard boot error; the node must not run
+    // with the seal gate silently unloaded.
+    if let Some(registry_path) = val_file {
+        crate::validator_registry::load_validators(registry_path).map_err(|err| {
+            eyre::eyre!(
+                "validator registry unreadable ({}) : {err} — refusing to start",
+                registry_path.display()
+            )
+        })?;
+        // The bootstrap guard already loaded and labelled the registry; this load replaces
+        // the RAM array, so re-apply the inert self-label.
+        if let Some(address) = crate::bootstrap_files::self_address() {
+            calibri_lite_consensus::registry::mark_self(address);
+        }
     }
 
     let mut consensus = EthBeaconConsensus::new(chain_spec.clone());
     let genesis_cfg = &chain_spec.genesis().config;
     // The Calibri-Lite consensus setup keys on the genesis carrying a validator section in
     // `extraData` (the legacy `config.clique` object is inert; see `GENESIS-LEGACY-CONFIG.md`).
-    if !smartnet_chainspec::extra_data_validators(chain_spec.genesis().extra_data.as_ref()).is_empty()
-    {
-        if genesis_cfg.london_block.is_none() && chain_spec.is_london_active_at_block(1) {
-            warn!(
-                target: "smartnet::cli",
-                event = "CALIBRI_LITE_TX_COMPAT_PROFILE",
-                london_execution_from_block = 1,
-                "Calibri Lite execution compatibility profile active (EIP-1559/type-2 for wallet/EVM; not consensus identity)"
-            );
-        }
-        if chain_spec.is_paris_active_at_block(1) {
+    if smartnet_chainspec::is_smartnet_genesis(chain_spec.genesis()) {
+        // No hard-coded Istanbul→London boundary: wallet/EVM compatibility (type-0/type-2) is
+        // uniform, and import/sync picks the EVM spec from each header's own shape.
+        if genesis_cfg.terminal_total_difficulty.is_some() {
             warn!(
                 target: "smartnet::cli",
                 event = "CALIBRI_LITE_GENESIS_MERGE_FIELDS",
@@ -838,5 +835,5 @@ where
         }
     }
 
-    Arc::new(consensus)
+    Ok(Arc::new(consensus))
 }

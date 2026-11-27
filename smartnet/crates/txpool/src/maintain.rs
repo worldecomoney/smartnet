@@ -40,48 +40,20 @@ use std::{
 };
 use tokio::{
     sync::oneshot,
-    time::Duration,
+    time::{interval, Duration, MissedTickBehavior},
 };
 use tracing::{debug, error, info, trace, warn};
 
-/// Default amount of time non-executable (future-nonce) transactions are queued.
+/// Default/ceiling for how long non-executable (future-nonce) transactions stay queued.
 ///
-/// Operator band 4–16 H (TODO item 3 / `TTL-POOL.md`); exposed as the
-/// `TXPOOL_QUEUED_TTL_SECS` config key — the value the operator's bootstrap pins wins.
-pub const MAX_QUEUED_TRANSACTION_LIFETIME: Duration = Duration::from_secs(8 * 60 * 60);
+/// The node pins the real TTL from `TXPOOL_QUEUED_TTL_SECS` (validated `1..=600` at boot) and
+/// passes it into [`MaintainPoolConfig`]. This constant is only the fallback for programmatic
+/// launches: a future-nonce tx that cannot ever execute must not park the pool indefinitely.
+pub const MAX_QUEUED_TRANSACTION_LIFETIME: Duration = Duration::from_secs(10 * 60);
 
 /// Default pending (executable) tx lifetime cap: **none** — pending txs stay until included,
-/// replaced, or invalidated (the operator's "until…" clause). A cap becomes active ONLY when
-/// the operator sets `TXPOOL_PENDING_TTL_SECS` (their 6–24 H window). See `TTL-POOL.md` §3.
+/// replaced, or invalidated. The node sets a cap only with `TXPOOL_PENDING_TTL_SECS > 0`.
 pub const DEFAULT_PENDING_TX_LIFETIME: Option<Duration> = None;
-
-// Operator lifetime knobs (TTL-POOL.md §3): set once at node bootstrap from
-// `TXPOOL_QUEUED_TTL_SECS` / `TXPOOL_PENDING_TTL_SECS`; the maintenance task prefers them
-// over `MaintainPoolConfig` values (which carry the code defaults for programmatic launches).
-use std::sync::OnceLock;
-static OPERATOR_QUEUED_TTL: OnceLock<Duration> = OnceLock::new();
-static OPERATOR_PENDING_TTL: OnceLock<Option<Duration>> = OnceLock::new();
-
-/// Pins the operator's queued-tx TTL (seconds) at bootstrap (the maintenance task sweeps
-/// external queued txs older than this). Re-runs are no-ops (`false`).
-pub fn set_operator_queued_ttl_secs(secs: u64) -> bool {
-    OPERATOR_QUEUED_TTL.set(Duration::from_secs(secs)).is_ok()
-}
-
-/// Pins the operator's pending-tx TTL (seconds) at bootstrap: `0` = no cap (today's behavior),
-/// `n>0` = external pending txs older than n seconds are evicted by the maintenance sweep.
-pub fn set_operator_pending_ttl_secs(secs: u64) -> bool {
-    let ttl = if secs == 0 { None } else { Some(Duration::from_secs(secs)) };
-    OPERATOR_PENDING_TTL.set(ttl).is_ok()
-}
-
-fn operator_queued_ttl(fallback: Duration) -> Duration {
-    *OPERATOR_QUEUED_TTL.get().unwrap_or(&fallback)
-}
-
-fn operator_pending_ttl() -> Option<Duration> {
-    *OPERATOR_PENDING_TTL.get().unwrap_or(&DEFAULT_PENDING_TX_LIFETIME)
-}
 
 /// Additional settings for maintaining the transaction pool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,20 +68,17 @@ pub struct MaintainPoolConfig {
     /// Default: 100
     pub max_reload_accounts: usize,
 
-    /// Maximum amount of time non-executable, non local transactions are queued.
-    /// Default: 8 hours (operator band 4–16 H; `TXPOOL_QUEUED_TTL_SECS` wins over this).
-    pub max_tx_lifetime: Duration,
+    /// Non-executable (queued) tx lifetime, supplied by the node's
+    /// `TXPOOL_QUEUED_TTL_SECS` policy (fallback: 10 minutes). Applies to every tx: in a
+    /// mesh-only network there is no meaningful local/external distinction.
+    pub queued_ttl: Duration,
 
-    /// Optional cap on pending (executable) tx lifetime; `None` = no cap (add on request only,
-    /// `TXPOOL_PENDING_TTL_SECS > 0`).
-    pub max_pending_lifetime: Option<Duration>,
+    /// Executable (pending) tx lifetime cap; `None` = no cap. Supplied by the node's
+    /// `TXPOOL_PENDING_TTL_SECS` policy.
+    pub pending_ttl: Option<Duration>,
 
-    /// Apply no exemptions to the locally received transactions.
-    ///
-    /// This includes:
-    ///   - no price exemptions
-    ///   - no eviction exemptions
-    pub no_local_exemptions: bool,
+    /// How often the node's cleansing sweep runs, even with zero canonical events.
+    pub ttl_sweep_interval: Duration,
 }
 
 impl Default for MaintainPoolConfig {
@@ -117,46 +86,47 @@ impl Default for MaintainPoolConfig {
         Self {
             max_update_depth: 64,
             max_reload_accounts: 100,
-            max_tx_lifetime: MAX_QUEUED_TRANSACTION_LIFETIME,
-            max_pending_lifetime: DEFAULT_PENDING_TX_LIFETIME,
-            no_local_exemptions: false,
+            queued_ttl: MAX_QUEUED_TRANSACTION_LIFETIME,
+            pending_ttl: DEFAULT_PENDING_TX_LIFETIME,
+            ttl_sweep_interval: Duration::from_secs(60),
         }
     }
 }
 
-/// Pure stature check the TTL sweeps use (testable): `true` when the tx is past its TTL and
-/// neither local-exempt. `tx.timestamp` is pool-insert time.
+/// Pure staleness check the TTL sweeps use (testable): `true` when the tx is past its TTL.
+/// Origin is irrelevant — in a mesh-only network every tx reaches the pool through the same
+/// in-process RPC semantics, so there is no meaningful local/external distinction.
+/// `tx.timestamp` is pool-insert time.
 fn is_stale_by_ttl<T>(
     tx: &Arc<ValidPoolTransaction<T>>,
     now: std::time::Instant,
     ttl: Duration,
-    no_local_exemptions: bool,
 ) -> bool
 where
     T: PoolTransaction,
 {
-    (tx.origin.is_external() || no_local_exemptions) && now.duration_since(tx.timestamp) > ttl
+    now.duration_since(tx.timestamp) > ttl
 }
 
-/// TTL stale-eviction sweep (event-driven; DAEMON.md §4.2): removes pool transactions past
-/// their bucket TTL. Invoked from the chain-event pass on every canonical commit/reorg, so no
-/// free-running timer exists — the TTLs bound *what* is evicted, the event bounds *when* we
-/// look for it.
+/// TTL stale-eviction sweep: removes pool transactions past their bucket TTL.
+///
+/// Invoked from the chain-event pass on every canonical commit/reorg **and** from a periodic
+/// timer in the maintenance loop. The timer exists because a stalled chain emits no canonical
+/// event; the TTLs still bound *what* is evicted, the two triggers bound *when* we look.
 fn sweep_stale_by_ttl<P>(
     pool: &P,
     queued_ttl: Duration,
     pending_ttl: Option<Duration>,
-    no_local_exemptions: bool,
 ) where
     P: TransactionPoolExt,
 {
     let mut stale_blobs = Vec::new();
     let now = std::time::Instant::now();
-    // Queued bucket: external future-nonce txs past their TTL.
+    // Queued bucket: future-nonce txs past their TTL, regardless of origin.
     let stale_queued: Vec<_> = pool
         .queued_transactions()
         .into_iter()
-        .filter(|tx| is_stale_by_ttl(tx, now, queued_ttl, no_local_exemptions))
+        .filter(|tx| is_stale_by_ttl(tx, now, queued_ttl))
         .map(|tx| {
             if tx.is_eip4844() {
                 stale_blobs.push(*tx.hash());
@@ -169,7 +139,7 @@ fn sweep_stale_by_ttl<P>(
         Some(pending) => pool
             .pending_transactions()
             .into_iter()
-            .filter(|tx| is_stale_by_ttl(tx, now, pending, no_local_exemptions))
+            .filter(|tx| is_stale_by_ttl(tx, now, pending))
             .map(|tx| *tx.hash())
             .collect(),
         None => Vec::new(),
@@ -188,12 +158,20 @@ fn sweep_stale_by_ttl<P>(
 pub struct LocalTransactionBackupConfig {
     /// Path to transactions backup file
     pub transactions_path: Option<PathBuf>,
+    /// Queued-tx TTL applied by maintenance, used to discard stale backups on reload.
+    pub queued_ttl: Duration,
+    /// Pending-tx TTL cap applied by maintenance, used to discard stale backups on reload.
+    pub pending_ttl: Option<Duration>,
 }
 
 impl LocalTransactionBackupConfig {
     /// Receive path to transactions backup and return initialized config
     pub const fn with_local_txs_backup(transactions_path: PathBuf) -> Self {
-        Self { transactions_path: Some(transactions_path) }
+        Self {
+            transactions_path: Some(transactions_path),
+            queued_ttl: MAX_QUEUED_TRANSACTION_LIFETIME,
+            pending_ttl: DEFAULT_PENDING_TX_LIFETIME,
+        }
     }
 }
 
@@ -273,15 +251,17 @@ pub async fn maintain_transaction_pool<N, Client, P, St>(
     // the future that reloads accounts from state
     let mut reload_accounts_fut = Fuse::terminated();
 
-    // Stale-eviction TTLs: evaluated inside the chain-event pass (sweep_stale_by_ttl runs on
-    // every canonical event; the TTLs bound *what* is evicted, the event bounds *when*).
-    let queued_ttl = operator_queued_ttl(config.max_tx_lifetime);
-    let pending_ttl = operator_pending_ttl().or(config.max_pending_lifetime);
+    // Node-owned cleansing policy: TTLs and cadence arrive in `MaintainPoolConfig`, never from
+    // hidden globals. Applied both on canonical events and on the timer below.
+    let MaintainPoolConfig { queued_ttl, pending_ttl, ttl_sweep_interval, .. } = config;
+    let mut ttl_tick = interval(ttl_sweep_interval);
+    ttl_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     tracing::debug!(
         target: "txpool",
         queued_ttl_secs = queued_ttl.as_secs(),
         pending_ttl_secs = ?pending_ttl.map(|d| d.as_secs()),
-        "txpool TTL sweep configured (runs on canonical events)"
+        sweep_interval_secs = ttl_sweep_interval.as_secs(),
+        "txpool TTL sweep configured by node policy (canonical events + timer)"
     );
 
     // The update loop that waits for new blocks and reorgs and performs pool updated
@@ -355,11 +335,16 @@ pub async fn maintain_transaction_pool<N, Client, P, St>(
         let mut event = None;
         let mut reloaded = None;
 
-        // select of account reloads and new canonical state updates which should arrive at the rate
-        // of the block time
+        // select of account reloads, the TTL timer, and new canonical state updates (which
+        // should arrive at the rate of the block time — but may not when the chain stalls)
         tokio::select! {
             res = &mut reload_accounts_fut =>  {
                 reloaded = Some(res);
+            }
+            // Self-healing sweep: runs even with no canonical event and no account reload.
+            _ = ttl_tick.tick() => {
+                sweep_stale_by_ttl(&pool, queued_ttl, pending_ttl);
+                continue;
             }
             ev = events.next() =>  {
                  if ev.is_none() {
@@ -400,9 +385,9 @@ pub async fn maintain_transaction_pool<N, Client, P, St>(
         // handle the new block or reorg
         let Some(event) = event else { continue };
 
-        // Canonical event arrived: run the TTL stale-eviction sweep here — event-driven, no
-        // free-running timer (DAEMON.md §4.2). TTLs still bound what is evicted.
-        sweep_stale_by_ttl(&pool, queued_ttl, pending_ttl, config.no_local_exemptions);
+        // Canonical event arrived: sweep here too so eviction is not delayed by up to one
+        // timer tick while the chain is moving. The timer branch above covers the stalled case.
+        sweep_stale_by_ttl(&pool, queued_ttl, pending_ttl);
         match event {
             CanonStateNotification::Reorg { old, new } => {
                 handle_canonical_reorg(
@@ -570,8 +555,24 @@ async fn handle_canonical_reorg<N, C, P>(
                 // Note: we no longer know if the tx was local or external
                 // Because the transactions are not finalized, the corresponding blobs are still in
                 // blob store (if we previously received them from the network)
-                metrics.inc_reinserted_transactions(pruned_old_transactions.len());
-                let _ = pool.add_external_transactions(pruned_old_transactions).await;
+                let reinjection_results =
+                    pool.add_external_transactions(pruned_old_transactions).await;
+
+                let mut reinserted = 0usize;
+                let mut rejected = 0usize;
+                for result in reinjection_results {
+                    match result {
+                        Ok(_) => reinserted += 1,
+                        Err(err) => {
+                            rejected += 1;
+                            warn!(target: "txpool", hash = %err.hash, %err, "failed to reinsert transaction after reorg");
+                        }
+                    }
+                }
+                // The existing counter tracks successful reinsertions only; there is no
+                // rejection counter, so failures are reported by the log line above.
+                metrics.inc_reinserted_transactions(reinserted);
+                debug!(target: "txpool", reinserted, rejected, "re-injected transactions after reorg");
 
                 // keep track of new mined blob transactions
                 mstate.blob_store_tracker.add_new_chain_blocks(&new_blocks);
@@ -861,11 +862,28 @@ where
 async fn load_and_reinsert_transactions<P>(
     pool: P,
     file_path: &Path,
+    queued_ttl: Duration,
+    pending_ttl: Option<Duration>,
 ) -> Result<(), TransactionsBackupError>
 where
     P: TransactionPool<Transaction: PoolTransaction<Consensus: SignedTransaction>>,
 {
     if !file_path.exists() {
+        return Ok(());
+    }
+
+    // The backup format has no per-tx insertion timestamp, so the file's mtime is the only
+    // age signal available here. Use the shortest TTL maintenance applies: a backup older
+    // than that holds txs which would already have been swept had the node stayed up.
+    let backup_age = smartnet_fs_util::metadata(file_path)?
+        .modified()
+        .map_err(|err| FsPathError::metadata(err, file_path))?
+        .elapsed()
+        .unwrap_or_default();
+    let max_age = queued_ttl.min(pending_ttl.unwrap_or(queued_ttl));
+    if backup_age > max_age {
+        info!(target: "txpool", txs_file=?file_path, ?backup_age, ?max_age, "skipping stale transaction backup");
+        smartnet_fs_util::remove_file(file_path)?;
         return Ok(());
     }
 
@@ -1000,7 +1018,14 @@ pub async fn backup_local_transactions_task<P>(
         return;
     };
 
-    if let Err(err) = load_and_reinsert_transactions(pool.clone(), &transactions_path).await {
+    if let Err(err) = load_and_reinsert_transactions(
+        pool.clone(),
+        &transactions_path,
+        config.queued_ttl,
+        config.pending_ttl,
+    )
+    .await
+    {
         error!(target: "txpool", "{}", err)
     }
 

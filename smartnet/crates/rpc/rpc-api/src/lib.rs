@@ -9,7 +9,6 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod admin;
 mod anvil;
 mod debug;
 mod engine;
@@ -28,8 +27,8 @@ mod web3;
 mod wem;
 mod wem_engine;
 
-pub use admin::{MeshNodeInfo, MeshPeerEntry};
 pub use smartnet_engine::{SmartNetNewPayloadInput, SmartNetPayloadStatus};
+pub use web3::{MeshNodeInfo, MeshPeerEntry};
 
 /// re-export of all server traits
 pub use servers::*;
@@ -37,7 +36,6 @@ pub use servers::*;
 /// Aggregates all server traits.
 pub mod servers {
     pub use crate::{
-        admin::AdminApiServer,
         debug::{DebugApiServer, DebugExecutionWitnessApiServer},
         engine::{EngineApiServer, EngineEthApiServer, IntoEngineApiRpcModule},
         mev::{MevFullApiServer, MevSimApiServer},
@@ -68,7 +66,6 @@ pub use clients::*;
 #[cfg(feature = "client")]
 pub mod clients {
     pub use crate::{
-        admin::AdminApiClient,
         anvil::AnvilApiClient,
         debug::{DebugApiClient, DebugExecutionWitnessApiClient},
         engine::{EngineApiClient, EngineEthApiClient},

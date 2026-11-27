@@ -43,7 +43,7 @@ fn main() {
     }) {
         // Display only: `{err:?}` makes eyre print its capture `Location:` and backtrace,
         // which is noise for an operator-facing boot failure (e.g. a busy HTTP-RPC port).
-        eprintln!("Error: {err}");
+        eprintln!("Error: {err:#}");
         std::process::exit(1);
     }
 }

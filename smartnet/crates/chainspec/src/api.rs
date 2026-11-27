@@ -87,21 +87,29 @@ impl<H: BlockHeader> EthChainSpec for ChainSpec<H> {
         self.chain
     }
 
-    /// `SmartNet` fixed-fee policy: chains whose genesis carries a seal config pin the protocol
-    /// gas price into every header (`doc/FEES-CURR.md`), so the "next" base fee is the
-    /// constant — never the EIP-1559 elasticity formula. This keeps every consumer
-    /// (fee-history, tx-pool, pending-block env, wallet quotes) on the same value the
-    /// validator will seal. Standard Ethereum specs keep the default calculation.
+    /// Pending/next-block base fee. On `SmartNet` the configured fixed price is the single
+    /// source for new headers, the txpool pending fee, the EVM env and wallet quotes — no
+    /// EIP-1559 market math and no hard-coded Istanbul→London block boundary
+    /// (`doc/FEES-CURR.md`). Chain identity is the validator section in genesis `extraData`;
+    /// the legacy `config.clique` object is inert and does NOT gate this policy.
+    ///
+    /// Flexible fallback for other specs: use the parent header's own `baseFeePerGas` when it
+    /// is present; when the header has none, fall back to the configured price instead of
+    /// `None` (callers would turn that into `0`, disagreeing with the announced wallet quote).
     fn next_block_base_fee(&self, parent: &Self::Header, target_timestamp: u64) -> Option<u64> {
-        if self.genesis.config.clique.is_some() {
-            return Some(crate::SMARTNET_FIXED_GAS_PRICE_WEI);
+        let fixed = crate::fixed_gas_price_wei();
+        if crate::is_smartnet_genesis(&self.genesis) {
+            return Some(fixed);
         }
-        Some(calc_next_block_base_fee(
-            parent.gas_used(),
-            parent.gas_limit(),
-            parent.base_fee_per_gas()?,
-            self.base_fee_params_at_timestamp(target_timestamp),
-        ))
+        if let Some(parent_base_fee) = parent.base_fee_per_gas() {
+            return Some(calc_next_block_base_fee(
+                parent.gas_used(),
+                parent.gas_limit(),
+                parent_base_fee,
+                self.base_fee_params_at_timestamp(target_timestamp),
+            ));
+        }
+        Some(fixed)
     }
 
     fn base_fee_params_at_timestamp(&self, timestamp: u64) -> BaseFeeParams {

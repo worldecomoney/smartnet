@@ -34,6 +34,7 @@ pub use pre_consensus::{
     ConsensusProfile, ExecutionCompatProfile, PROPOSAL_TYPE_NORMAL, SMARTNET_FIXED_GAS_PRICE_WEI,
     SMARTNET_FIXED_TRANSFER_FEE_WEI, SmartNetProposalMeta, SmartNetRuntimeProfile,
     SmartNetValidationError, TxCompatProfile, build_vanity_with_meta, calibri_lite_seal_hash,
+    fixed_gas_price_wei, fixed_transfer_fee_wei,
     into_block_raw, parse_extra_data_validators, recover_calibri_lite_signer,
     secret_key_to_address, try_into_block_with_sidecar, validate_pre_consensus_header,
     validate_pre_consensus_timestamp_against_parent, validate_smartnet_proposal,

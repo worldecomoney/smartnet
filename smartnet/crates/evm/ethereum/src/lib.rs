@@ -269,15 +269,20 @@ where
         if self.import_mode {
             env.block_env.beneficiary =
                 smartnet_engine_primitives::ethereum::execution_beneficiary_for_header(header);
-            // Historical chain gas schedule is pre-Berlin (Istanbul): no EIP-2929
-            // cold-access surcharges. LONDON adds 8,100 gas on the first
-            // CREATE-with-storage transaction (block 19,545) and every later
-            // storage-touching tx, breaking the pinned F5 state/receipt roots.
-            // Live/sync stays on LONDON (type-0 + type-2 support); only the
-            // read-only historical import runs on the chain's real gas schedule.
-            env.cfg_env.set_spec_and_mainnet_gas_params(SpecId::ISTANBUL);
+            // Historical fee fields are never checked — the header itself decides the gas
+            // schedule and base fee used for execution. A legacy header with no baseFeePerGas
+            // is Istanbul/zero (no EIP-2929 surcharge; this preserves the pinned F5 roots).
+            // That includes legacy ERC-20/DeFi contracts **created under Istanbul**: they must
+            // replay under the original Istanbul gas schedule, byte-exact, with no fixed-fee
+            // rule applied to them. A fee-era header keeps the derived LONDON spec and its own
+            // base fee as-is, even when that historical fee was zero or unlike today's fixed
+            // price. Live/sync keeps LONDON for type-0 + type-2 support.
+            if header.base_fee_per_gas.is_none() {
+                env.cfg_env.set_spec_and_mainnet_gas_params(SpecId::ISTANBUL);
+                env.block_env.basefee = 0u64;
+            }
         }
-        // The import-only flag rides into the EVM through CfgEnv. The door in
+        // The import-only flag rides into the EVM through CfgEnv. The gate in
         // `EthEvm::transact_raw` preserves and restores this value; on live/sync it is
         // false, so only the chair's own overdraft gets through, as before.
         env.cfg_env.disable_balance_check = self.import_mode;
@@ -482,6 +487,21 @@ mod tests {
         // Historical import runs the trusted chain's pre-Berlin gas schedule;
         // live/sync stays on LONDON for type-0 + type-2 support.
         assert_eq!(import.cfg_env.spec, SpecId::ISTANBUL);
+    }
+
+    #[test]
+    fn import_mode_fee_era_header_keeps_its_own_base_fee() {
+        use alloy_primitives::hex;
+
+        let bytes = hex::decode(BLOCK_17214_RLP).unwrap();
+        let block: Block = alloy_rlp::Decodable::decode(&mut bytes.as_slice()).unwrap();
+        let mut header = block.header;
+        header.base_fee_per_gas = Some(123_456);
+
+        let import =
+            EthEvmConfig::new(wem_chain_spec()).for_import().evm_env(&header).unwrap();
+        assert_eq!(import.cfg_env.spec, SpecId::LONDON);
+        assert_eq!(import.block_env.basefee, 123_456u64);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! payload: `length` bytes
 //! ```
 //!
-//! The registry is grouped by role (see `doc/tmp/MESH-PAYLOAD-PROTOCOL-NEW.md`):
+//! The registry is grouped by role (see `doc/MESH-PAYLOAD-PROTOCOL.md`):
 //! `0x00–0x0F` control (keepalive, generic acks, identity handshake, bootstrap),
 //! `0x10–0x1F` application request/`PING` messages, `0x20–0x2F` application
 //! response/`PONG` messages; inside the application ranges block-related messages use
@@ -40,8 +40,8 @@ pub const DEFAULT_MAX_MSG_MB: usize = 32;
 /// product well under ~256 MiB, leaving the rest of the budget for the DB, the EVM
 /// caches, and the txpool.
 ///
-/// Override with the config keys `MESH_MAX_MSG_MB`, `MESH_INJECT_SLOTS`, and
-/// `MESH_LINK_QUEUE`.
+/// Only `MESH_MAX_MSG_MB` is operator-tunable; `MESH_INJECT_SLOTS` and
+/// `MESH_LINK_QUEUE` are hardcoded defaults, not config keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Maximum encoded protocol frame size, in bytes. `MESH_MAX_MSG_MB` (MB) × 1 MiB.
@@ -98,7 +98,7 @@ impl Limits {
     }
 }
 
-/// Stable v1 opcode registry. See `doc/tmp/MESH-PAYLOAD-PROTOCOL-NEW.md`.
+/// Stable v1 opcode registry. See `doc/MESH-PAYLOAD-PROTOCOL.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Opcode {
@@ -121,7 +121,11 @@ pub enum Opcode {
     BootstrapPeersPing = 0x09,
     /// Peer-list response: `list_hash` + records.
     BootstrapPeersPong = 0x0A,
-    // 0x0B–0x0F reserved (control expansion).
+    /// Bootstrap config-hash request: this node's two file digests, sent right after HELLO.
+    ConfigHashPing = 0x0B,
+    /// Bootstrap config-hash reply: the peer's two file digests (`mainnet ‖ validators`).
+    ConfigHashPong = 0x0C,
+    // 0x0D–0x0F reserved (control expansion).
     // ── 0x10–0x1F application requests ─────────────────────────────────
     /// "What is your last block?" — carries the sender's own tip as a hint.
     SyncBlockPing = 0x10,
@@ -160,6 +164,8 @@ impl Opcode {
             0x08 => Ok(Self::HelloPong),
             0x09 => Ok(Self::BootstrapPeersPing),
             0x0A => Ok(Self::BootstrapPeersPong),
+            0x0B => Ok(Self::ConfigHashPing),
+            0x0C => Ok(Self::ConfigHashPong),
             0x10 => Ok(Self::SyncBlockPing),
             0x11 => Ok(Self::SyncBlockRlpPing),
             0x12 => Ok(Self::RumorBlocksPing),
@@ -272,6 +278,24 @@ pub enum Message {
         list_hash: [u8; 32],
         /// The peer list.
         peers: Vec<PeerRecord>,
+    },
+    // ── Layer 3b bootstrap config gate (right after HELLO) ─────────────
+    /// The initiator's two bootstrap-file digests. The responder ignores these for its
+    /// own decision (it must hash its own files) but echoes them in tests/mocks; a real
+    /// node always answers [`Self::ConfigHashPong`] computed from its own files.
+    ConfigHashPing {
+        /// digest of `mainnet.jsonl`.
+        mainnet: [u8; 32],
+        /// digest of `validators.jsonl`.
+        validators: [u8; 32],
+    },
+    /// The responder's two bootstrap-file digests. The initiator compares both against
+    /// its own freshly computed values and closes the link on any mismatch.
+    ConfigHashPong {
+        /// digest of `mainnet.jsonl`.
+        mainnet: [u8; 32],
+        /// digest of `validators.jsonl`.
+        validators: [u8; 32],
     },
     // ── Layer 4 sync ───────────────────────────────────────────────────
     /// "What is your last block?" — carries the sender's own tip as a hint.
@@ -412,6 +436,16 @@ impl Message {
                 payload.extend_from_slice(&records);
                 Opcode::BootstrapPeersPong
             }
+            Self::ConfigHashPing { mainnet, validators }
+            | Self::ConfigHashPong { mainnet, validators } => {
+                payload.extend_from_slice(mainnet);
+                payload.extend_from_slice(validators);
+                if matches!(self, Self::ConfigHashPing { .. }) {
+                    Opcode::ConfigHashPing
+                } else {
+                    Opcode::ConfigHashPong
+                }
+            }
             Self::SyncBlockPing { last_block } => {
                 payload.extend_from_slice(&last_block.to_be_bytes());
                 Opcode::SyncBlockPing
@@ -521,6 +555,20 @@ impl Message {
                 }
                 Ok(Self::BootstrapPeersPong { list_hash, peers })
             }
+            Opcode::ConfigHashPing => {
+                let (mainnet, validators) = take_config_hashes(
+                    payload,
+                    "CONFIG_HASH_PING payload must be 64 bytes",
+                )?;
+                Ok(Self::ConfigHashPing { mainnet, validators })
+            }
+            Opcode::ConfigHashPong => {
+                let (mainnet, validators) = take_config_hashes(
+                    payload,
+                    "CONFIG_HASH_PONG payload must be 64 bytes",
+                )?;
+                Ok(Self::ConfigHashPong { mainnet, validators })
+            }
             Opcode::SyncBlockPing => Ok(Self::SyncBlockPing {
                 last_block: take_u64(payload, "SYNC_BLOCK_PING payload must be 8 bytes")?,
             }),
@@ -590,6 +638,21 @@ const fn take_32(payload: &[u8], error: &'static str) -> Result<[u8; 32], Protoc
     let mut out = [0u8; 32];
     out.copy_from_slice(payload);
     Ok(out)
+}
+
+/// Splits the fixed 64-byte config-hash payload (`mainnet ‖ validators`).
+fn take_config_hashes(
+    payload: &[u8],
+    error: &'static str,
+) -> Result<([u8; 32], [u8; 32]), ProtocolError> {
+    if payload.len() != 64 {
+        return Err(ProtocolError::Malformed(error));
+    }
+    let mut mainnet = [0u8; 32];
+    mainnet.copy_from_slice(&payload[..32]);
+    let mut validators = [0u8; 32];
+    validators.copy_from_slice(&payload[32..]);
+    Ok((mainnet, validators))
 }
 
 /// Encodes peer records in canonical order for hashing and bootstrap delivery.
@@ -831,6 +894,8 @@ mod tests {
             (0x08, Opcode::HelloPong),
             (0x09, Opcode::BootstrapPeersPing),
             (0x0A, Opcode::BootstrapPeersPong),
+            (0x0B, Opcode::ConfigHashPing),
+            (0x0C, Opcode::ConfigHashPong),
             (0x10, Opcode::SyncBlockPing),
             (0x11, Opcode::SyncBlockRlpPing),
             (0x12, Opcode::RumorBlocksPing),
@@ -846,7 +911,7 @@ mod tests {
         // Reserved slots stay reserved: superseded/never-assigned control, control
         // expansion, block expansion, tx expansion, and the *_PONG slots.
         for reserved in [
-            0x00, 0x02, 0x05, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, // control
+            0x00, 0x02, 0x05, 0x0D, 0x0E, 0x0F, // control
             0x13, 0x14, 0x15, 0x16, 0x17, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, // requests
             0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, // responses (block + RUMOR_*_PONG)
             0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x7F,
@@ -884,6 +949,32 @@ mod tests {
         let request = Message::BootstrapPeersPing.encode().unwrap();
         assert_eq!(request.len(), HEADER_LEN);
         assert_eq!(Message::decode(&request).unwrap(), Message::BootstrapPeersPing);
+    }
+
+    #[test]
+    fn config_hash_ping_pong_roundtrip_and_strict_length() {
+        for message in [
+            Message::ConfigHashPing { mainnet: [1u8; 32], validators: [2u8; 32] },
+            Message::ConfigHashPong { mainnet: [3u8; 32], validators: [4u8; 32] },
+        ] {
+            let expected_opcode = if matches!(message, Message::ConfigHashPing { .. }) {
+                Opcode::ConfigHashPing
+            } else {
+                Opcode::ConfigHashPong
+            };
+            let encoded = message.encode().unwrap();
+            assert_eq!(encoded[1], expected_opcode as u8);
+            assert_eq!(encoded.len(), HEADER_LEN + 64);
+            assert_eq!(Message::decode(&encoded).unwrap(), message);
+        }
+        // A 63- or 65-byte payload is malformed, never partially accepted.
+        let mut frame = Message::ConfigHashPong { mainnet: [0; 32], validators: [0; 32] }
+            .encode()
+            .unwrap();
+        frame.truncate(frame.len() - 1);
+        let declared = (frame.len() - HEADER_LEN) as u32;
+        frame[2..6].copy_from_slice(&declared.to_be_bytes());
+        assert!(Message::decode(&frame).is_err());
     }
 
     #[test]

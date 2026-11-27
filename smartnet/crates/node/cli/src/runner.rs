@@ -78,15 +78,19 @@ impl CliRunner {
             run_until_ctrl_c(command(context)),
         ));
 
-        if command_res.is_err() {
-            // The binary reports the error once on stderr; no duplicate shutdown log here.
-        } else {
-            debug!(target: "smartnet::cli", "shutting down gracefully");
-            // after the command has finished or exit signal was received we shutdown the
-            // runtime which fires the shutdown signal to all tasks spawned via the task
-            // executor and awaiting on tasks spawned with graceful shutdown
-            self.runtime.graceful_shutdown_with_timeout(self.config.graceful_shutdown_timeout);
-        }
+        // A bootstrap error is still a shutdown: fire the graceful signal on BOTH paths.
+        // Otherwise the runtime is dropped without running graceful tasks, so the
+        // clean-shutdown marker is never recorded and the next boot wrongly unwinds.
+        // The binary reports the error itself; this is only the shutdown annotation.
+        debug!(
+            target: "smartnet::cli",
+            after_error = command_res.is_err(),
+            "shutting down gracefully"
+        );
+        // Whether the command finished, failed or received an exit signal, fire the
+        // shutdown signal to all tasks spawned via the task executor and waiting on
+        // graceful shutdown (engine persist + SHUTDOWN_CLEAN marker).
+        self.runtime.graceful_shutdown_with_timeout(self.config.graceful_shutdown_timeout);
 
         runtime_shutdown(self.runtime, true);
 
@@ -124,12 +128,13 @@ impl CliRunner {
             ),
         ));
 
-        if command_res.is_err() {
-            // The binary reports the error once on stderr; no duplicate shutdown log here.
-        } else {
-            debug!(target: "smartnet::cli", "shutting down gracefully");
-            self.runtime.graceful_shutdown_with_timeout(self.config.graceful_shutdown_timeout);
-        }
+        // Same rule for blocking commands: failure is still a graceful shutdown.
+        debug!(
+            target: "smartnet::cli",
+            after_error = command_res.is_err(),
+            "shutting down gracefully"
+        );
+        self.runtime.graceful_shutdown_with_timeout(self.config.graceful_shutdown_timeout);
 
         runtime_shutdown(self.runtime, true);
 

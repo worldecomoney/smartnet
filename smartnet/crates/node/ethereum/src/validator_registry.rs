@@ -14,7 +14,9 @@ use tracing::warn;
 
 pub use calibri_lite_consensus::{
     get_val_chair,
-    registry::{get_val_all, ValidatorRecord},
+    registry::{
+        current_calibri_quorum_header, get_val_all, CalibriQuorumFileHeader, ValidatorRecord,
+    },
 };
 
 /// Resolve `VAL_FILE` from the shared operator config text.

@@ -10,10 +10,12 @@ use crate::{
     Cli,
 };
 use alloy_primitives::{Address, U256};
-use calibri_lite_consensus::pre_consensus::SMARTNET_FIXED_GAS_PRICE_WEI;
 use clap::Subcommand;
 use eyre::{eyre, Context as _, Result};
-use smartnet_chainspec::{Chain, ChainSpec, EthChainSpec, EthereumHardforks, Hardforks};
+use smartnet_chainspec::{
+    fixed_gas_price_wei, set_fixed_gas_price_wei, Chain, ChainSpec, EthChainSpec,
+    EthereumHardforks, Hardforks,
+};
 use smartnet_config::config::PruneConfig;
 use smartnet_db::{open_db, DatabaseBackend, DatabaseEnv};
 use smartnet_evm::eth::spec::{DisableBlockRewards, EthExecutorSpec};
@@ -23,7 +25,10 @@ use smartnet_fs_util::runtime_paths::{
 use smartnet_node_api::{NodePrimitives, NodeTypes, NodeTypesWithDBAdapter};
 use smartnet_node_builder::{NodeBuilder, WithLaunchContext};
 use smartnet_node_core::args::DatabaseArgs;
-use smartnet_node_ethereum::{consensus::EthBeaconConsensus, EthEvmConfig, EthereumNode};
+use smartnet_node_ethereum::{
+    bootstrap_files::{ensure_bootstrap_files_loaded, ensure_mesh_self_consistent},
+    consensus::EthBeaconConsensus, EthEvmConfig, EthereumNode,
+};
 use smartnet_provider::ProviderFactory;
 use smartnet_rpc_server_types::RpcModuleValidator;
 use smartnet_tracing::Layers;
@@ -34,7 +39,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tracing::{info, warn};
+use tracing::warn;
 
 /// Role keys that make the node mesh-only: RPC is off and the `HTTP_*` bind keys are optional.
 /// Keep this as the one list to extend when another non-RPC role lands (`BRIDGE` will join `SEAL`).
@@ -104,11 +109,13 @@ pub(crate) struct OperatorConfigOverlay {
     /// Expose `web3_nodeInfo` (mesh roster) on the public RPC (`RPC_NODEINFO`, optional key,
     /// default off).
     nodeinfo: Option<bool>,
-    /// Tx lifetime caps (`TXPOOL_QUEUED_TTL_SECS` / `TXPOOL_PENDING_TTL_SECS`, optional
-    /// keys): queued txs expire at the queued TTL (default 8 h; TTL-POOL.md); pending txs
-    /// expire only when a pending TTL > 0 is set (0 = no cap, the "until included..." rule).
+    /// All three txpool keys are node policy (every node, validator or RPC, owns its pool):
+    /// queued/pending TTLs and the total per-pass tx budget. Single source of truth.
+    /// Queued: 1..=600 s (default/ceiling 600). Pending: 0 = no cap (until included/replaced/
+    /// invalidated). Budget: absent/blank = 512, 0 rejected.
     txpool_queued_ttl_secs: Option<u64>,
     txpool_pending_ttl_secs: Option<u64>,
+    txpool_val_max_txs: Option<usize>,
     /// RPC batch limits (`RPC_BATCH_TX_MAX` / `RPC_BATCH_HEAVY_TX_MAX` /
     /// `RPC_BATCH_HEAVY_MAX` / `RPC_BATCH_READ_MAX`, optional keys): the per-batch class
     /// budgets of the batch-policy middleware (default 128 / 16 / 1 / 1024). Rejected
@@ -122,6 +129,15 @@ pub(crate) struct OperatorConfigOverlay {
     /// edge before the pool. The validator separately compares the real balance against the tx
     /// value at inclusion; signed-block import performs no checks. `0` disables the gate.
     min_to_txpool_entry: Option<u128>,
+    /// Txpool-entry filter multiplier (`TXPOOL_MARGIN`, optional integer 0..=5): absent or `0` =
+    /// no filter, `1` = exact fixed price, `n` = `fixed/n .. fixed*n`. This is NOT the fixed native
+    /// fee policy (`FIXED_GAS_PRICE_WEI`): it only decides pool admission, never execution.
+    txpool_margin: Option<u8>,
+    /// The authoritative fixed gas price (wei/gas). Required: the header policy, the txpool,
+    /// the sealer and every wallet-facing quote all read this one value at boot.
+    fixed_gas_price_wei: Option<u64>,
+    /// Legacy/compat key — parsed and sanity-checked, but no longer a price source: the wallet
+    /// quote is pinned from `FIXED_GAS_PRICE_WEI` at boot.
     default_suggested_fee: Option<U256>,
     /// Mesh gossip listen port (`MESH_PORT`, optional key): `0`/unset = mesh off.
     mesh_port: Option<u16>,
@@ -154,8 +170,13 @@ pub(crate) struct OperatorConfigOverlay {
 
 fn strip_quotes(s: &str) -> &str {
     let s = s.trim();
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        &s[1..s.len().saturating_sub(1)]
+    // `len >= 2` is load-bearing: a lone `"` both starts *and* ends the string, and slicing it
+    // as `&s[1..0]` panics (`start > end`). An operator's typo must be a reported problem, not
+    // a crash of the CLI. Both boundary bytes are ASCII quotes, so the slice is char-safe.
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        &s[1..s.len() - 1]
     } else {
         s
     }
@@ -209,7 +230,7 @@ fn strip_comment(line: &str) -> &str {
 /// Keystore comes before init, everywhere: a node, an import, or `smartnet init` must never
 /// look at the data directory until the operator's key is present and readable. This is a
 /// check only — it never creates or repairs a keystore; that is `smartnet keystore`'s job.
-pub(crate) fn ensure_keystore_ready(config_path: &Path) -> eyre::Result<()> {
+pub(crate) fn ensure_keystore_ready(config_path: &Path) -> eyre::Result<Address> {
     let cfg = load_validator_config(config_path).with_context(|| {
         format!(
             "keystore is not ready in config {} — run `smartnet keystore` before init",
@@ -224,13 +245,13 @@ pub(crate) fn ensure_keystore_ready(config_path: &Path) -> eyre::Result<()> {
     })?;
     let coinbase = smartnet_fs_util::keystore_selector::coinbase_from_config(config_path)
         .with_context(|| format!("invalid COINBASE in config {}", config_path.display()))?;
-    KeystoreMaterial::load(&cfg.key_dir, password_file, coinbase).with_context(|| {
-        format!(
-            "KEY_PATH {} has no usable keystore (check COINBASE if set) — run `smartnet keystore` before init",
+    let material = KeystoreMaterial::load(&cfg.key_dir, password_file, coinbase).map_err(|err| {
+        eyre!(
+            "KEY_PATH {} has no usable keystore: {err:#} — run `smartnet keystore` before init",
             cfg.key_dir.display()
         )
     })?;
-    Ok(())
+    Ok(material.address())
 }
 
 pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigOverlay> {
@@ -301,9 +322,10 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
         }
 
         // This same file also carries node-owned `VAL_FILE` and `COINBASE` (parsed here for every
-        // role) plus the validator section (`SEAL`, `ALLOW_EMPTY`, keystore paths, heartbeat,
-        // caps). The node overlay recognizes them all so they are not reported as unknown; the
-        // validator section itself is validated by `smartnet-validator` at boot.
+        // role) plus the 6 validator-only keys (`SEAL`, `ALLOW_EMPTY`, keystore paths, verbosity,
+        // per-block caps). The node overlay recognizes them all so they are not reported as
+        // unknown; the validator section itself is validated by `smartnet-validator` at boot.
+        // The 3 `TXPOOL_*` keys are deliberately NOT here — every node parses them above.
         if matches!(
             key,
             HOME_DIR_KEY |
@@ -316,14 +338,13 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
                 "MAX_NATIVE_PER_BLOCK" |
                 "MAX_ERC_20_PER_BLOCK" |
                 "MAX_CONTRACTS_PER_BLOCK" |
-                "MAX_NFT_PER_BLOCK" |
-                "TXPOOL_VAL_MAX_TXS"
+                "MAX_NFT_PER_BLOCK"
         ) {
             continue;
         }
 
-        // Map to the canonical key name; unknown keys are ignored (they are not part of
-        // the operator contract and never cause a silent default).
+        // Map to the canonical key name. Unknown keys are rejected below — a typo or a
+        // leftover key from an older config must fail the boot loudly.
         let name = match key {
             "DATADIR_PATH" => "DATADIR_PATH",
             "HTTP_PORT" => "HTTP_PORT",
@@ -333,12 +354,15 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
             "RPC_MEMPOOL" => "RPC_MEMPOOL",
             "RPC_NODEINFO" => "RPC_NODEINFO",
             "MIN_TO_TXPOOL_ENTRY" => "MIN_TO_TXPOOL_ENTRY",
+            "TXPOOL_MARGIN" => "TXPOOL_MARGIN",
             "RPC_BATCH_TX_MAX" => "RPC_BATCH_TX_MAX",
             "RPC_BATCH_HEAVY_TX_MAX" => "RPC_BATCH_HEAVY_TX_MAX",
             "RPC_BATCH_HEAVY_MAX" => "RPC_BATCH_HEAVY_MAX",
             "RPC_BATCH_READ_MAX" => "RPC_BATCH_READ_MAX",
             "TXPOOL_QUEUED_TTL_SECS" => "TXPOOL_QUEUED_TTL_SECS",
             "TXPOOL_PENDING_TTL_SECS" => "TXPOOL_PENDING_TTL_SECS",
+            "TXPOOL_VAL_MAX_TXS" => "TXPOOL_VAL_MAX_TXS",
+            "FIXED_GAS_PRICE_WEI" => "FIXED_GAS_PRICE_WEI",
             "GPO_DEFAULT_SUGGESTED_FEE" => "GPO_DEFAULT_SUGGESTED_FEE",
             "MESH_PORT" => "MESH_PORT",
             "MESH_ADDR" => "MESH_ADDR",
@@ -362,8 +386,9 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
 
         // A present but blank value is a problem except for config-owned data files: blank
         // means "not keyed", so they use the same local → ~/.smartnet scaffold as a missing key.
+        // `TXPOOL_VAL_MAX_TXS` is also blank-tolerant: absent/blank keeps the 512 default.
         if strip_quotes(value).trim().is_empty() {
-            if name == "MESH_PEERS_FILE" || name == "COINBASE" {
+            if name == "MESH_PEERS_FILE" || name == "COINBASE" || name == "TXPOOL_VAL_MAX_TXS" {
                 continue;
             }
             problems.push(format!(
@@ -396,26 +421,34 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
             // min-balance abuse gate at the RPC edge only (never on the signed-block import
             // path; the validator re-checks the real balance against the tx value).
             "MIN_TO_TXPOOL_ENTRY" => cfg.min_to_txpool_entry = Some(parse_key(name, value)?),
+            // Optional (absent/0 = no filter): txpool-entry filter multiplier, integer 0..=5.
+            // Separate from the fixed native fee key; range is validated with every other
+            // config problem at boot.
+            "TXPOOL_MARGIN" => cfg.txpool_margin = Some(parse_key(name, value)?),
             // Optional batch budgets (the batch-policy middleware; defaults 128/16/1/1024).
             "RPC_BATCH_TX_MAX" => cfg.batch_tx_max = Some(parse_key(name, value)?),
             "RPC_BATCH_HEAVY_TX_MAX" => cfg.batch_heavy_tx_max = Some(parse_key(name, value)?),
             "RPC_BATCH_HEAVY_MAX" => cfg.batch_heavy_max = Some(parse_key(name, value)?),
             "RPC_BATCH_READ_MAX" => cfg.batch_read_max = Some(parse_key(name, value)?),
-            // Optional (default 8 h): non-executable, external queued txs expire after this
-            // many seconds (`TTL-POOL.md`). Same rule family: entry/maintenance policy, never
-            // consensus.
+            // Optional (default 600 s = 10 min): non-executable, external queued txs expire
+            // after this many seconds. The key is authoritative — value used verbatim, range
+            // validated at boot. Entry/maintenance policy only, never consensus.
             "TXPOOL_QUEUED_TTL_SECS" => cfg.txpool_queued_ttl_secs = Some(parse_key(name, value)?),
             // Optional (0/off): executable pending txs older than this many seconds are swept
             // by the pool maintenance task. 0 = no cap (until included/replaced/invalidated).
             "TXPOOL_PENDING_TTL_SECS" => {
                 cfg.txpool_pending_ttl_secs = Some(parse_key(name, value)?)
             }
+            // Total txs one seal pass processes. Node policy on every node; the validator only
+            // reads the pinned value. Absent/blank = 512, 0 rejected at load.
+            "TXPOOL_VAL_MAX_TXS" => cfg.txpool_val_max_txs = Some(parse_key(name, value)?),
+            "FIXED_GAS_PRICE_WEI" => cfg.fixed_gas_price_wei = Some(parse_key(name, value)?),
             "GPO_DEFAULT_SUGGESTED_FEE" => {
                 cfg.default_suggested_fee = Some(parse_key(name, value)?)
             }
-            // Optional (default off): master switch for the in-node RPC catch-up service.
-            // Optional mesh keys (absent = mesh off / protocol default). `MESH_PORT = 0`
-            // is the explicit "no mesh listener" value and is deliberately not rejected.
+            // The mesh is always on: MESH_PORT and MESH_ADDR are required and a bind failure
+            // aborts the boot. RPC_SERVER may be off independently. MESH_MAX_MSG_MB is the
+            // only optional mesh limit key here; the other limits are protocol constants.
             "MESH_PORT" => cfg.mesh_port = Some(parse_key(name, value)?),
             "MESH_ADDR" => cfg.mesh_addr = Some(parse_key(name, value)?),
             "MESH_MAX_MSG_MB" => cfg.mesh_max_msg_mb = Some(parse_key(name, value)?),
@@ -482,6 +515,7 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
     // values exits with a distinct code naming `smartnet init`).
     const REQUIRED: &[&str] = &[
         "DATADIR_PATH",
+        "FIXED_GAS_PRICE_WEI",
         "GPO_DEFAULT_SUGGESTED_FEE",
         "CROSS_BLOCK_CACHE_SIZE",
         "MESH_PORT",
@@ -511,6 +545,35 @@ pub(crate) fn load_operator_overlay(path: &Path) -> eyre::Result<OperatorConfigO
         if port == Some(0) {
             problems.push(format!("{name} is 0 — that port would not be reachable"));
         }
+    }
+    if cfg.fixed_gas_price_wei == Some(0) {
+        problems.push("FIXED_GAS_PRICE_WEI is 0 — the protocol price must be positive".to_string());
+    }
+    if let Some(margin) = cfg.txpool_margin &&
+        margin > 5
+    {
+        problems.push(format!(
+            "TXPOOL_MARGIN is {margin} — must be an integer 0..=5 (0 = no fee check, 1 = exact)"
+        ));
+    }
+    // The config key is the single source of truth for the queued TTL. Enforce the operator's
+    // 10-minute ceiling here, at load time — a bad value is a boot error, never a silent clamp.
+    {
+        let max = smartnet_node_core::txpool_policy::DEFAULT_QUEUED_TTL.as_secs();
+        if let Some(ttl) = cfg.txpool_queued_ttl_secs &&
+            (ttl == 0 || ttl > max)
+        {
+            problems.push(format!(
+                "TXPOOL_QUEUED_TTL_SECS is {ttl} — must be 1..={max} (10-minute ceiling)"
+            ));
+        }
+    }
+    // The per-pass budget is optional (absent/blank = 512), but a present 0 would never
+    // process a tx. Reject it at load, like every other operator key.
+    if cfg.txpool_val_max_txs == Some(0) {
+        problems.push(
+            "TXPOOL_VAL_MAX_TXS is 0 — must be >= 1 (a zero budget never seals)".to_string(),
+        );
     }
     if let Some(fee) = cfg.default_suggested_fee &&
         fee.is_zero()
@@ -796,9 +859,33 @@ where
                 ));
             }
             let overlay = load_operator_overlay(&cfg_path)?;
+            // Same single price source on the import leg as on the node leg. Historical fee
+            // fields are still never checked; this is for the EVM/quote path only.
+            set_fixed_gas_price_wei(
+                overlay.fixed_gas_price_wei.expect("FIXED_GAS_PRICE_WEI is a required key"),
+            );
             // Keystore first: the mesh identity and the validator read the same KEY_PATH.
-            // Only after that may the chain identity / datadir be inspected.
-            ensure_keystore_ready(&cfg_path)?;
+            // Both bootstrap files must then be present and loaded before any chain work.
+            let self_address = ensure_keystore_ready(&cfg_path)?;
+            let val_file = overlay
+                .val_file
+                .clone()
+                .expect("validators.jsonl is resolved by load_operator_overlay");
+            let peers_file = overlay
+                .mesh_peers_file
+                .clone()
+                .expect("mainnet.jsonl is resolved by load_operator_overlay");
+            ensure_bootstrap_files_loaded(&val_file, &peers_file, self_address)?;
+            // Self-check: MESH_ADDR, MESH_PORT, and this node's mainnet.jsonl record must all
+            // name the same endpoint and the key-derived identity (incl. optional COINBASE).
+            // A mismatch is a hard boot error — no silent fallback to a stranger's identity.
+            ensure_mesh_self_consistent(
+                &peers_file,
+                overlay.mesh_addr,
+                overlay.mesh_port,
+                overlay.coinbase,
+                self_address,
+            )?;
             // Exactly one datadir, from the config file — the same boot sequence as a node
             // run (`smartnet init` must have written the chain identity first).
             let datadir = overlay.datadir_path.clone().ok_or_else(|| {
@@ -929,9 +1016,35 @@ where
                 None => crate::interface::default_config_path()?,
             };
             let overlay = load_operator_overlay(&cfg_path)?;
+            // Install the ONE authoritative price before any chainspec, consensus, txpool or RPC
+            // component is built. The key is required, so validation has already guaranteed it.
+            set_fixed_gas_price_wei(
+                overlay.fixed_gas_price_wei.expect("FIXED_GAS_PRICE_WEI is a required key"),
+            );
             // Keystore first: check KEY_PATH before the database/datadir is touched, so a
             // missing key reports `smartnet keystore` instead of hiding behind `smartnet init`.
-            ensure_keystore_ready(&cfg_path)?;
+            // Then load BOTH bootstrap files; a missing validators.jsonl or mainnet.jsonl is a
+            // hard boot error, not a degraded node.
+            let self_address = ensure_keystore_ready(&cfg_path)?;
+            let val_file = overlay
+                .val_file
+                .clone()
+                .expect("validators.jsonl is resolved by load_operator_overlay");
+            let peers_file = overlay
+                .mesh_peers_file
+                .clone()
+                .expect("mainnet.jsonl is resolved by load_operator_overlay");
+            ensure_bootstrap_files_loaded(&val_file, &peers_file, self_address)?;
+            // Self-check: MESH_ADDR, MESH_PORT, and this node's mainnet.jsonl record must all
+            // name the same endpoint and the key-derived identity (incl. optional COINBASE).
+            // A mismatch is a hard boot error — no silent fallback to a stranger's identity.
+            ensure_mesh_self_consistent(
+                &peers_file,
+                overlay.mesh_addr,
+                overlay.mesh_port,
+                overlay.coinbase,
+                self_address,
+            )?;
             // Mempool entry floor (operator key `MIN_TO_TXPOOL_ENTRY`, default
             // `DEFAULT_MIN_TO_TXPOOL_ENTRY_WEI` = 0.02 WEM): the knownWallet/minBalance gate
             // the RPC tx entry applies. Entry-only by design — never on the signed-block
@@ -940,6 +1053,12 @@ where
                 overlay
                     .min_to_txpool_entry
                     .unwrap_or(smartnet_rpc_eth_api::entry_gate::DEFAULT_MIN_TO_TXPOOL_ENTRY_WEI),
+            );
+            // Txpool-entry filter (optional `TXPOOL_MARGIN`, 0..=5). Absent = 0 = no filter.
+            // NOT the fixed native fee policy. Txpool entry ONLY — never consulted at block
+            // assembly or block acceptance.
+            smartnet_rpc_eth_api::entry_gate::set_txpool_margin(
+                overlay.txpool_margin.unwrap_or(0),
             );
             // RPC batch budgets (the batch-policy middleware; defaults 128/16/1/1024):
             // the per-batch class admission gate — better-than-deny, per-id retries.
@@ -959,13 +1078,25 @@ where
                         .unwrap_or(smartnet_rpc_builder::batch_policy::DEFAULT_READ_MAX),
                 },
             );
-            // Tx lifetime knobs (TTL-POOL.md): the maintenance task prefers these over the
-            // code defaults. Queued default 8 h (operator band 4–16 H); pending cap 0 = off.
-            smartnet_transaction_pool::maintain::set_operator_queued_ttl_secs(
-                overlay.txpool_queued_ttl_secs.unwrap_or(8 * 60 * 60),
-            );
-            smartnet_transaction_pool::maintain::set_operator_pending_ttl_secs(
-                overlay.txpool_pending_ttl_secs.unwrap_or(0),
+            // Every node owns and maintains its own txpool. Pin the node-level policy here,
+            // before any pool or validator is built. All three txpool keys are parsed by this
+            // overlay — the validator has no txpool keys and just reads the pinned budget.
+            let pending_secs = overlay.txpool_pending_ttl_secs.unwrap_or(0);
+            let val_max_txs = overlay
+                .txpool_val_max_txs
+                .unwrap_or(smartnet_node_core::txpool_policy::DEFAULT_VAL_MAX_TXS);
+            smartnet_node_core::txpool_policy::set_txpool_policy(
+                smartnet_node_core::txpool_policy::TxpoolPolicy {
+                    queued_ttl: std::time::Duration::from_secs(
+                        overlay.txpool_queued_ttl_secs.unwrap_or(
+                            smartnet_node_core::txpool_policy::DEFAULT_QUEUED_TTL.as_secs(),
+                        ),
+                    ),
+                    pending_ttl: (pending_secs > 0)
+                        .then(|| std::time::Duration::from_secs(pending_secs)),
+                    val_max_txs,
+                    ..Default::default()
+                },
             );
             // Exactly one datadir, from the config file — no second source, no built-in
             // default, no cwd fallback. `overlay.datadir_path` is already `~`-expanded.
@@ -1030,31 +1161,12 @@ where
             node_cmd.rpc.rpc_mempool = overlay.rpc_mempool.unwrap_or(false);
             // Optional: absent = off (`web3_nodeInfo` stays disabled).
             node_cmd.rpc.rpc_nodeinfo = overlay.nodeinfo.unwrap_or(false);
-            if let Some(v) = overlay.default_suggested_fee {
-                node_cmd.rpc.gas_price_oracle.default_suggested_fee = Some(v);
-                if v < U256::from(SMARTNET_FIXED_GAS_PRICE_WEI) {
-                    warn!(
-                        target: "smartnet::cli",
-                        event = "GPO_DEFAULT_SUGGESTED_FEE_BELOW_PROTOCOL_PRICE",
-                        configured_wei = %v,
-                        fixed_gas_price_wei = SMARTNET_FIXED_GAS_PRICE_WEI,
-                        "GPO_DEFAULT_SUGGESTED_FEE is below SMARTNET_FIXED_GAS_PRICE_WEI: wallet fee quotes \
-                         would advertise a price the protocol will not accept — once headers carry the fixed \
-                         base fee, txs priced below it are rejected (max fee < block base fee) and never \
-                         executable. Pin GPO_DEFAULT_SUGGESTED_FEE to the fixed price."
-                    );
-                }
-            } else {
-                info!(
-                    target: "smartnet::cli",
-                    event = "GPO_DEFAULT_SUGGESTED_FEE_UNSET",
-                    fixed_gas_price_wei = SMARTNET_FIXED_GAS_PRICE_WEI,
-                    "GPO_DEFAULT_SUGGESTED_FEE is not set: fee quotes fall back to the protocol constant \
-                     SMARTNET_FIXED_GAS_PRICE_WEI, so quoting stays correct; pin it explicitly \
-                     (~/.smartnet/config.toml) so the node's configured price is auditable."
-                );
-            }
-            // Optional: absent = mesh off (`spawn_mesh_service` is never called).
+            // Wallet quotes are announced from the SAME configured price the headers, txpool
+            // and sealer enforce. `GPO_DEFAULT_SUGGESTED_FEE` is kept only for config drift
+            // guards; it can no longer advertise a different price than the protocol.
+            node_cmd.rpc.gas_price_oracle.default_suggested_fee = Some(U256::from(fixed_gas_price_wei()));
+            // The mesh is always on; these carry the required MESH_PORT / MESH_ADDR values
+            // from the operator config into the node command.
             if let Some(v) = overlay.mesh_port {
                 node_cmd.rpc.mesh_port = Some(v);
             }
@@ -1113,6 +1225,19 @@ mod tests {
         // A bare apostrophe must not be mistaken for an opening quote
         assert_eq!(strip_comment("KEY = 5 # we don't need this"), "KEY = 5 ");
         assert_eq!(strip_comment(r#"KEY = 'a # b'"#), r#"KEY = 'a # b'"#);
+    }
+
+    /// A lone quote is an operator typo, not a reason to panic before the config error is
+    /// reported. The sibling readers in `smartnet-validator` and `smartnet-fs-util` use the
+    /// same `len >= 2` guard.
+    #[test]
+    fn strip_quotes_does_not_panic_on_a_lone_quote() {
+        assert_eq!(strip_quotes("\""), "\"");
+        assert_eq!(strip_quotes("'"), "'");
+        assert_eq!(strip_quotes(" \""), "\"");
+        assert_eq!(strip_quotes(r#""value""#), "value");
+        assert_eq!(strip_quotes("'value'"), "value");
+        assert_eq!(strip_quotes("value"), "value");
     }
 
     /// Keystore is a hard precondition before any datadir/init work: an empty `KEY_PATH` must
@@ -1232,6 +1357,7 @@ mod tests {
             "HTTP_ADDR",
             "RPC_SERVER",
             "COINBASE",
+            "FIXED_GAS_PRICE_WEI",
             "GPO_DEFAULT_SUGGESTED_FEE",
             "CROSS_BLOCK_CACHE_SIZE",
             "MESH_PORT",
@@ -1242,6 +1368,7 @@ mod tests {
             "RPC_MEMPOOL",
             "RPC_NODEINFO",
             "MIN_TO_TXPOOL_ENTRY",
+            "TXPOOL_MARGIN",
         ] {
             assert!(
                 raw.lines().any(|l| {
@@ -1350,6 +1477,99 @@ mod tests {
         std::fs::write(&path, patched).unwrap();
         let err = load_operator_overlay(&path).expect_err("NODE_HEARTBEAT = 0 must be rejected");
         assert!(format!("{err:?}").contains("NODE_HEARTBEAT"), "got: {err:?}");
+    }
+
+    /// `TXPOOL_MARGIN` is an optional integer 0..=5. Absent means no admission filter; anything
+    /// else (including a fractional string) is a boot error naming the key.
+    #[test]
+    fn txpool_margin_is_an_integer_zero_to_five_or_absent() {
+        let template =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../example.config.toml");
+        let raw = std::fs::read_to_string(&template).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        // The shipped template leaves it commented out: no check.
+        let cfg = load_operator_overlay(&template).unwrap();
+        assert_eq!(cfg.txpool_margin, None, "absent TXPOOL_MARGIN means no admission filter");
+
+        let write_with = |value: &str, name: &str| {
+            let path = dir.path().join(name);
+            let patched = format!("TXPOOL_MARGIN = {value}\n{raw}");
+            std::fs::write(&path, patched).unwrap();
+            path
+        };
+        for value in ["0", "1", "5"] {
+            let path = write_with(value, &format!("margin-{value}.toml"));
+            let cfg = load_operator_overlay(&path).unwrap();
+            assert_eq!(cfg.txpool_margin, Some(value.parse::<u8>().unwrap()));
+        }
+        for value in ["6", "255", "1.5", "-1"] {
+            let path = write_with(value, &format!("margin-bad-{}.toml", value.replace('.', "_")));
+            let err = load_operator_overlay(&path).expect_err("bad TXPOOL_MARGIN must be rejected");
+            assert!(format!("{err:?}").contains("TXPOOL_MARGIN"), "got: {err:?}");
+        }
+    }
+
+    /// `TXPOOL_QUEUED_TTL_SECS` is the single source of truth for queued-tx lifetime: the
+    /// configured value is used verbatim, and 1..=600 is enforced at config load (no clamp).
+    #[test]
+    fn txpool_queued_ttl_secs_is_authoritative_and_capped_at_load() {
+        let template =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../example.config.toml");
+        let raw = std::fs::read_to_string(&template).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let cfg = load_operator_overlay(&template).unwrap();
+        assert_eq!(cfg.txpool_queued_ttl_secs, Some(600), "shipped template pins 10 minutes");
+
+        let write_with = |value: u64, name: &str| {
+            let path = dir.path().join(name);
+            let patched = raw.replace(
+                "TXPOOL_QUEUED_TTL_SECS = 600",
+                &format!("TXPOOL_QUEUED_TTL_SECS = {value}"),
+            );
+            std::fs::write(&path, patched).unwrap();
+            path
+        };
+        // A smaller, valid value must survive verbatim — no code-level override.
+        let cfg = load_operator_overlay(&write_with(60, "ttl-60.toml")).unwrap();
+        assert_eq!(cfg.txpool_queued_ttl_secs, Some(60));
+        for value in [0, 601, 28_800] {
+            let path = write_with(value, &format!("ttl-bad-{value}.toml"));
+            let err = load_operator_overlay(&path).expect_err("out-of-range TTL must be rejected");
+            assert!(
+                format!("{err:?}").contains("TXPOOL_QUEUED_TTL_SECS"),
+                "got: {err:?}"
+            );
+        }
+    }
+
+    /// The third txpool key is node policy too: the node overlay parses it (not the validator),
+    /// blank/absent keeps 512, and a zero budget is a boot error.
+    #[test]
+    fn txpool_val_max_txs_is_node_owned_and_zero_is_rejected() {
+        let template =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../example.config.toml");
+        let raw = std::fs::read_to_string(&template).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let cfg = load_operator_overlay(&template).unwrap();
+        assert_eq!(cfg.txpool_val_max_txs, Some(512), "template ships 512");
+
+        let write_with = |value: &str, name: &str| {
+            let path = dir.path().join(name);
+            let patched = raw.replace("TXPOOL_VAL_MAX_TXS = 512", &format!("TXPOOL_VAL_MAX_TXS = {value}"));
+            std::fs::write(&path, patched).unwrap();
+            path
+        };
+        let cfg = load_operator_overlay(&write_with("128", "val-max-128.toml")).unwrap();
+        assert_eq!(cfg.txpool_val_max_txs, Some(128));
+
+        let cfg = load_operator_overlay(&write_with("", "val-max-blank.toml")).unwrap();
+        assert_eq!(cfg.txpool_val_max_txs, None, "blank means absent → default 512");
+
+        let err = load_operator_overlay(&write_with("0", "val-max-zero.toml")).unwrap_err();
+        assert!(format!("{err:?}").contains("TXPOOL_VAL_MAX_TXS"), "got: {err:?}");
     }
 
     /// `VAL_FILE` may be omitted: the node-owned registry resolver applies the same local →

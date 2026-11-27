@@ -36,10 +36,16 @@ This is deliberately not strict FIFO or Geth-style fee ordering. Both would requ
 
 Yes, we want to priotorize older transactions. Nonce ordering: FIFO must mean oldest eligible transaction, not blindly newest transaction. A sender's nonce \(n+1\) cannot be included before nonce \(n\).
 
-# Total txs one seal pass processes: the pool snapshot is truncated to the oldest N
-# pending txs (pool arrival, FIFO) before the state prefetch and the selection read it.
-# Optional — absent/blank keeps 512, 0 is rejected. Per-class narrowing (native / heavy /
-# …) comes later; the per-class caps below already bound what enters a block.
+# All three TXPOOL_* keys are node-owned config (every node parses/pins them):
+# TXPOOL_QUEUED_TTL_SECS = 600
+# TXPOOL_PENDING_TTL_SECS = 0
+
+# Validator's own pick count: at most N txs from the snapshot it fetches are picked for
+# one seal pass (oldest first, FIFO) before the state prefetch and the selection read it.
+# The node has NO inclusion criteria — it serves the full pool, uncapped by this key;
+# the validator alone decides which tx to include or skip. Config location is node-side,
+# but the count and its application remain the validator's.
+# Optional — absent/blank keeps 512, 0 is rejected.
 TXPOOL_VAL_MAX_TXS = 512
 
 # Per-class caps: what each class may contribute to one sealed block (native transfer /
@@ -50,5 +56,7 @@ MAX_ERC_20_PER_BLOCK = 32
 MAX_CONTRACTS_PER_BLOCK = 1
 MAX_NFT_PER_BLOCK = 2
 
-So, validator run for loop to read any TXPOOL_VAL_MAX_TXS or until txpool is empty, inside this loop all processing happens, only one loop.
+So, validator runs a loop over its fetched pool snapshot up to TXPOOL_VAL_MAX_TXS (or until the pool is empty); inside this loop all processing happens, only one loop. The node never pre-filters or pre-caps that set — it has no inclusion criteria.
+
+Pool cleansing (TXPOOL_QUEUED_TTL_SECS / TXPOOL_PENDING_TTL_SECS) applies to every tx regardless of origin. SmartNet has no P2P: mesh delivers rumors through the node's own RPC semantics, so the pool's local/external label carries no meaning and is not consulted by the TTL sweep.
 This loop results to proposaed bclock or nothing.

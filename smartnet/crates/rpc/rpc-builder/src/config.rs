@@ -188,31 +188,31 @@ mod tests {
 
     #[test]
     fn test_transport_rpc_module_config() {
-        let config = http_args("eth,admin,debug").transport_rpc_module_config();
-        let expected = [SmartnetRpcModule::Eth, SmartnetRpcModule::Admin, SmartnetRpcModule::Debug];
+        let config = http_args("eth,web3,debug").transport_rpc_module_config();
+        let expected = [SmartnetRpcModule::Eth, SmartnetRpcModule::Web3, SmartnetRpcModule::Debug];
         assert_eq!(config.http().cloned().unwrap().into_selection(), expected.into());
         assert!(config.ws().is_none());
     }
 
     #[test]
     fn test_transport_rpc_module_trim_config() {
-        let config = http_args(" eth, admin, debug").transport_rpc_module_config();
-        let expected = [SmartnetRpcModule::Eth, SmartnetRpcModule::Admin, SmartnetRpcModule::Debug];
+        let config = http_args(" eth, web3, debug").transport_rpc_module_config();
+        let expected = [SmartnetRpcModule::Eth, SmartnetRpcModule::Web3, SmartnetRpcModule::Debug];
         assert_eq!(config.http().cloned().unwrap().into_selection(), expected.into());
         assert!(config.ws().is_none());
     }
 
     #[test]
     fn test_unique_rpc_modules() {
-        let config = http_args(" eth, admin, debug, eth,admin").transport_rpc_module_config();
-        let expected = [SmartnetRpcModule::Eth, SmartnetRpcModule::Admin, SmartnetRpcModule::Debug];
+        let config = http_args(" eth, web3, debug, eth,web3").transport_rpc_module_config();
+        let expected = [SmartnetRpcModule::Eth, SmartnetRpcModule::Web3, SmartnetRpcModule::Debug];
         assert_eq!(config.http().cloned().unwrap().into_selection(), expected.into());
         assert!(config.ws().is_none());
     }
 
     #[test]
     fn test_rpc_server_config() {
-        let config = http_args("eth,admin,debug").rpc_server_config();
+        let config = http_args("eth,web3,debug").rpc_server_config();
         assert_eq!(
             config.http_address().unwrap(),
             SocketAddr::V4(SocketAddrV4::new(

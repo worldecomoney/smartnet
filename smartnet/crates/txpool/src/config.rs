@@ -59,6 +59,9 @@ pub struct PoolConfig {
     pub max_account_slots: usize,
     /// Price bump (in %) for the transaction pool underpriced check.
     pub price_bumps: PriceBumpConfig,
+    /// Node policy: a zero-value native no-op may replace a plain native transfer at the same
+    /// fixed fee. Set by the node; the pool only enforces the switch.
+    pub native_same_fee_cancel: bool,
     /// Minimum base fee required by the protocol.
     pub minimal_protocol_basefee: u64,
     /// Minimum priority fee required for transaction acceptance into the pool.
@@ -128,6 +131,7 @@ impl Default for PoolConfig {
             blob_cache_size: None,
             max_account_slots: TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
             price_bumps: Default::default(),
+            native_same_fee_cancel: true,
             minimal_protocol_basefee: MIN_PROTOCOL_BASE_FEE,
             minimum_priority_fee: None,
             gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,

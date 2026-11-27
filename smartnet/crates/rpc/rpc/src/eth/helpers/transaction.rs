@@ -61,6 +61,17 @@ where
             let mut pool_transaction =
                 <Self::Pool as TransactionPool>::Transaction::from_pooled(recovered);
 
+            // MARS tx types: 0x0 and 0x2 are both first-class at every height; 0x1/0x3+ are
+            // warned about and refused here, before the pool (RPC and mesh rumor share this seam).
+            smartnet_rpc_eth_api::entry_gate::mars_tx_type_entry_gate(pool_transaction.ty())?;
+
+            // `TXPOOL_MARGIN` admission filter (optional integer 0..=5): right after the
+            // funded-wallet floor above, and ONLY here at tx entry. This is a pool-entry filter,
+            // NOT fixed-fee enforcement: a fresh native coin tx outside `fixed/n .. fixed*n` is
+            // refused before the pool. Execution/header price policy is a separate concern, and
+            // no equivalent check exists at block assembly or block acceptance.
+            smartnet_rpc_eth_api::entry_gate::txpool_margin_entry_gate(&pool_transaction)?;
+
             // Optionally convert legacy blob sidecars to EIP-7594 format when Osaka is active
             // This is opt-in via --rpc.force-blob-sidecar-upcasting
             if self.inner.force_blob_sidecar_upcasting() && pool_transaction.is_eip4844() {
@@ -123,7 +134,10 @@ where
                 }).map_err(EthApiError::other)?;
 
                 // Retain tx in local tx pool after forwarding, for local RPC usage.
-                let _ = self.inner.add_pool_transaction(origin, pool_transaction).await;
+                // `add_pool_transaction` already logs a rejected tx with the error; propagating
+                // here also routes it through the single TX verdict log below, so a local caller
+                // does not see a false success.
+                self.inner.add_pool_transaction(origin, pool_transaction).await?;
 
                 return Ok(hash);
             }

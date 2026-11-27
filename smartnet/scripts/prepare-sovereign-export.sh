@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Phase 6: list paths required for a sovereign SmartNet repo export (no copy performed).
+# No docs/ tree is assumed; workspace paths are checked by scripts/verify-sovereign-workspace.sh.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -47,17 +48,6 @@ print("## Root files")
 for f in root_files:
     if (root / f).exists():
         print(f)
-print()
-print("## docs/smartnet (normative)")
-for p in sorted((root / "docs/smartnet").rglob("*")):
-    if p.is_file():
-        print(p)
-print()
-print("## docs (contributor subset)")
-for f in ["docs/README.md", "docs/workflow.md"]:
-    p = root / f
-    if p.exists():
-        print(p)
 print()
 print(f"## workspace.members ({len(members)} paths)")
 for m in members:

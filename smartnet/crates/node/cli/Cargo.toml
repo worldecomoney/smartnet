@@ -12,7 +12,6 @@ workspace = true
 [dependencies]
 smartnet-rpc-builder.workspace = true
 # upstream-derived
-calibri-lite-consensus.workspace = true
 smartnet-chainspec.workspace = true
 smartnet-ethereum-primitives.workspace = true
 smartnet-config = { workspace = true, features = ["serde"] }
@@ -30,7 +29,6 @@ smartnet-provider.workspace = true
 smartnet-node-ethereum.workspace = true
 smartnet-rpc-server-types.workspace = true
 smartnet-rpc-eth-api.workspace = true
-smartnet-transaction-pool.workspace = true
 smartnet-tasks.workspace = true
 smartnet-tracing.workspace = true
 smartnet-node-api.workspace = true

@@ -9,7 +9,7 @@
 
 ## 1. What it is
 
-A strict **pre-install admission gate for contract bytecode** — a bouncer at the door,
+A strict **pre-install admission gate for contract bytecode** — a bouncer at the gate,
 not a change to the law. If a deployment's initcode or returned runtime bytecode exceeds
 the deliberately narrow policy, it is refused. No warnings, no review queue, no attempt
 to prove malicious intent, no classification of contract purpose.

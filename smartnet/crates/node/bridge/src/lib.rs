@@ -7,6 +7,9 @@
 //! the record store ([`record`]), the scan + accept pipeline, the flows, the payouts
 //! and the key handling.
 
+/// Pure integer money math (§3.5/§10): fixed WEM fees, decimal scaling, net payout
+/// and the `minAmount` gate. No I/O, no EVM, no prices.
+pub mod money;
 /// THE record store (§4): the per-network JSONL buffers, the RAM working set, stages
 /// `0..4`, and the 48 h hash-reply memory.
 pub mod record;

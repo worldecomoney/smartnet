@@ -34,7 +34,7 @@ impl RpcModuleSelection {
     ///
     /// This is the production whitelist: `eth`, `net`, `web3`, `rpc`, plus `txpool`, which the
     /// registry further gates on the `RPC_MEMPOOL` config (default off). Every other namespace
-    /// (`admin`, `debug`, `trace`, `ots`, `wem`/`smartnet`, …) is hard-blocked at the registry
+    /// (`debug`, `trace`, `ots`, `wem`/`smartnet`, …) is hard-blocked at the registry
     /// regardless of this list or any `--http.api all` — see [`SmartnetRpcModule::is_allowed`].
     pub const ENABLED_MODULES: [SmartnetRpcModule; 5] = [
         SmartnetRpcModule::Eth,
@@ -72,11 +72,11 @@ impl RpcModuleSelection {
     ///
     /// ```
     /// use smartnet_rpc_server_types::{RpcModuleSelection, SmartnetRpcModule};
-    /// let selection = vec!["eth", "admin"];
+    /// let selection = vec!["eth", "web3"];
     /// let config = RpcModuleSelection::try_from_selection(selection).unwrap();
     /// assert_eq!(
     ///     config,
-    ///     RpcModuleSelection::from([SmartnetRpcModule::Eth, SmartnetRpcModule::Admin])
+    ///     RpcModuleSelection::from([SmartnetRpcModule::Eth, SmartnetRpcModule::Web3])
     /// );
     /// ```
     ///
@@ -84,11 +84,11 @@ impl RpcModuleSelection {
     ///
     /// ```
     /// use smartnet_rpc_server_types::{RpcModuleSelection, SmartnetRpcModule};
-    /// let selection = vec!["eth", "admin", "eth", "admin"];
+    /// let selection = vec!["eth", "web3", "eth", "web3"];
     /// let config = RpcModuleSelection::try_from_selection(selection).unwrap();
     /// assert_eq!(
     ///     config,
-    ///     RpcModuleSelection::from([SmartnetRpcModule::Eth, SmartnetRpcModule::Admin])
+    ///     RpcModuleSelection::from([SmartnetRpcModule::Eth, SmartnetRpcModule::Web3])
     /// );
     /// ```
     pub fn try_from_selection<I, T>(selection: I) -> Result<Self, T::Error>
@@ -324,8 +324,6 @@ impl fmt::Display for RpcModuleSelection {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum SmartnetRpcModule {
-    /// `admin_` module
-    Admin,
     /// `debug_` module
     Debug,
     /// `eth_` module
@@ -365,7 +363,6 @@ pub enum SmartnetRpcModule {
 impl SmartnetRpcModule {
     /// All standard variants (excludes Other)
     const STANDARD_VARIANTS: &'static [Self] = &[
-        Self::Admin,
         Self::Debug,
         Self::Eth,
         Self::Net,
@@ -425,8 +422,8 @@ impl SmartnetRpcModule {
     ///
     /// `eth`/`net`/`web3`/`rpc` are always allowed. `txpool` is allowed only when the operator
     /// sets `RPC_MEMPOOL` (a temporary sync-debugging aid; information leak + `DoS` surface).
-    /// Every other namespace — `admin`, `debug`, `trace`, `ots`, `wem`/`smartnet`, `flashbots`,
-    /// `miner`, `mev`, `testing`, and any unknown `Other` — is hard-blocked at the registry, so
+    /// Every other namespace — `debug`, `trace`, `ots`, `wem`/`smartnet`, `flashbots`, `miner`,
+    /// `mev`, `testing`, and any unknown `Other` — is hard-blocked at the registry, so
     /// it is never registered even if `--http.api all` requests it.
     pub const fn is_allowed(&self, txpool_enabled: bool) -> bool {
         match self {
@@ -442,7 +439,6 @@ impl AsRef<str> for SmartnetRpcModule {
         match self {
             Self::Other(s) => s.as_str(),
             // For standard variants, use the derive-generated static strings
-            Self::Admin => "admin",
             Self::Debug => "debug",
             Self::Eth => "eth",
             Self::Net => "net",
@@ -466,7 +462,6 @@ impl FromStr for SmartnetRpcModule {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
-            "admin" => Self::Admin,
             "debug" => Self::Debug,
             "eth" => Self::Eth,
             "net" => Self::Net,

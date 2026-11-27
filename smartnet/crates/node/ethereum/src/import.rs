@@ -30,6 +30,7 @@
 //! re-run resumes from the durable tip. No fork detection: every block follows the same
 //! decode → check → execute → commit path, whatever its era.
 
+use alloy_eips::Typed2718;
 use alloy_primitives::B256;
 use alloy_rlp::Decodable;
 use smartnet_chain_state::{ComputedTrieData, DeferredTrieData, ExecutedBlock};
@@ -104,6 +105,27 @@ fn delta_diag_block() -> Option<u64> {
 
 fn delta_diag_for(number: u64) -> bool {
     delta_diag_block() == Some(number)
+}
+
+/// `MARS` accepts legacy (`0x0`) and dynamic-fee (`0x2`) transactions at every height. An
+/// unexpected type in history is diagnostic only — warn, never fail the import (we assume there
+/// are none). Type `0x1`/`0x3+` are refused at mempool entry, but a sealed block is executed as-is.
+fn warn_unexpected_tx_types(
+    number: u64,
+    recovered: &RecoveredBlock<smartnet_ethereum_primitives::Block>,
+) {
+    for (index, tx) in recovered.transactions_recovered().enumerate() {
+        match tx.ty() {
+            0 | 2 => {}
+            ty => warn!(
+                target: "smartnet::import",
+                block = number,
+                tx = index,
+                tx_type = ty,
+                "unexpected transaction type in imported block (MARS executes 0x0 and 0x2)"
+            ),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -371,6 +393,10 @@ where
             val_file.display()
         )
     })?;
+    // Re-apply the inert self-label after this authoritative load replaces the RAM array.
+    if let Some(address) = crate::bootstrap_files::self_address() {
+        calibri_lite_consensus::registry::mark_self(address);
+    }
     let enabled = crate::validator_registry::enabled_set();
     if enabled.is_empty() {
         return Err(eyre::eyre!(
@@ -703,6 +729,7 @@ where
             executor
                 .apply_pre_execution_changes()
                 .map_err(|err| eyre::eyre!("block {number}: pre-execution failed: {err}"))?;
+            warn_unexpected_tx_types(number, &recovered);
             for tx in recovered.transactions_recovered() {
                 executor
                     .execute_transaction(tx)

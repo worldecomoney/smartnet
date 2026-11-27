@@ -1,4 +1,4 @@
-//! Layer-2 identity: the signed `HELLO` handshake (see `doc/tmp/MESH-PAYLOAD-PROTOCOL-NEW.md`).
+//! Layer-2 identity: the signed `HELLO` handshake (see `doc/MESH-PAYLOAD-PROTOCOL.md`).
 //!
 //! One-time per connection, right after the `WebSocket` upgrade and before any other frame.
 //! Authenticates the peer (proves control of an Ethereum private key); grants no roles. The

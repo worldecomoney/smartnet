@@ -15,6 +15,9 @@
 //! - Blank lines and `#` comments are ignored; a malformed line is skipped with a warning (reported
 //!   by [`parse_peers`]) — one bad line must not disable the whole mesh.
 //! - The file is re-read on every spread, so membership changes need no restart.
+//! - An optional first-line header `{"mesh_protocol_ver": 11, "signed": "", "ts": 0,
+//!   "hash": "", "block": 0}` is read and kept in RAM for later use, never checked yet.
+//!   Absent means every field defaults to `0` / empty string (no error).
 
 use alloy_primitives::Address;
 use serde::Deserialize;
@@ -22,6 +25,7 @@ use smartnet_fs_util::runtime_paths::resolve_data_file;
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    sync::RwLock,
 };
 use tracing::warn;
 
@@ -47,6 +51,10 @@ pub struct PeerEntry {
     /// Whether this peer is still considered a valid mesh member.
     #[serde(default = "default_true")]
     pub valid: bool,
+    /// Inert label: `true` when this entry is this node (same listen port or identity address).
+    /// Set after parsing for later callers; gossip still uses `is_target` unchanged.
+    #[serde(default)]
+    pub is_self: bool,
 }
 
 const fn default_true() -> bool {
@@ -69,6 +77,16 @@ impl PeerEntry {
             && self.valid
             && self.port_range != self_port
             && self.address() != Some(self_address)
+    }
+
+    /// Label loaded peer entries whose port or identity address is ours. Pure bookkeeping:
+    /// `is_target` and the allowlist still make their own decisions, so gossip behavior is
+    /// unchanged.
+    pub fn mark_self(peers: &mut [Self], self_port: Option<u16>, self_address: Address) {
+        for peer in peers {
+            peer.is_self = self_port.is_some_and(|port| peer.port_range == port) ||
+                peer.address() == Some(self_address);
+        }
     }
 
     /// This entry's `key_id` parsed as the verified Ethereum address it now carries.
@@ -109,9 +127,88 @@ pub fn default_peers_file() -> PathBuf {
     }
 }
 
-/// Result of [`parse_peers`]: the entries that parsed plus human-readable line errors.
+/// The optional first-line header of `mainnet.jsonl`. Purely bookkeeping for now: it is read,
+/// kept in RAM, and never checked — no handshake or gossip decision consults it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshFileHeader {
+    /// `mesh_protocol_ver` — an integer; `0` when the header is absent.
+    pub mesh_protocol_ver: u64,
+    /// `signed` — empty string when absent.
+    pub signed: String,
+    /// `ts` — `0` when absent.
+    pub ts: u64,
+    /// `hash` — empty string when absent.
+    pub hash: String,
+    /// `block` — `0` when absent.
+    pub block: u64,
+}
+
+impl MeshFileHeader {
+    /// Const empty header for the static RAM slot (`Default` is not const for `String`).
+    pub const fn empty() -> Self {
+        Self {
+            mesh_protocol_ver: 0,
+            signed: String::new(),
+            ts: 0,
+            hash: String::new(),
+            block: 0,
+        }
+    }
+
+    /// Read the known fields leniently: missing or wrong-typed values become the same
+    /// defaults an absent header gets. Nothing is validated at this stage.
+    fn from_value(value: &serde_json::Value) -> Self {
+        let field = |name: &str| value.get(name);
+        Self {
+            mesh_protocol_ver: field("mesh_protocol_ver").and_then(|v| v.as_u64()).unwrap_or(0),
+            signed: field("signed").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+            ts: field("ts").and_then(|v| v.as_u64()).unwrap_or(0),
+            hash: field("hash").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+            block: field("block").and_then(|v| v.as_u64()).unwrap_or(0),
+        }
+    }
+}
+
+impl Default for MeshFileHeader {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// The last header this process read from the peer file. Starts at all-defaults; refreshed
+/// on every [`parse_peers`] call (the peer file is re-read per spread), so a header added or
+/// removed between reads is reflected here without a restart.
+static MESH_FILE_HEADER: RwLock<MeshFileHeader> = RwLock::new(MeshFileHeader::empty());
+
+/// The in-RAM `mainnet.jsonl` header — all defaults when the file has no header.
+pub fn current_mesh_file_header() -> MeshFileHeader {
+    MESH_FILE_HEADER.read().expect("mesh file header lock poisoned").clone()
+}
+
+/// Detect the optional header on the first non-blank, non-comment line. Returns the header
+/// and that line's index (which the record parser must skip), or defaults and `None`.
+pub fn parse_mesh_header(content: &str) -> (MeshFileHeader, Option<usize>) {
+    for (index, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) &&
+            value.get("mesh_protocol_ver").is_some()
+        {
+            return (MeshFileHeader::from_value(&value), Some(index));
+        }
+        break;
+    }
+    (MeshFileHeader::default(), None)
+}
+
+/// Result of [`parse_peers`]: the file header, the entries that parsed, and human-readable
+/// line errors.
 #[derive(Debug, Default)]
 pub struct ParsedPeers {
+    /// The optional first-line header, or all defaults when absent.
+    pub header: MeshFileHeader,
     /// Successfully parsed entries, in file order.
     pub peers: Vec<PeerEntry>,
     /// One message per skipped line (caller logs them at `warn`).
@@ -121,8 +218,13 @@ pub struct ParsedPeers {
 /// Parses peer-file content. Blank lines and `#` comments are ignored; malformed lines
 /// are collected in [`ParsedPeers::errors`] instead of failing the whole parse.
 pub fn parse_peers(content: &str) -> ParsedPeers {
-    let mut parsed = ParsedPeers::default();
+    let (header, header_line) = parse_mesh_header(content);
+    *MESH_FILE_HEADER.write().expect("mesh file header lock poisoned") = header.clone();
+    let mut parsed = ParsedPeers { header, peers: Vec::new(), errors: Vec::new() };
     for (index, line) in content.lines().enumerate() {
+        if Some(index) == header_line {
+            continue;
+        }
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -189,6 +291,22 @@ mod tests {
 {"key_id": "node-g", "url": "", "ip": "10.0.0.9", "port_range": 30866, "active": true, "valid": true}
 {"key_id": "node-h", "url": "", "ip": "127.0.0.1", "port_range": 30877, "active": true, "valid": true}
 "#;
+
+    #[test]
+    fn mark_self_labels_own_entry_without_changing_targeting() {
+        let content = r#"{"key_id":"0x1111111111111111111111111111111111111111","ip":"127.0.0.1","port_range":30888}
+{"key_id":"0x2222222222222222222222222222222222222222","ip":"127.0.0.1","port_range":30811}
+"#;
+        let mut parsed = parse_peers(content);
+        let self_address = Address::repeat_byte(0x11);
+        PeerEntry::mark_self(&mut parsed.peers, Some(30811), self_address);
+        assert!(parsed.peers[0].is_self);
+        assert!(parsed.peers[1].is_self);
+        // Inert flag: the existing port/address filter still decides targeting.
+        assert!(!parsed.peers[0].is_target(30888, self_address));
+        assert!(!parsed.peers[1].is_target(30811, self_address));
+        assert!(parsed.peers[0].is_target(30999, Address::repeat_byte(0x33)));
+    }
 
     #[test]
     fn parses_reference_eight_entry_file() {
@@ -312,5 +430,51 @@ mod tests {
         let missing = dir.path().join("nope.jsonl");
         let err = load_peers(&missing).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn optional_header_is_read_kept_and_skipped_as_a_record() {
+        let content = "# a comment first\n{\"mesh_protocol_ver\":11,\"signed\":\"sig\",\"ts\":123,\"hash\":\"0xabc\",\"block\":42}\n{\"ip\":\"127.0.0.1\",\"port_range\":1}\n";
+        let (header, line) = parse_mesh_header(content);
+        assert_eq!(line, Some(1), "header may follow blanks/comments");
+        assert_eq!(
+            header,
+            MeshFileHeader {
+                mesh_protocol_ver: 11,
+                signed: "sig".to_owned(),
+                ts: 123,
+                hash: "0xabc".to_owned(),
+                block: 42,
+            }
+        );
+        let parsed = parse_peers(content);
+        assert_eq!(parsed.header, header);
+        assert_eq!(parsed.peers.len(), 1);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    }
+
+    #[test]
+    fn absent_header_defaults_to_zeros_without_error() {
+        let (header, line) = parse_mesh_header(REFERENCE_FILE);
+        assert_eq!(line, None);
+        assert_eq!(header, MeshFileHeader::default());
+        assert_eq!(header.mesh_protocol_ver, 0);
+        assert!(header.signed.is_empty() && header.hash.is_empty());
+        assert_eq!((header.ts, header.block), (0, 0));
+        let parsed = parse_peers(REFERENCE_FILE);
+        assert_eq!(parsed.header, header);
+        assert_eq!(parsed.peers.len(), 8);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    }
+
+    #[test]
+    fn partial_or_wrong_typed_header_fields_take_defaults() {
+        let (header, line) =
+            parse_mesh_header("{\"mesh_protocol_ver\":\"not-an-int\",\"block\":7}\n");
+        assert_eq!(line, Some(0));
+        assert_eq!(header.mesh_protocol_ver, 0);
+        assert_eq!(header.block, 7);
+        assert!(header.signed.is_empty() && header.hash.is_empty());
+        assert_eq!((header.ts, header.block), (0, 7));
     }
 }

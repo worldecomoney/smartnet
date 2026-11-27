@@ -1,5 +1,15 @@
 # Proposal to make some defaults for genesis json file keys so we can clean genesis.json file further and distinguish between legacy clique genesis and new calibri* genesis
 
+> **IMMUTABLE DESIGN RULING (operator, 2026-11-25) — do not reopen:**
+> - **Validators are taken from `validators.jsonl` ONLY.**
+> - **ChainID is taken from Genesis ONLY.**
+> - **Genesis is byte-exact import for legacy.**
+>
+> A calibri* genesis has no extraData signers by design. Validators are assigned by
+> consensus through a blockchain transaction with quorum approval; genesis only allocates
+> chainId and pre-funds wallets (that role moves to dedicated routines later). Any boot
+> check that requires a genesis-derived `VALIDATORS` row contradicts this ruling.
+
 
 - We support 2 types of genesis, clique (legacy) and calibri-lite (current). There's difference what each genesis must contain, and how it must be handled.
 - If genesis file miss protocol mention it meams it's calibri, all legacy clique must contain it.
@@ -27,7 +37,13 @@
 ## So, before we just eat calibri* same way as clique, now all what we want to change is to look at calibri* differenly, and apply different init protocol for it.. 
 and not touch / keep "normal" legacy current clique init
 
-!!! DO NOT CHANGE CURRENT LEGACY GENESIS OPERATIONS, KEEP IT AS IS, JUST ADJUST CALIBRI* NEW GENESIS OPERATIONS. EXTEND IT WITH PRE_FUND TXS, AND IGNORE VALIDATORS IN GENESIS 
+!!! DO NOT CHANGE CURRENT LEGACY GENESIS OPERATIONS, KEEP IT AS IS, JUST ADJUST CALIBRI* NEW GENESIS OPERATIONS. EXTEND IT WITH PRE_FUND TXS, AND IGNORE VALIDATORS IN GENESIS
+
+!!! WHY SEAL/MINER GENESIS IS ACCEPTED IN NEW VERSIONS OF CALIBRI GENESIS:
+- We are not Ethereum
+- Validators (what Eth called miner) live in validators.jsonl file and assigned by consensus with blockchain transaction in place by quorum of other validators.
+- ETH miners is hard to replace disable in case they compromized, smartchain provides faster way to deal with issues like this for PoA and for Calibri PoS+ new protocol will be outligned separately.
+- Genesis is needed merely to allocate chainID and pre-fund some wallets. Later this functionality will be also ommited and dedicated to other routines.
  
 ## TX records in calibri* genesis:
 

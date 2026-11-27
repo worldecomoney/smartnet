@@ -185,7 +185,8 @@ pub fn mesh_server(
 ) -> Arc<MeshServer> {
     let rpc = Arc::new(LocalRpc::new(http_mock_url(rpc_addr)));
     Arc::new(MeshServer::new(
-        peers_file,
+        peers_file.clone(),
+        peers_file.with_file_name("validators.jsonl"),
         seen,
         objects,
         rpc,
@@ -367,6 +368,14 @@ pub async fn spawn_ws_recorder_on(listener: TcpListener, identity: Identity) -> 
                             ))
                             .encode()
                             .expect("hello encodes");
+                            let _ = socket.send(WsMessage::Binary(reply.into())).await;
+                        }
+                        Message::ConfigHashPing { mainnet, validators } => {
+                            // Mock peer: echo the caller's digests so its bootstrap gate passes.
+                            // Real nodes answer with hashes computed from their own files.
+                            let reply = Message::ConfigHashPong { mainnet: *mainnet, validators: *validators }
+                                .encode()
+                                .expect("config hash encodes");
                             let _ = socket.send(WsMessage::Binary(reply.into())).await;
                         }
                         Message::Ping | Message::RumorTxPing { .. } | Message::RumorBlocksPing { .. } => {

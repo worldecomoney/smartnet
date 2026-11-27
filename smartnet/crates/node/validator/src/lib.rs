@@ -248,7 +248,9 @@ where
             canonical_probe_interval_ms: probe_interval_ms,
             canonical_probe_max_interval_ms: heartbeat_ms.max(probe_interval_ms),
             selection_caps: cfg.selection_caps,
-            txpool_val_max_txs: cfg.txpool_val_max_txs,
+            // The key lives in node-owned config, but this is the validator's own pick count:
+            // the node serves the full pool snapshot, and the validator caps what it processes.
+            txpool_val_max_txs: smartnet_node_core::txpool_policy::txpool_policy().val_max_txs,
             sealed_height,
             in_flight: std::sync::Arc::new(AtomicBool::new(false)),
         };
@@ -259,7 +261,7 @@ where
             chain_id,
             signer = %signer,
             heartbeat_ms,
-            txpool_val_max_txs = cfg.txpool_val_max_txs,
+            txpool_val_max_txs = smartnet_node_core::txpool_policy::txpool_policy().val_max_txs,
             config = %config_path.display(),
             "merged validator armed for the node heartbeat (one keystore = node ID + coinbase)"
         );

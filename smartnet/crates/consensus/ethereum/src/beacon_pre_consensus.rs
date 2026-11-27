@@ -8,9 +8,7 @@ use alloc::format;
 use super::EthBeaconConsensus;
 use calibri_lite_consensus::validate_pre_consensus_timestamp_against_parent;
 use core::fmt::Debug;
-use smartnet_chainspec::{
-    extra_data_validators, EthChainSpec, EthereumHardforks, SMARTNET_FIXED_GAS_PRICE_WEI,
-};
+use smartnet_chainspec::{extra_data_validators, EthChainSpec, EthereumHardforks};
 use smartnet_consensus::ConsensusError;
 
 impl<ChainSpec> EthBeaconConsensus<ChainSpec>
@@ -27,18 +25,10 @@ where
         let sealed_genesis = !extra_data_validators(genesis.extra_data.as_ref()).is_empty();
         let has_registry = !calibri_lite_consensus::registry::get_val_all().is_empty();
 
-        // Fee policy — unchanged trigger: only a SmartNet-sealed genesis carries the
-        // fixed-fee rule (it is a pricing rule for who BUILDS a transaction, not part
-        // of the acceptance gate).
-        if sealed_genesis &&
-            let Some(got) = header.base_fee_per_gas &&
-            got != SMARTNET_FIXED_GAS_PRICE_WEI
-        {
-            return Err(ConsensusError::SmartNetBaseFeeInvalid {
-                expected: SMARTNET_FIXED_GAS_PRICE_WEI,
-                got,
-            });
-        }
+        // Historical fee fields are never checked here: imported/synced legacy headers may
+        // carry any base fee (including none or zero) and are accepted as-is. The fixed price
+        // is enforced where it matters — the wallet quote and the current tx's admissibility.
+        // (The old `SmartNetBaseFeeInvalid` comparison rejected honest legacy history.)
 
         // THE validator gate (operator, 2026-11-19): the seal's signer must be the
         // SELECT chair for this slot — and `get_val_chair` only ever answers with a
@@ -81,9 +71,9 @@ where
         // Tier 0 sparse time: `header.timestamp > parent.timestamp`. No wall-clock future
         // drift cap in the interim model (removed with `pre_consensus_slot_drift_seconds`).
         //
-        // NOTE: there is deliberately **no maximum timestamp-gap check** yet — see
-        // `24H.md` at the repo root for the deferred rule (why it is not implemented,
-        // observed chain-gap history, and where it would go).
+        // NOTE: there is deliberately **no maximum timestamp-gap check** yet. The deferral
+        // is intentional; the Tier 0 rule only requires the child timestamp to exceed the
+        // parent's.
         validate_pre_consensus_timestamp_against_parent(
             parent.timestamp,
             header.timestamp,
@@ -127,40 +117,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_base_fee_other_than_protocol_constant() {
+    fn historical_base_fee_is_never_checked() {
         let consensus = consensus(sealed_spec());
 
-        // The doubled price observed on blocks 238-240 (fee double-count bug).
-        for got in [476_190_476_190u64, SMARTNET_FIXED_GAS_PRICE_WEI + 1, 1] {
-            let header = Header { base_fee_per_gas: Some(got), ..Default::default() };
-            let err = consensus
-                .validate_authored_header(&header, false)
-                .expect_err("non-constant base fee must be rejected");
-            assert!(
-                matches!(
-                    err,
-                    ConsensusError::SmartNetBaseFeeInvalid { got: g, .. } if g == got
-                ),
-                "expected SmartNetBaseFeeInvalid for {got}, got: {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn absent_or_fixed_base_fee_reaches_signer_stage() {
-        let consensus = consensus(sealed_spec());
-
-        // Absent (pre SmartNet-era) and exactly the constant both clear the fee gate; the
-        // header then proceeds to quorum/signer validation and fails there (empty genesis
-        // extra data → no signers) — never with a fee error.
-        for base_fee in [None, Some(SMARTNET_FIXED_GAS_PRICE_WEI)] {
+        // Imported/synced legacy headers carry whatever fee history they had — absent, zero,
+        // doubled, arbitrary — and none of it is a validation error. The unsigned header then
+        // fails at the signer stage, never at a fee rule.
+        for base_fee in [None, Some(0), Some(1), Some(476_190_476_190)] {
             let header = Header { base_fee_per_gas: base_fee, ..Default::default() };
             let err = consensus
                 .validate_authored_header(&header, false)
                 .expect_err("unsigned header cannot pass signer stage");
             assert!(
                 !matches!(err, ConsensusError::SmartNetBaseFeeInvalid { .. }),
-                "fee gate must pass through {base_fee:?}, got: {err:?}"
+                "historical fee {base_fee:?} must not be checked, got: {err:?}"
             );
         }
     }

@@ -735,6 +735,18 @@ pub enum RpcInvalidTransactionError {
         /// Minimum required priority fee.
         minimum_priority_fee: u128,
     },
+    /// A fresh native tx's fee sits outside the operator's txpool admission band.
+    #[error("tx fee {got} wei/gas outside txpool admission band {min}..={max} (TXPOOL_MARGIN={margin})")]
+    FeeOutsideTxpoolMargin {
+        /// The fee declared by the transaction (wei/gas).
+        got: u128,
+        /// Lowest accepted fee (wei/gas).
+        min: u128,
+        /// Highest accepted fee (wei/gas).
+        max: u128,
+        /// Configured `TXPOOL_MARGIN` multiplier (1..=5).
+        margin: u8,
+    },
     /// Any other error
     #[error("{0}")]
     Other(Box<dyn ToRpcError>),
@@ -756,7 +768,8 @@ impl RpcInvalidTransactionError {
             Self::NonceTooLow { .. } |
             Self::NonceTooHigh { .. } |
             Self::FeeCapTooLow |
-            Self::FeeCapVeryHigh => EthRpcErrorCode::InvalidInput.code(),
+            Self::FeeCapVeryHigh |
+            Self::FeeOutsideTxpoolMargin { .. } => EthRpcErrorCode::InvalidInput.code(),
             Self::Revert(_) => EthRpcErrorCode::ExecutionError.code(),
             _ => EthRpcErrorCode::TransactionRejected.code(),
         }

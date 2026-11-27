@@ -25,7 +25,7 @@ pub use rlp_decode::{into_block_raw, try_into_block_with_sidecar};
 pub use runtime_profile::{
     CALIBRI_LITE_RUNTIME_PROTOCOL_VERSION, ChildHeaderFields, ConsensusProfile,
     ExecutionCompatProfile, SMARTNET_FIXED_GAS_PRICE_WEI, SMARTNET_FIXED_TRANSFER_FEE_WEI,
-    SmartNetRuntimeProfile, TxCompatProfile,
+    SmartNetRuntimeProfile, TxCompatProfile, fixed_gas_price_wei, fixed_transfer_fee_wei,
 };
 pub use seal::{
     CalibriLiteSealError, calibri_lite_seal_hash, recover_calibri_lite_signer,

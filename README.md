@@ -5,6 +5,20 @@
 > Single-binary EVM/DeFi-compatible execution network. This client has been extensively modified and does not feature any Ethereum legacy, P2P or "Swiss-knife" tools. 
 > SmartNet primary objective is to facilitate the rapid deployment of fast, secure private EVM/DeFi compatible network.
 
+## Docs
+
+Start with the [doc index](doc/DOC-INDEX.md) for authority and freshness. The main durable pages are:
+
+- [Architecture](doc/ARCHITECTURE.md) — components, runtime flows, Reth-derived vs custom layers, removed-by-design list.
+- [Boot sequence](doc/BOOTSTRAP.md) — current startup order from keystore to heartbeat.
+- [Design decisions](doc/DESIGN-DECISIONS.md) — trade-offs, consequences, and must-not-restore markers.
+- [Storage engine](doc/STORAGE.md) — DB + FS split, RLP separation, recovery, and import footprint.
+- [Mesh payload protocol](doc/MESH-PAYLOAD-PROTOCOL.md) — CURRENT/OLD binary mesh wire spec.
+- [Security architecture](doc/SECURITY_ARCHITECTURE.md) — threat model, current protections, and explicit limitations.
+- [Compatibility matrix](doc/COMPATIBILITY.md) — evidence-backed feature/status matrix.
+- [Test results](doc/TEST-RESULTS.md) — dated run artifacts and what they do not prove.
+- [Roadmap](doc/ROADMAP.md) — implemented / under validation / planned.
+- [Changelog](doc/CHANGELOG.md) — dated history derived from git.
 
 ## ENV
 Developed and tested with Debian 13
@@ -34,7 +48,7 @@ Per-app (unified semantics — `clean` keeps the release/offline cache, `clear` 
 
 ```bash
 make -C smartnet build      # → bin/smartnet
-make -C smartnet clean      # bin/smartnet + smartnet/target/debug
+make -C smartnet clean      # bin/smartnet only (keeps the cargo cache)
 make -C smartnet clear      # bin/smartnet + all of smartnet/target
 make -C calibri-lite clean  # calibri-lite/target/debug only
 make -C calibri-lite clear  # all of calibri-lite/target
